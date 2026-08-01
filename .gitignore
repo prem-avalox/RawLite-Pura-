@@ -1,0 +1,29 @@
+# Android and Gradle build output
+.gradle/
+**/build/
+local.properties
+
+# IDE and operating-system metadata
+.idea/
+*.iml
+.DS_Store
+
+# Local Python tooling
+.venv/
+__pycache__/
+*.py[cod]
+
+# Signing material must never be committed
+*.jks
+*.keystore
+keystore.properties
+
+# Explicitly named local capture and validation output
+RawLite_*/
+RawLite_Test_*/
+captures/
+test-output/
+
+# Native build intermediates
+.cxx/
+externalNativeBuild/
