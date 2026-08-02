@@ -1,5 +1,6 @@
 package com.example.rawlite
 
+import android.graphics.Bitmap
 import java.nio.ByteBuffer
 
 internal object NativeTenBitConverter {
@@ -23,5 +24,26 @@ internal object NativeTenBitConverter {
         redGain: Float,
         blueGain: Float,
         exposureGain: Float
+    ): Long
+
+    external fun raw10ToArgbPreview(
+        raw: ByteBuffer,
+        rawOffset: Int,
+        rawLimit: Int,
+        rawRowStride: Int,
+        output: Bitmap,
+        sourceWidth: Int,
+        sourceHeight: Int,
+        sampleStep: Int,
+        colorFilterArrangement: Int,
+        blackLevel0: Int,
+        blackLevel1: Int,
+        blackLevel2: Int,
+        blackLevel3: Int,
+        whiteLevel: Int,
+        redGain: Float,
+        greenEvenGain: Float,
+        greenOddGain: Float,
+        blueGain: Float
     ): Long
 }

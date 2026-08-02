@@ -442,7 +442,7 @@ class ReviewActivity : Activity() {
                 }
             }
             "CinemaDNG" -> DngSequenceClip.open(summary.directory).decodeFrame(0, 320, 240)
-            else -> Raw10Clip.open(summary.directory).decodeFrame(0, 320, 240)
+            else -> Raw10Clip.open(summary.directory).use { it.decodeFrame(0, 320, 240) }
         }
     }
 
@@ -1128,6 +1128,7 @@ class ReviewActivity : Activity() {
         playWhenReady = false
         playbackKind = PlaybackKind.NONE
         activeSummary = null
+        activeRawClip?.close()
         activeRawClip = null
         activeDngClip = null
         activeFrameIndex = 0

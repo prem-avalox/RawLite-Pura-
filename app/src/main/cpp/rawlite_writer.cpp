@@ -1,5 +1,6 @@
 #include <jni.h>
 
+#include <android/bitmap.h>
 #include <android/log.h>
 #include <algorithm>
 #include <array>
@@ -615,6 +616,193 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
         std::fill(uv_plane + start, uv_plane + end, neutral_chroma);
     }
 
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count();
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_example_rawlite_NativeTenBitConverter_raw10ToArgbPreview(
+    JNIEnv* env,
+    jobject,
+    jobject raw_buffer,
+    jint raw_offset,
+    jint raw_limit,
+    jint raw_row_stride,
+    jobject output_bitmap,
+    jint source_width,
+    jint source_height,
+    jint sample_step,
+    jint cfa,
+    jint black_level_0,
+    jint black_level_1,
+    jint black_level_2,
+    jint black_level_3,
+    jint white_level,
+    jfloat red_gain,
+    jfloat green_even_gain,
+    jfloat green_odd_gain,
+    jfloat blue_gain
+) {
+    const auto started = std::chrono::steady_clock::now();
+    auto* raw_base = static_cast<uint8_t*>(env->GetDirectBufferAddress(raw_buffer));
+    const jlong raw_capacity = env->GetDirectBufferCapacity(raw_buffer);
+    AndroidBitmapInfo bitmap_info{};
+    if (raw_base == nullptr || raw_capacity < 0 || output_bitmap == nullptr ||
+        source_width <= 0 || source_height <= 0 || (source_width & 1) != 0 ||
+        (source_height & 1) != 0 || sample_step <= 0 || cfa < 0 || cfa > 3 ||
+        AndroidBitmap_getInfo(env, output_bitmap, &bitmap_info) != ANDROID_BITMAP_RESULT_SUCCESS ||
+        bitmap_info.format != ANDROID_BITMAP_FORMAT_RGBA_8888) {
+        return -EINVAL;
+    }
+
+    const int packed_row_bytes = (source_width * 10 + 7) / 8;
+    const int output_width = source_width / 2 / sample_step;
+    const int output_height = source_height / 2 / sample_step;
+    const int64_t required_raw = static_cast<int64_t>(raw_offset) +
+        static_cast<int64_t>(source_height - 1) * raw_row_stride + packed_row_bytes;
+    const std::array<int, 4> black_levels = {
+        black_level_0,
+        black_level_1,
+        black_level_2,
+        black_level_3,
+    };
+    if (raw_offset < 0 || raw_limit > raw_capacity || raw_row_stride < packed_row_bytes ||
+        required_raw > raw_limit || output_width <= 0 || output_height <= 0 ||
+        bitmap_info.width != static_cast<uint32_t>(output_width) ||
+        bitmap_info.height != static_cast<uint32_t>(output_height) ||
+        std::any_of(black_levels.begin(), black_levels.end(), [white_level](int black) {
+            return black < 0 || black >= white_level;
+        })) {
+        return -EINVAL;
+    }
+
+    void* bitmap_pixels = nullptr;
+    if (AndroidBitmap_lockPixels(env, output_bitmap, &bitmap_pixels) !=
+        ANDROID_BITMAP_RESULT_SUCCESS) {
+        return -EIO;
+    }
+
+    static constexpr int kCfaColors[4][4] = {
+        {0, 1, 1, 2},  // RGGB
+        {1, 0, 2, 1},  // GRBG
+        {1, 2, 0, 1},  // GBRG
+        {2, 1, 1, 0},  // BGGR
+    };
+    const auto raw10_at = [raw_base, raw_offset, raw_row_stride](int x, int y) -> int {
+        const uint8_t* row = raw_base + raw_offset + static_cast<size_t>(y) * raw_row_stride;
+        const uint8_t* packed = row + (x >> 2) * 5;
+        const int lane = x & 3;
+        return (static_cast<int>(packed[lane]) << 2) |
+            ((packed[4] >> (lane * 2)) & 0x03);
+    };
+    struct Rgb {
+        float red;
+        float green;
+        float blue;
+    };
+    const auto sample_cell = [
+        &raw10_at,
+        &black_levels,
+        white_level,
+        cfa,
+        sample_step,
+        source_width,
+        source_height,
+        red_gain,
+        green_even_gain,
+        green_odd_gain,
+        blue_gain
+    ](int output_x, int output_y) -> Rgb {
+        const int source_x = std::min(output_x * sample_step * 2, source_width - 2);
+        const int source_y = std::min(output_y * sample_step * 2, source_height - 2);
+        Rgb result{0.0f, 0.0f, 0.0f};
+        float green_sum = 0.0f;
+        int green_count = 0;
+        for (int site = 0; site < 4; ++site) {
+            const int x = source_x + (site & 1);
+            const int y = source_y + (site >> 1);
+            const int black = black_levels[site];
+            const float normalized = std::max(raw10_at(x, y) - black, 0) /
+                static_cast<float>(white_level - black);
+            switch (kCfaColors[cfa][site]) {
+                case 0:
+                    result.red = normalized * red_gain;
+                    break;
+                case 2:
+                    result.blue = normalized * blue_gain;
+                    break;
+                case 1:
+                default:
+                    green_sum += normalized *
+                        (green_count == 0 ? green_even_gain : green_odd_gain);
+                    ++green_count;
+                    break;
+            }
+        }
+        result.green = green_count > 0 ? green_sum / green_count : 0.0f;
+        return result;
+    };
+
+    const size_t pixel_count = static_cast<size_t>(output_width) * output_height;
+    std::vector<float> highlights;
+    highlights.reserve((pixel_count + 15) / 16);
+    for (size_t pixel = 0; pixel < pixel_count; pixel += 16) {
+        const int output_y = static_cast<int>(pixel / output_width);
+        const int output_x = static_cast<int>(pixel % output_width);
+        const Rgb rgb = sample_cell(output_x, output_y);
+        highlights.push_back(
+            rgb.red * 0.2126f + rgb.green * 0.7152f + rgb.blue * 0.0722f
+        );
+    }
+    std::sort(highlights.begin(), highlights.end());
+    const size_t percentile_index = static_cast<size_t>(
+        static_cast<float>(highlights.size() - 1) * 0.985f
+    );
+    const float percentile = std::max(highlights[percentile_index], 0.001f);
+    const float display_gain = std::clamp(0.90f / percentile, 0.25f, 8.0f);
+
+    static std::array<uint8_t, 4096> srgb_lut{};
+    static std::once_flag srgb_lut_once;
+    std::call_once(srgb_lut_once, [] {
+        for (size_t index = 0; index < srgb_lut.size(); ++index) {
+            const float linear = static_cast<float>(index) / (srgb_lut.size() - 1);
+            const float srgb = linear <= 0.0031308f
+                ? linear * 12.92f
+                : 1.055f * std::pow(linear, 1.0f / 2.4f) - 0.055f;
+            srgb_lut[index] = static_cast<uint8_t>(
+                std::clamp(std::lround(srgb * 255.0f), 0L, 255L)
+            );
+        }
+    });
+    const auto to_srgb = [](float value) -> uint8_t {
+        const float bounded = std::clamp(value, 0.0f, 1.0f);
+        const size_t index = static_cast<size_t>(
+            std::lround(bounded * static_cast<float>(srgb_lut.size() - 1))
+        );
+        return srgb_lut[index];
+    };
+
+    auto* output_base = static_cast<uint8_t*>(bitmap_pixels);
+    for (int output_y = 0; output_y < output_height; ++output_y) {
+        uint8_t* output_row = output_base + static_cast<size_t>(output_y) * bitmap_info.stride;
+        for (int output_x = 0; output_x < output_width; ++output_x) {
+            Rgb rgb = sample_cell(output_x, output_y);
+            rgb.red *= display_gain;
+            rgb.green *= display_gain;
+            rgb.blue *= display_gain;
+            const float luminance =
+                rgb.red * 0.2126f + rgb.green * 0.7152f + rgb.blue * 0.0722f;
+            rgb.red = luminance + (rgb.red - luminance) * 1.12f;
+            rgb.green = luminance + (rgb.green - luminance) * 1.12f;
+            rgb.blue = luminance + (rgb.blue - luminance) * 1.12f;
+            uint8_t* pixel = output_row + static_cast<size_t>(output_x) * 4;
+            pixel[0] = to_srgb(rgb.red);
+            pixel[1] = to_srgb(rgb.green);
+            pixel[2] = to_srgb(rgb.blue);
+            pixel[3] = 255;
+        }
+    }
+    AndroidBitmap_unlockPixels(env, output_bitmap);
     const auto elapsed = std::chrono::steady_clock::now() - started;
     return std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count();
 }

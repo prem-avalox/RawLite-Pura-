@@ -6,11 +6,58 @@ import unittest
 import wave
 from pathlib import Path
 
+import numpy as np
+import tifffile
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import rawlite_to_dng  # noqa: E402
 
 
 class RawLiteToDngAudioTest(unittest.TestCase):
+    def test_dng_writer_uses_resolve_compatible_baseline_tags(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "frame_000000.dng"
+            mosaic = np.arange(32, dtype=np.uint16).reshape(4, 8)
+            identity = [
+                [1, 1], [0, 1], [0, 1],
+                [0, 1], [1, 1], [0, 1],
+                [0, 1], [0, 1], [1, 1],
+            ]
+            metadata = {
+                "camera": "Principal · 6.8 mm",
+                "camera_id": "2",
+                "width": 8,
+                "height": 4,
+                "cfa": "GBRG",
+                "black_level": [64, 64, 64, 64],
+                "white_level": 1023,
+                "color_matrix_1": identity,
+                "color_matrix_2": identity,
+                "reference_illuminant_1": 17,
+                "reference_illuminant_2": 21,
+            }
+            row = {
+                "exposure_ns": "10000000",
+                "iso": "100",
+                "wb_r": "2.0",
+                "wb_ge": "1.0",
+                "wb_go": "1.0",
+                "wb_b": "1.5",
+            }
+
+            rawlite_to_dng.write_dng(destination, mosaic, metadata, row)
+
+            with tifffile.TiffFile(destination) as dng:
+                page = dng.pages[0]
+                self.assertEqual(0, page.tags[254].value)
+                self.assertEqual("Google", page.tags[271].value)
+                self.assertEqual("Pixel 6", page.tags[272].value)
+                self.assertEqual(1, page.tags[274].value)
+                self.assertEqual(bytes((1, 4, 0, 0)), page.tags[50706].value)
+                self.assertEqual(bytes((1, 1, 0, 0)), page.tags[50707].value)
+                self.assertEqual(1, page.tags[278].value)
+                np.testing.assert_array_equal(mosaic, page.asarray())
+
     def test_audio_alignment_does_not_modify_source_take(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

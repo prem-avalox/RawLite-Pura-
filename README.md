@@ -30,8 +30,9 @@ MVP de captura Bayer RAW para Google Pixel 6, construido sobre Camera2.
 - La grabación se detiene de forma ordenada al pasar a segundo plano, alcanzar
   estado térmico crítico o quedar menos de 512 MB libres.
 - El visor interno enumera PURE 10, RAW10 y CinemaDNG con miniaturas. PURE 10
-  usa decodificación HEVC Main10 por hardware; RAW10 y CinemaDNG se reproducen
-  como secuencias temporizadas que conservan los huecos de captura. Incluye
+  usa decodificación HEVC Main10 por hardware; RAW10 usa revelado C++ nativo y
+  CinemaDNG usa el decodificador de Android. Ambos se reproducen como secuencias
+  temporizadas que conservan los huecos de captura. Incluye
   búsqueda, pausa, avance cuadro a cuadro, audio WAV sincronizado, mute y
   borrado con confirmación. No añade proxies ni trabajo durante la grabación.
 - Audio PCM a 48 kHz en `audio.wav`: intenta estéreo de 24 bits y baja de forma
@@ -117,7 +118,7 @@ color necesarias para construir los CinemaDNG.
 
 ## Compilación
 
-La versión 0.30 fija Android NDK `27.2.12479018` y CMake `3.22.1`. El binario
+La versión 0.31 fija Android NDK `27.2.12479018` y CMake `3.22.1`. El binario
 arm64 está enlazado con alineación ELF de 16 KB para Android 15 y posteriores.
 
 Todas las tareas Android se ejecutan con JDK 21:

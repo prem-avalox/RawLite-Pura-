@@ -362,14 +362,25 @@ def dng_tags(
     scale = max(neutral)
     neutral = [rational(value / scale) for value in neutral]
     camera_name = str(metadata["camera"]).encode("ascii", "replace").decode("ascii")
+    is_pixel_6 = (
+        str(metadata.get("camera_id")) in {"0", "2"}
+        and str(metadata.get("camera", "")).startswith("Principal")
+        and metadata.get("cfa") == "GBRG"
+    )
+    camera_make = "Google" if is_pixel_6 else "RawLite"
+    camera_model = "Pixel 6" if is_pixel_6 else camera_name
 
     tags: list[tuple[int, str, int, object, bool]] = [
+        (254, "I", 1, 0, False),
+        (271, "s", 0, camera_make, False),
+        (272, "s", 0, camera_model, False),
+        (274, "H", 1, 1, False),
         (33421, "H", 2, (2, 2), False),
         (33422, "B", 4, CFA_PATTERNS[metadata["cfa"]], False),
         (33434, "2I", 1, rational(int(row["exposure_ns"]) / 1e9), False),
         (34855, "H", 1, int(row["iso"]), False),
         (50706, "B", 4, (1, 4, 0, 0), False),
-        (50707, "B", 4, (1, 3, 0, 0), False),
+        (50707, "B", 4, (1, 1, 0, 0), False),
         (50708, "s", 0, f"RawLite {camera_name}", False),
         (50710, "B", 3, (0, 1, 2), False),
         (50711, "H", 1, 1, False),
@@ -409,6 +420,27 @@ def dng_tags(
         if len(values) == 9:
             tags.append((tag, "2i", 9, matrix_tag(values), False))
     return tags
+
+
+def write_dng(
+    destination: Path,
+    mosaic: np.ndarray,
+    metadata: dict,
+    row: dict[str, str],
+) -> None:
+    """Write a conservative, uncompressed DNG accepted as CinemaDNG by Resolve."""
+    tifffile.imwrite(
+        destination,
+        mosaic,
+        photometric="cfa",
+        compression=None,
+        metadata=None,
+        software="RawLite converter",
+        rowsperstrip=1,
+        resolution=(72, 72),
+        resolutionunit="INCH",
+        extratags=dng_tags(metadata, row),
+    )
 
 
 def main() -> None:
@@ -474,15 +506,7 @@ def main() -> None:
             destination.unlink()
         start = stream_index * frame_bytes
         mosaic = unpack_raw10(raw[start : start + frame_bytes], width, height)
-        tifffile.imwrite(
-            destination,
-            mosaic,
-            photometric="cfa",
-            compression=None,
-            metadata=None,
-            software="RawLite converter",
-            extratags=dng_tags(metadata, row),
-        )
+        write_dng(destination, mosaic, metadata, row)
         previous_destination = destination
         last_timeline_frame = frame_id
         print(f"\r{stream_index - args.start + 1}/{end - args.start}", end="", flush=True)

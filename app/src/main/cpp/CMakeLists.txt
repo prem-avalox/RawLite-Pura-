@@ -11,4 +11,4 @@ target_link_options(
     "-Wl,-z,max-page-size=16384"
     "-Wl,-z,common-page-size=16384"
 )
-target_link_libraries(rawlite_writer PRIVATE log)
+target_link_libraries(rawlite_writer PRIVATE log jnigraphics)
