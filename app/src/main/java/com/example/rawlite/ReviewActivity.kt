@@ -43,6 +43,7 @@ import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 class ReviewActivity : Activity() {
@@ -749,8 +750,11 @@ class ReviewActivity : Activity() {
 
         val audio = audioPlayer
         if (audio != null) {
-            val target = audioTargetMs(audio, positionMs)
-            audio.seekTo(target)
+            val expected = audioTargetMs(audio, positionMs)
+            val target = audioSeekTargetMs(audio, positionMs)
+            if (abs(audio.currentPosition - expected) > AUDIO_RESUME_TOLERANCE_MS) {
+                audio.seekTo(target)
+            }
             audio.setVolume(if (muted) 0f else 1f)
             if (target < audio.duration - 10) {
                 audio.play()
@@ -784,8 +788,8 @@ class ReviewActivity : Activity() {
     private fun pausePlayback() {
         playWhenReady = false
         playing = false
-        runCatching { if (videoPlayer?.isPlaying == true) videoPlayer?.pause() }
         runCatching { audioPlayer?.pause() }
+        runCatching { if (videoPlayer?.isPlaying == true) videoPlayer?.pause() }
         mainHandler.removeCallbacks(progressTick)
         playButton?.setImageResource(R.drawable.ic_transport_play)
         playButton?.contentDescription = "Reproducir"
@@ -997,7 +1001,7 @@ class ReviewActivity : Activity() {
 
     private fun seekAudio(videoPositionMs: Int) {
         val player = audioPlayer ?: return
-        player.seekTo(audioTargetMs(player, videoPositionMs))
+        player.seekTo(audioSeekTargetMs(player, videoPositionMs))
     }
 
     private fun keepAudioSynchronized(videoPositionMs: Int) {
@@ -1018,6 +1022,20 @@ class ReviewActivity : Activity() {
 
     private fun audioTargetMs(player: PcmWavPlayer, videoPositionMs: Int): Int {
         return CaptureMath.audioTargetMs(videoPositionMs, audioOffsetMs, player.duration)
+    }
+
+    private fun audioSeekTargetMs(player: PcmWavPlayer, videoPositionMs: Int): Int {
+        val outputLead = if (playbackKind == PlaybackKind.PURE10) {
+            PURE10_AUDIO_OUTPUT_LEAD_MS
+        } else {
+            0
+        }
+        return CaptureMath.audioTargetMs(
+            videoPositionMs,
+            audioOffsetMs,
+            player.duration,
+            outputLead
+        )
     }
 
     private fun readAudioOffsetMs(directory: File): Int {
@@ -1323,6 +1341,8 @@ class ReviewActivity : Activity() {
         private const val PROGRESS_INTERVAL_MS = 33L
         private const val AUDIO_DRIFT_LOG_INTERVAL_MS = 1_000L
         private const val AUDIO_END_TOLERANCE_MS = 5
+        private const val AUDIO_RESUME_TOLERANCE_MS = 60
+        private const val PURE10_AUDIO_OUTPUT_LEAD_MS = 45
         private const val VIDEO_CLOCK_BACKWARD_TOLERANCE_MS = 250
         private const val AUDIO_SYNC_TAG = "RawLiteAudioSync"
         private const val CONTENT_TRANSITION_MS = 240L

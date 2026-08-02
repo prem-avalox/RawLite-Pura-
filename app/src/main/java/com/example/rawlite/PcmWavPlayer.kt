@@ -37,7 +37,7 @@ internal class PcmWavPlayer private constructor(
     @Volatile private var playing = false
     private var baseFrame = 0L
     private var playbackHeadOrigin = 0L
-    private var nextFileOffset = info.dataOffset
+    @Volatile private var nextFileOffset = info.dataOffset
 
     val duration: Int
         get() = info.durationMs
@@ -82,11 +82,9 @@ internal class PcmWavPlayer private constructor(
     @Synchronized
     fun pause() {
         if (released) return
-        val position = currentPosition
-        generation.incrementAndGet()
         playing = false
         runCatching { track.pause() }
-        prepareAt(position)
+        generation.incrementAndGet()
     }
 
     @Synchronized
@@ -137,6 +135,7 @@ internal class PcmWavPlayer private constructor(
     private fun stream(activeGeneration: Int, startOffset: Long) {
         val end = info.dataOffset + info.dataBytes
         val buffer = ByteArray(bufferBytes)
+        var writtenFileOffset = startOffset
         RandomAccessFile(file, "r").use { input ->
             input.seek(startOffset.coerceAtMost(end))
             while (!released && playing && generation.get() == activeGeneration &&
@@ -154,6 +153,10 @@ internal class PcmWavPlayer private constructor(
                     )
                     if (written > 0) {
                         offset += written
+                        writtenFileOffset += written
+                        if (generation.get() == activeGeneration) {
+                            nextFileOffset = writtenFileOffset
+                        }
                     } else {
                         Thread.sleep(STREAM_RETRY_MS)
                     }

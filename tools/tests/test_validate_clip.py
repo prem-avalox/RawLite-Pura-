@@ -11,6 +11,62 @@ import validate_clip  # noqa: E402
 
 
 class ValidateClipTest(unittest.TestCase):
+    def test_audio_coverage_accepts_a_complete_trailing_pcm_block(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            sample_zero = 1_000_000_000
+            camera_first = 1_100_000_000
+            camera_last = 2_058_333_333
+            wav_frames = 60_000
+            audio_end = sample_zero + round(wav_frames * 1_000_000_000 / 48_000)
+            self.write_wav(directory / "audio.wav", wav_frames)
+            self.write_json(directory / "audio.json", {
+                "file": "audio.wav", "sample_rate": 48_000, "channels": 2,
+                "bits_per_sample": 24, "frames": wav_frames,
+            })
+            self.write_json(directory / "sync.json", {
+                "finalized": True,
+                "camera_first_timestamp_ns": camera_first,
+                "camera_last_timestamp_ns": camera_last,
+                "audio_sample_zero_timestamp_ns": sample_zero,
+                "audio_end_timestamp_ns": audio_end,
+                "camera_start_minus_audio_start_ns": camera_first - sample_zero,
+            })
+            report = validate_clip.Report(directory)
+
+            validate_clip.validate_audio(directory, {"audio_enabled": True}, 24, report)
+
+            self.assertEqual([], report.errors)
+            self.assertEqual([], report.warnings)
+            self.assertTrue(any("Cola A/V" in item for item in report.checks))
+
+    def test_audio_coverage_warns_when_stop_discards_the_pcm_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            sample_zero = 1_000_000_000
+            camera_first = 1_100_000_000
+            camera_last = 2_058_333_333
+            wav_frames = 48_000
+            self.write_wav(directory / "audio.wav", wav_frames)
+            self.write_json(directory / "audio.json", {
+                "file": "audio.wav", "sample_rate": 48_000, "channels": 2,
+                "bits_per_sample": 24, "frames": wav_frames,
+            })
+            self.write_json(directory / "sync.json", {
+                "finalized": True,
+                "camera_first_timestamp_ns": camera_first,
+                "camera_last_timestamp_ns": camera_last,
+                "audio_sample_zero_timestamp_ns": sample_zero,
+                "camera_start_minus_audio_start_ns": camera_first - sample_zero,
+            })
+            report = validate_clip.Report(directory)
+
+            validate_clip.validate_audio(directory, {"audio_enabled": True}, 24, report)
+
+            self.assertEqual([], report.errors)
+            self.assertEqual(1, len(report.warnings))
+            self.assertIn("audio termina", report.warnings[0])
+
     def test_converted_dng_checks_timeline_and_aligned_audio(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)

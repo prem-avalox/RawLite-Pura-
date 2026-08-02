@@ -27,6 +27,8 @@ internal data class AudioCaptureSummary(
     val frames: Long,
     val dataBytes: Long,
     val sampleZeroBoottimeNs: Long,
+    val stopRequestedBoottimeNs: Long,
+    val stoppedBoottimeNs: Long,
     val finalized: Boolean,
     val error: String?
 )
@@ -49,6 +51,10 @@ internal class PcmAudioRecorder private constructor(
     private var dataBytes = 0L
     @Volatile
     private var sampleZeroBoottimeNs = 0L
+    @Volatile
+    private var stopRequestedBoottimeNs = 0L
+    @Volatile
+    private var stoppedBoottimeNs = 0L
     @Volatile
     private var terminalError: String? = null
 
@@ -79,6 +85,10 @@ internal class PcmAudioRecorder private constructor(
     }
 
     fun stop(): AudioCaptureSummary {
+        stopRequestedBoottimeNs = SystemClock.elapsedRealtimeNanos()
+        // Keep reading until the WAV timeline reaches the stop request. This
+        // covers both an in-flight block and a request arriving between reads.
+        runCatching { worker?.join(GRACEFUL_DRAIN_TIMEOUT_MS) }
         running.set(false)
         runCatching {
             if (audioRecord.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
@@ -90,12 +100,11 @@ internal class PcmAudioRecorder private constructor(
             terminalError = terminalError ?: "Timeout finalizando audio"
         }
         runCatching { audioRecord.release() }
-        val stoppedNs = SystemClock.elapsedRealtimeNanos()
+        stoppedBoottimeNs = SystemClock.elapsedRealtimeNanos()
         val finalized = finalizeWaveHeader()
         writeMetadata(
             status = if (finalized) "closed" else "incomplete",
-            finalized = finalized,
-            stoppedNs = stoppedNs
+            finalized = finalized
         )
         return summary(finalized)
     }
@@ -138,6 +147,11 @@ internal class PcmAudioRecorder private constructor(
                     buffer.limit(read)
                     while (buffer.hasRemaining()) channel.write(buffer)
                     dataBytes += read
+                    if (stopRequestedBoottimeNs > 0L &&
+                        estimatedAudioEndBoottimeNs() >= stopRequestedBoottimeNs
+                    ) {
+                        running.set(false)
+                    }
                 }
                 output.fd.sync()
             } catch (error: Throwable) {
@@ -214,7 +228,13 @@ internal class PcmAudioRecorder private constructor(
             .array()
     }
 
-    private fun writeMetadata(status: String, finalized: Boolean, stoppedNs: Long) {
+    private fun writeMetadata(status: String, finalized: Boolean, stoppedNs: Long = 0L) {
+        if (stoppedNs > 0L) stoppedBoottimeNs = stoppedNs
+        val audioEndNs = if (sampleZeroBoottimeNs > 0L && sampleRate > 0) {
+            sampleZeroBoottimeNs + dataBytes / bytesPerFrame() * 1_000_000_000L / sampleRate
+        } else {
+            0L
+        }
         val metadata = JSONObject().apply {
             put("format", "wav-pcm")
             put("status", status)
@@ -225,7 +245,9 @@ internal class PcmAudioRecorder private constructor(
             put("source", sourceName)
             put("clock", "CLOCK_BOOTTIME")
             put("sample_zero_boottime_ns", sampleZeroBoottimeNs)
-            put("stopped_boottime_ns", stoppedNs)
+            put("audio_end_boottime_ns", audioEndNs)
+            put("stop_requested_boottime_ns", stopRequestedBoottimeNs)
+            put("stopped_boottime_ns", stoppedBoottimeNs)
             put("frames", dataBytes / bytesPerFrame())
             put("data_bytes", dataBytes)
             put("finalized", finalized)
@@ -236,6 +258,11 @@ internal class PcmAudioRecorder private constructor(
 
     private fun bytesPerFrame(): Int = channels * bitsPerSample / 8
 
+    private fun estimatedAudioEndBoottimeNs(): Long {
+        if (sampleZeroBoottimeNs <= 0L || sampleRate <= 0) return 0L
+        return sampleZeroBoottimeNs + dataBytes / bytesPerFrame() * 1_000_000_000L / sampleRate
+    }
+
     private fun summary(finalized: Boolean) = AudioCaptureSummary(
         file = wavFile,
         sampleRate = sampleRate,
@@ -245,6 +272,8 @@ internal class PcmAudioRecorder private constructor(
         frames = dataBytes / bytesPerFrame(),
         dataBytes = dataBytes,
         sampleZeroBoottimeNs = sampleZeroBoottimeNs,
+        stopRequestedBoottimeNs = stopRequestedBoottimeNs,
+        stoppedBoottimeNs = stoppedBoottimeNs,
         finalized = finalized,
         error = terminalError
     )
@@ -254,6 +283,7 @@ internal class PcmAudioRecorder private constructor(
         const val AUDIO_METADATA_FILE = "audio.json"
         private const val SAMPLE_RATE = 48_000
         private const val WAVE_HEADER_BYTES = 44
+        private const val GRACEFUL_DRAIN_TIMEOUT_MS = 500L
         private const val STOP_TIMEOUT_MS = 2_000L
         private const val LEVEL_INTERVAL_NS = 100_000_000L
 

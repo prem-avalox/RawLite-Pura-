@@ -82,4 +82,10 @@ class CaptureMathTest {
         assertEquals(0, CaptureMath.audioTargetMs(10, -25, 1_000))
         assertEquals(1_000, CaptureMath.audioTargetMs(990, 25, 1_000))
     }
+
+    @Test
+    fun audioTarget_compensatesAStableOutputLeadWithoutChangingMetadata() {
+        assertEquals(80, CaptureMath.audioTargetMs(0, 125, 1_000, 45))
+        assertEquals(1_000, CaptureMath.audioTargetMs(990, 125, 1_000, 45))
+    }
 }

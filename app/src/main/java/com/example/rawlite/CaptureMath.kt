@@ -71,8 +71,13 @@ internal object CaptureMath {
         return ((timelineFrame - firstTimelineFrame).coerceAtLeast(0) * 1_000L / fps).toInt()
     }
 
-    fun audioTargetMs(videoPositionMs: Int, audioOffsetMs: Int, audioDurationMs: Int): Int {
-        return (videoPositionMs.toLong() + audioOffsetMs)
+    fun audioTargetMs(
+        videoPositionMs: Int,
+        audioOffsetMs: Int,
+        audioDurationMs: Int,
+        outputLeadCompensationMs: Int = 0
+    ): Int {
+        return (videoPositionMs.toLong() + audioOffsetMs - outputLeadCompensationMs)
             .coerceIn(0L, audioDurationMs.coerceAtLeast(0).toLong())
             .toInt()
     }

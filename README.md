@@ -39,7 +39,12 @@ MVP de captura Bayer RAW para Google Pixel 6, construido sobre Camera2.
   explícita a mono o 16 bits si el HAL de audio no admite la combinación. Usa
   `UNPROCESSED` cuando Android lo declara disponible y `CAMCORDER` como fallback.
 - Cámara y audio se sincronizan con `CLOCK_BOOTTIME`. `sync.json` conserva el
-  offset exacto entre la primera imagen RAW aceptada y la muestra cero del WAV.
+  offset exacto entre la primera imagen RAW aceptada y la muestra cero del WAV,
+  además de los timestamps finales para auditar la cobertura completa. Al
+  detener, la lectura PCM en curso termina antes de cerrar `AudioRecord`, evitando
+  perder hasta 200 ms al final de la toma.
+- El reproductor PCM conserva la cola de `AudioTrack` al pausar y reanudar, y
+  mantiene un único hilo de streaming para evitar repeticiones y cortes.
 - El medidor de audio indica señal y clipping durante REC. El micrófono se puede
   desactivar antes de iniciar una toma.
 - Zebras, false color, focus peaking e histograma permanecen en el código, pero
@@ -118,7 +123,7 @@ color necesarias para construir los CinemaDNG.
 
 ## Compilación
 
-La versión 0.31 fija Android NDK `27.2.12479018` y CMake `3.22.1`. El binario
+La versión 0.32 fija Android NDK `27.2.12479018` y CMake `3.22.1`. El binario
 arm64 está enlazado con alineación ELF de 16 KB para Android 15 y posteriores.
 
 Todas las tareas Android se ejecutan con JDK 21:

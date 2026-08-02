@@ -104,16 +104,39 @@ def validate_audio(directory: Path, metadata: dict, fps: int, report: Report) ->
         first = sync.get("camera_first_timestamp_ns", 0)
         last = sync.get("camera_last_timestamp_ns", 0)
         if isinstance(first, int) and isinstance(last, int) and last > first and wav_rate > 0:
-            camera_seconds = (last - first) / 1e9
-            offset_seconds = max(offset_ns or 0, 0) / 1e9
-            available_audio = wav_frames / wav_rate - offset_seconds
-            delta_ms = (available_audio - camera_seconds) * 1_000
+            sample_zero = sync.get("audio_sample_zero_timestamp_ns", 0)
+            calculated_audio_end = (
+                sample_zero + round(wav_frames * 1_000_000_000 / wav_rate)
+                if isinstance(sample_zero, int) and sample_zero > 0
+                else 0
+            )
+            recorded_audio_end = sync.get("audio_end_timestamp_ns")
+            if isinstance(recorded_audio_end, int) and calculated_audio_end > 0:
+                report.check(
+                    abs(recorded_audio_end - calculated_audio_end) <= 1_000_000_000 / wav_rate,
+                    "Timestamp final de audio coincide con el WAV",
+                    "Timestamp final de audio no coincide con la duración del WAV",
+                )
+            nominal_frame_ns = 1_000_000_000 / max(fps, 1)
+            expected_camera_end = last + nominal_frame_ns
+            if calculated_audio_end > 0:
+                delta_ms = (calculated_audio_end - expected_camera_end) / 1_000_000
+            else:
+                camera_seconds = (last - first) / 1e9 + 1 / max(fps, 1)
+                available_audio = wav_frames / wav_rate - (offset_ns or 0) / 1e9
+                delta_ms = (available_audio - camera_seconds) * 1_000
             limit_ms = 1_000 / max(fps, 1)
-            message = f"Cobertura A/V delta={delta_ms:+.3f} ms"
-            if abs(delta_ms) <= limit_ms:
+            message = f"Cola A/V después del último frame={delta_ms:+.3f} ms"
+            if delta_ms >= -limit_ms:
                 report.checks.append(message)
             else:
-                report.warnings.append(message + f" (más de un frame: {limit_ms:.3f} ms)")
+                report.warnings.append(
+                    message + f" (el audio termina más de un frame antes: {limit_ms:.3f} ms)"
+                )
+            if isinstance(offset_ns, int) and offset_ns < -nominal_frame_ns:
+                report.warnings.append(
+                    f"El audio comienza {-offset_ns / 1e6:.3f} ms después del video"
+                )
 
 
 def validate_raw10(directory: Path, metadata: dict, report: Report) -> None:

@@ -2577,6 +2577,11 @@ class MainActivity : Activity() {
             ?.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE)
             ?: CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_UNKNOWN
         val cameraStart = firstSensorTimestampNs
+        val audioEnd = if (audio.sampleZeroBoottimeNs > 0L && audio.sampleRate > 0) {
+            audio.sampleZeroBoottimeNs + audio.frames * 1_000_000_000L / audio.sampleRate
+        } else {
+            0L
+        }
         val offset = if (timestampSource == CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME &&
             cameraStart > 0L && audio.sampleZeroBoottimeNs > 0L
         ) {
@@ -2593,7 +2598,16 @@ class MainActivity : Activity() {
             put("camera_first_timestamp_ns", cameraStart)
             put("camera_last_timestamp_ns", lastSensorTimestampNs)
             put("audio_sample_zero_timestamp_ns", audio.sampleZeroBoottimeNs)
+            put("audio_end_timestamp_ns", audioEnd)
+            put("audio_stop_requested_timestamp_ns", audio.stopRequestedBoottimeNs)
+            put("audio_stopped_timestamp_ns", audio.stoppedBoottimeNs)
             put("camera_start_minus_audio_start_ns", offset)
+            put("audio_end_minus_camera_last_ns", if (audioEnd > 0L && lastSensorTimestampNs > 0L) {
+                audioEnd - lastSensorTimestampNs
+            } else {
+                JSONObject.NULL
+            })
+            put("timeline_frames", (lastTimelineFrame + 1).coerceAtLeast(savedFrames))
             put("audio_file", audio.file.name)
             put("audio_sample_rate", audio.sampleRate)
             put("audio_channels", audio.channels)
