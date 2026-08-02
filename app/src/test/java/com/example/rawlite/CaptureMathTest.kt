@@ -8,20 +8,20 @@ class CaptureMathTest {
     @Test
     fun rotationDegrees_backCamera_coversPhysicalOrientations() {
         assertEquals(90, CaptureMath.rotationDegrees(90, 0, frontFacing = false))
-        assertEquals(180, CaptureMath.rotationDegrees(90, 90, frontFacing = false))
-        assertEquals(0, CaptureMath.rotationDegrees(90, 270, frontFacing = false))
+        assertEquals(0, CaptureMath.rotationDegrees(90, 90, frontFacing = false))
+        assertEquals(180, CaptureMath.rotationDegrees(90, 270, frontFacing = false))
     }
 
     @Test
     fun rotationDegrees_frontCamera_reversesDisplayCompensation() {
         assertEquals(90, CaptureMath.rotationDegrees(90, 0, frontFacing = true))
-        assertEquals(0, CaptureMath.rotationDegrees(90, 90, frontFacing = true))
-        assertEquals(180, CaptureMath.rotationDegrees(90, 270, frontFacing = true))
+        assertEquals(180, CaptureMath.rotationDegrees(90, 90, frontFacing = true))
+        assertEquals(0, CaptureMath.rotationDegrees(90, 270, frontFacing = true))
     }
 
     @Test
     fun rotationDegrees_normalizesInputs() {
-        assertEquals(0, CaptureMath.rotationDegrees(450, -90, frontFacing = false))
+        assertEquals(180, CaptureMath.rotationDegrees(450, -90, frontFacing = false))
     }
 
     @Test

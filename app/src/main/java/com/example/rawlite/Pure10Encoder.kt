@@ -25,6 +25,7 @@ internal data class Pure10Summary(
     val conversionMaxMs: Double,
     val firstTimestampNs: Long,
     val lastTimestampNs: Long,
+    val finalized: Boolean,
     val error: String?
 )
 
@@ -202,10 +203,11 @@ internal class Pure10Encoder(
             finishing = true
             queueEndOfStream()
         }
-        if (!outputFinished.await(FINISH_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+        val outputCompleted = outputFinished.await(FINISH_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        if (!outputCompleted) {
             outputError = "Tiempo de espera agotado al finalizar HEVC"
         }
-        closeResources()
+        val containerClosed = closeResources()
         val submitted = submittedFrames.get()
         return Pure10Summary(
             submittedFrames = submitted,
@@ -219,6 +221,8 @@ internal class Pure10Encoder(
             conversionMaxMs = conversionMaxNs.get() / 1_000_000.0,
             firstTimestampNs = firstTimestampNs.get(),
             lastTimestampNs = lastTimestampNs.get(),
+            finalized = outputCompleted && containerClosed && outputError == null &&
+                encodedFrames.get() > 0,
             error = outputError
         )
     }
@@ -286,14 +290,15 @@ internal class Pure10Encoder(
         }
     }
 
-    private fun closeResources() {
+    private fun closeResources(): Boolean {
         runCatching { codec?.stop() }
         runCatching { codec?.release() }
         codec = null
-        runCatching { if (muxerStarted) muxer?.stop() }
+        val containerClosed = muxerStarted && runCatching { muxer?.stop() }.isSuccess
         runCatching { muxer?.release() }
         muxer = null
         outputExecutor.shutdown()
+        return containerClosed
     }
 
     companion object {

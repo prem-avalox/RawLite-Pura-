@@ -1,7 +1,7 @@
 # RawLite — Plan maestro de calidad y producto
 
 Actualizado: 2026-08-02  
-Línea base: `v0.32`  
+Línea base estable: `v0.32` · candidata instalada: `0.33`
 Dispositivo objetivo: Google Pixel 6  
 Prioridad de producto: captura íntegra, operación manual esencial, eficiencia
 energética y conservación del material original.
@@ -65,7 +65,7 @@ conversor, acompañada por su audio sincronizado.
 | Prioridad | Área | Estado actual | Puerta pendiente |
 | --- | --- | --- | --- |
 | P1 | Integridad RAW y Resolve | `[x]` Conversor corregido, probado e importado en Resolve Studio 20 en `v0.31` | Mantenerlo como regresión de cada release |
-| P2 | Estabilidad de grabación | `[!]` Hay reportes de bloqueo, toma cortada, preview estirado y orientación automática incorrecta | Matriz de grabación sin bloqueo, corrupción ni cambio geométrico |
+| P2 | Estabilidad de grabación | `[~]` Las causas principales están corregidas en la candidata `0.33`; falta cerrar la matriz física de orientación y estrés de 5 min | Vertical y horizontal opuesta en Pixel 6; estrés sostenido |
 | P3 | Audio y sincronización | `[~]` Cola final y continuidad corregidas en `v0.32`; falta prueba prolongada | Clips de 1, 5, 10 y 30 min sin doble audio, cortes ni deriva |
 | P4 | Reproductor RAW | `[~]` Revelado nativo y archivo persistente desde `v0.31`; aún requiere estrés y optimización | Búsqueda/stepping inmediatos y reproducción estable |
 | P5 | Color, exposición y HLG | `[!]` Sesgo verdoso, desaturación y ruido cromático con aumento de color no caracterizados | Preview y archivo comparables; saturación cromáticamente estable |
@@ -141,32 +141,56 @@ se pulsa REC hasta que todos los escritores terminan y la toma queda cerrada.
 
 ### Defectos que deben reproducirse y cerrarse
 
-- `[!]` Congelamiento de toda la aplicación durante PURE 10.
-- `[!]` Archivo ocasionalmente cortado o con apariencia de RAW incompleto.
-- `[!]` Preview que se estira al iniciar la grabación.
-- `[!]` Grabación automática invertida o recortada.
-- `[ ]` Recuperación segura ante fallo de actividad, cámara, audio o encoder.
-- `[~]` A 30 FPS se observó un descarte en captura durante una prueba de unos
-  31,6 segundos; no debe ocultarse aunque el encoder haya cerrado bien.
+- `[x]` El arranque síncrono del encoder PURE 10 bloqueaba el hilo de UI. En
+  `0.33` la preparación ocurre fuera de UI y REC se habilita al terminar.
+- `[~]` Se eliminó la reutilización accidental de una carpeta creada en el
+  mismo segundo y PURE 10 ya no declara `finalized` si fallan EOS o el cierre
+  del muxer. Falta inyección deliberada de fallos de cámara, audio y encoder.
+- `[x]` El preview cambiaba de encuadre al recrear la sesión para añadir RAW al
+  pulsar REC. La superficie RAW seleccionada ahora permanece configurada y
+  sólo se añade como target mientras se graba.
+- `[~]` Se corrigió la fórmula de orientación Camera2 y se congela la orientación
+  física al iniciar REC. Está validada con unit tests y en horizontal física a
+  270°; faltan las otras dos posiciones reales del teléfono.
+- `[~]` El cierre al enviar la aplicación al fondo drenó y finalizó correctamente
+  una toma PURE 10 manual de 125/125 frames. Faltan fallos forzados de cada etapa.
+- `[~]` La cola PURE 10 ampliada eliminó el descarte visto a 30 FPS: 1.629/1.629
+  frames en 54,2 s, sin huecos. Falta repetir durante 5 min.
 
 ### Trabajo
 
-- Instrumentar por separado estado de sesión Camera2, cola de `ImageReader`,
+- `[~]` Instrumentar por separado estado de sesión Camera2, cola de `ImageReader`,
   escritor RAW, encoder, muxer, audio y UI.
-- Medir backpressure, buffers pendientes, GC, memoria nativa y tiempos de cierre.
-- Congelar al iniciar REC la transformación derivada de orientación física,
+- `[~]` Medir backpressure, buffers pendientes, GC, memoria nativa y tiempos de cierre.
+- `[x]` Congelar al iniciar REC la transformación derivada de orientación física,
   orientación del sensor y crop; no reinterpretarla a mitad de toma.
-- Registrar dimensiones de superficie, aspect ratio y matriz del preview antes,
+- `[x]` Registrar dimensiones de superficie, aspect ratio y matriz del preview antes,
   durante y después de grabar.
-- Revisar el camino automático y manual como configuraciones distintas, no solo
+- `[x]` Revisar el camino automático y manual como configuraciones distintas, no solo
   como valores diferentes de ISO/exposición.
-- Hacer el cierre idempotente: cada recurso se cierra una vez y una excepción no
+- `[~]` Hacer el cierre idempotente: cada recurso se cierra una vez y una excepción no
   impide cerrar los demás.
-- Evaluar archivo temporal/estado `recording` y promoción a `closed` sin
+- `[~]` Evaluar archivo temporal/estado `recording` y promoción a `closed` sin
   sobrescribir una toma existente. Una toma incompleta debe marcarse y
   conservarse para recuperación; nunca presentarse silenciosamente como válida.
-- Confirmar que captura, encoder, audio, telemetría y UI no compiten de forma
+- `[x]` Confirmar que captura, encoder, audio, telemetría y UI no compiten de forma
   innecesaria por el mismo hilo, CPU o memoria.
+
+### Evidencia candidata 0.33 — 2026-08-02
+
+- PURE 10, 2032×1536, 30 FPS, automático, 54,2 s: 1.629 capturados,
+  enviados y codificados; cero descartes y cero huecos; HEVC Main10 HLG,
+  BT.2020, WAV y `sync.json` validados con 0 errores y 0 advertencias.
+- RAW10 2K, 24 FPS, automático, 214 frames: stream completo, checkpoint cerrado,
+  timestamps crecientes, cero huecos y audio válido.
+- CinemaDNG FULL, 4080×3072, 15 FPS: 14 DNG finalizados y con cabeceras válidas.
+  El rendimiento de escritura produjo 17 huecos en 31 tiempos; el timeline los
+  conserva y el modo FULL queda limitado, no apto para prometer cadencia sostenida.
+- PURE 10, 24 FPS, manual, cierre por `onStop`: 125/125 frames, muxer y audio
+  finalizados; reapertura de cámara correcta.
+- Modo zurdo: geometría espejada y REC funcional; PURE 10 92/92 frames validado.
+- Todas las tomas creadas para esta QA se borraron después de validarlas. El
+  inventario de seis tomas preexistentes permaneció sin cambios.
 
 ### Matriz mínima
 
@@ -376,9 +400,11 @@ modo limitado con restricciones concretas o no se publica.
 ### Estado conocido
 
 - `[x]` Existen pruebas del conversor y validadores de tomas.
-- `[x]` Unit tests, build y Android Lint pasan con JDK 21 en `v0.32`.
+- `[x]` Unit tests, build y Android Lint pasan con JDK 21 en `v0.32` y en la
+  candidata `0.33`.
 - `[x]` `v0.31` y `v0.32` están etiquetadas localmente.
-- `[~]` El APK debug de la línea base mide 4.299.480 bytes; falta medir release,
+- `[~]` El APK debug `0.33` mide 4.307.080 bytes (+7.600 frente a `0.32`);
+  falta medir release,
   AAB y contribución de dependencias.
 - `[ ]` El repositorio local no tiene remoto configurado; una etiqueta local no
   es todavía una copia externa.
@@ -417,11 +443,11 @@ Antes de etiquetar una versión candidata:
 | --- | --- | --- | --- | --- |
 | RAW-001 | RAW10 convertido no aparece como clip completo en Resolve | P1 | `[x]` | Corregido y aceptado en Resolve con `v0.31` |
 | RAW-002 | Distinguir claramente FULL, RAW10 2K y PURE 10 | P1 | `[x]` | Contrato documentado; cualquier texto UI se revisa antes de cambiarlo |
-| STAB-001 | PURE 10 congela la aplicación | P2 | `[!]` | Reproducción sistemática pendiente |
-| STAB-002 | Algunas capturas se guardan cortadas | P2 | `[!]` | Diagnóstico por etapas pendiente |
-| STAB-003 | Preview se estira al iniciar REC | P2 | `[!]` | Instrumentación de superficies pendiente |
-| STAB-004 | Automático graba invertido o recortado | P2 | `[!]` | Matriz orientación × auto/manual pendiente |
-| STAB-005 | Recuperación segura tras fallo | P2 | `[ ]` | Diseño/ensayo pendiente |
+| STAB-001 | PURE 10 congela la aplicación | P2 | `[x]` | Encoder preparado fuera de UI; arranques de 65–247 ms sin bloqueo |
+| STAB-002 | Algunas capturas se guardan cortadas | P2 | `[~]` | Carpeta única atómica y `finalized` estricto; falta inyección de fallos |
+| STAB-003 | Preview se estira al iniciar REC | P2 | `[x]` | Misma sesión/superficies antes, durante y después de REC |
+| STAB-004 | Automático graba invertido o recortado | P2 | `[~]` | Fórmula corregida; horizontal 270° validada, faltan vertical y 90° físicos |
+| STAB-005 | Recuperación segura tras fallo | P2 | `[~]` | `onStop` finalizó 125/125; faltan fallos forzados de subsistemas |
 | AV-001 | Audio final truncado | P3 | `[x]` | Corregido y medido en `v0.32` |
 | AV-002 | Audio doble o cortado durante reproducción | P3 | `[~]` | Ruta/hilo corregidos en `v0.32`; falta duración larga |
 | AV-003 | Deriva audiovisual progresiva | P3 | `[ ]` | Pruebas 1/5/10/30 min pendientes |
@@ -431,7 +457,7 @@ Antes de etiquetar una versión candidata:
 | COL-003 | Color Boost produce ruido/puntos verdes y magenta | P5 | `[!]` | Ganancia no equivale a saturación; rediseño pendiente |
 | COL-004 | Archivo PURE 10 se ve más oscuro que el preview | P5 | `[!]` | Comparación SDR/HLG objetiva pendiente |
 | UI-001 | Reubicar selector de modo y añadir TINT | P5 | `[B]` | Pendiente de diagnóstico y aprobación de maqueta |
-| PERF-001 | Descarte de captura observado a 30 FPS | P2/P6 | `[ ]` | Un descarte en prueba de ~31,6 s |
+| PERF-001 | Descarte de captura observado a 30 FPS | P2/P6 | `[~]` | Búfer ampliado: 1.629/1.629 en 54,2 s; falta estrés de 5 min |
 | PERF-002 | Evaluar operación 4K | P6 | `[B]` | Espera estabilidad 2K |
 | QA-001 | Matriz automatizada e instrumentada | P7 | `[~]` | Infraestructura parcial |
 | REL-001 | Medir APK/AAB y dependencias | P7 | `[~]` | APK debug base: 4.299.480 bytes |
@@ -472,6 +498,9 @@ la misma versión con una corrección crítica de P2 sin una regresión completa
   a una ruta nativa con archivo persistente.
 - `v0.32`: cierre de audio sin perder la cola PCM y reproducción con una única
   ruta de streaming continua.
+- candidata `0.33`: inicio PURE 10 fuera del hilo de UI, sesión estable al entrar
+  en REC, orientación Camera2 corregida, carpetas de toma no reutilizables,
+  finalización estricta del MP4 y telemetría de fallos de captura.
 
 Este historial no sustituye al changelog por versión. Resume únicamente las
 correcciones que sirven como punto de partida para este plan.

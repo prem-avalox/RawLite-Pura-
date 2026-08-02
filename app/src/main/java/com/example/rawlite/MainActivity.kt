@@ -22,6 +22,7 @@ import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CaptureFailure
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.DngCreator
@@ -312,10 +313,12 @@ class MainActivity : Activity() {
     private var noMetadataDrops = 0
     private var writerBusyDrops = 0
     private var writeErrorDrops = 0
+    private var captureFailureDrops = 0
     private var savedFrames = 0
     private var recordTimerText = "00:00"
     private var recording = false
     private var switchingSession = false
+    private var recordingStartToken = 0
     @Volatile
     private var finalizingOutput = false
     @Volatile
@@ -392,11 +395,7 @@ class MainActivity : Activity() {
                 val base = baseContentOrientation ?: 0
                 val relative = (base - compensation + 360) % 360
                 lastAllowedContentRotation = relative.toFloat()
-                if (!rotationLockedByUser && !recording && !switchingSession) {
-                    appliedContentRotation = lastAllowedContentRotation
-                    cameraChrome.animateContentRotation(lastAllowedContentRotation)
-                    settingsDialogFrame?.contentRotationDegrees = lastAllowedContentRotation
-                }
+                applyLatestAutomaticRotation()
             }
         }
         powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -1264,6 +1263,12 @@ class MainActivity : Activity() {
         }
         cameraChrome.showStatusPopup(label)
         rawModeButton.announceForAccessibility(label)
+        reconfigurePreviewForCaptureMode()
+    }
+
+    private fun reconfigurePreviewForCaptureMode() {
+        if (cameraDevice == null || captureSession == null || switchingSession || recording) return
+        createSession(includeRaw = false)
     }
 
     private fun updateChromeValues() {
@@ -1864,7 +1869,10 @@ class MainActivity : Activity() {
             outputs += analysisOutput
         }
 
-        if (includeRaw) {
+        // Keep the selected capture surface in the preview session. The Pixel 6
+        // otherwise switches sensor geometry when RAW is added at REC time,
+        // which changes the visible framing and makes the preview appear stretched.
+        if (rawVideoSupportedForCurrentCamera()) {
             val size = currentRawSize() ?: return
             rawReader = createRawReader(size)
             val rawOutput = OutputConfiguration(rawReader!!.surface)
@@ -1890,6 +1898,7 @@ class MainActivity : Activity() {
                     if (includeRaw) startAudioCapture()
                     startRepeating(includeRaw)
                     runOnUiThread {
+                        applyLatestAutomaticRotation()
                         recordButton.isEnabled = rawVideoSupportedForCurrentCamera() &&
                             !finalizingOutput && !finalizingAudio
                         updateControlModes()
@@ -1950,7 +1959,9 @@ class MainActivity : Activity() {
                         finishTelemetry()
                     }
                     if (pendingCameraTexture != null) {
-                        openPendingCameraIfReady()
+                        // CameraCaptureSession callbacks run on RawLiteCamera, while
+                        // reopening also updates the TextureView and status controls.
+                        runOnUiThread { openPendingCameraIfReady() }
                     } else {
                         configurePendingSession()
                     }
@@ -2009,14 +2020,16 @@ class MainActivity : Activity() {
     }
 
     private fun createRawReader(size: Size): ImageReader {
-        val imageFormat = if (packedRawRecording || pure10Recording) {
+        val configuredPure10 = captureMode == CaptureMode.PURE10
+        val configuredPackedRaw = captureMode == CaptureMode.RAW && selectedRawIndex > 0
+        val imageFormat = if (configuredPackedRaw || configuredPure10) {
             ImageFormat.RAW10
         } else {
             ImageFormat.RAW_SENSOR
         }
         val maxImages = when {
-            pure10Recording -> PURE10_MAX_IMAGES
-            packedRawRecording -> 8
+            configuredPure10 -> PURE10_MAX_IMAGES
+            configuredPackedRaw -> 8
             else -> 4
         }
         return ImageReader.newInstance(size.width, size.height, imageFormat, maxImages).apply {
@@ -2302,11 +2315,23 @@ class MainActivity : Activity() {
             }
             Log.e(TAG, "Could not start repeating request", error)
             setStatusText("Obturación rechazada por la cámara")
+            stopAfterRepeatingFailure(includeRaw)
         } catch (error: Exception) {
             Log.e(TAG, "Could not start repeating request", error)
             setStatusText("No se pudo iniciar la captura")
+            stopAfterRepeatingFailure(includeRaw)
         }
         updateStatus(force = true)
+    }
+
+    private fun stopAfterRepeatingFailure(includeRaw: Boolean) {
+        if (!includeRaw) return
+        runOnUiThread {
+            if (recording) {
+                setStatusText("DETENIENDO · la cámara rechazó la captura")
+                stopRecording()
+            }
+        }
     }
 
     private val captureCallback = object : CameraCaptureSession.CaptureCallback() {
@@ -2317,6 +2342,21 @@ class MainActivity : Activity() {
         ) {
             storeCaptureResult(result)
             updatePreviewCadenceMetering()
+            updateStatus()
+        }
+
+        override fun onCaptureFailed(
+            session: CameraCaptureSession,
+            request: CaptureRequest,
+            failure: CaptureFailure
+        ) {
+            if (!recording) return
+            captureFailureDrops++
+            droppedFrames++
+            Log.e(
+                TAG,
+                "Camera capture failed reason=${failure.reason} frame=${failure.frameNumber}"
+            )
             updateStatus()
         }
     }
@@ -2469,10 +2509,20 @@ class MainActivity : Activity() {
             }
             return
         }
-        recordingDisplayRotationDegrees = visualDisplayRotationDegrees()
+        recordingDisplayRotationDegrees = if (rotationLockedByUser) {
+            visualDisplayRotationDegrees()
+        } else {
+            detectedDeviceOrientationDegrees
+        }
         val base = getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: filesDir
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        sessionDir = File(base, "RawLite_$stamp").apply { mkdirs() }
+        sessionDir = runCatching {
+            CaptureStorage.createUniqueDirectory(base, "RawLite_$stamp")
+        }.getOrElse { error ->
+            Log.e(TAG, "Could not reserve capture directory", error)
+            setStatusText("No se pudo crear una carpeta segura para la toma")
+            return
+        }
         lastTimelineFrame = -1
         cadenceGaps = 0
         firstSensorTimestampNs = 0L
@@ -2482,6 +2532,7 @@ class MainActivity : Activity() {
         noMetadataDrops = 0
         writerBusyDrops = 0
         writeErrorDrops = 0
+        captureFailureDrops = 0
         savedFrames = 0
         sessionStartElapsedMs = SystemClock.elapsedRealtime()
         activeCaptureMode = captureMode
@@ -2493,21 +2544,6 @@ class MainActivity : Activity() {
             pure10Recording = false
             return
         }
-        if (pure10Recording) {
-            if (!openPure10Outputs()) {
-                pure10Recording = false
-                return
-            }
-        } else if (packedRawRecording && !openPackedOutputs()) {
-            return
-        } else if (dngRecording && !openDngOutputs()) {
-            dngRecording = false
-            return
-        }
-        if (!openTelemetry()) {
-            finishPackedOutputs()
-            return
-        }
         lockedValues = if (lockExposure || lockWhiteBalance || lockFocus || selectedFps < 30) {
             snapshotCurrentValues()
         } else {
@@ -2515,19 +2551,87 @@ class MainActivity : Activity() {
         }
         setParametersExpanded(false)
         switchingSession = true
-        createSession(includeRaw = true)
+        recordButton.isEnabled = false
+        updateControlModes()
+        updateRecordingChrome()
+        updateStatus(force = true)
+        val startToken = ++recordingStartToken
+        val setupStartedNs = SystemClock.elapsedRealtimeNanos()
+        ioExecutor.execute {
+            val outputOpened = when {
+                pure10Recording -> openPure10Outputs()
+                packedRawRecording -> openPackedOutputs()
+                dngRecording -> openDngOutputs()
+                else -> false
+            }
+            val telemetryOpened = outputOpened && openTelemetry()
+            val setupMs = (SystemClock.elapsedRealtimeNanos() - setupStartedNs) / 1_000_000.0
+            runOnUiThread {
+                if (startToken != recordingStartToken || cameraDevice == null || isDestroyed) {
+                    Log.w(TAG, "Capture setup cancelled after ${formatOne(setupMs.toFloat())} ms")
+                    if (outputOpened) finishPackedOutputs()
+                    if (telemetryOpened) finishTelemetry()
+                    switchingSession = false
+                    updateControlModes()
+                    updateRecordingChrome()
+                    return@runOnUiThread
+                }
+                if (!outputOpened || !telemetryOpened || rawReader == null) {
+                    Log.e(TAG, "Capture setup failed output=$outputOpened telemetry=$telemetryOpened raw=${rawReader != null}")
+                    if (outputOpened) finishPackedOutputs()
+                    if (telemetryOpened) finishTelemetry()
+                    recording = false
+                    switchingSession = false
+                    pure10Recording = false
+                    packedRawRecording = false
+                    dngRecording = false
+                    recordButton.isEnabled = cameraDevice != null &&
+                        !finalizingOutput && !finalizingAudio && rawVideoSupportedForCurrentCamera()
+                    updateControlModes()
+                    updateRecordingChrome()
+                    return@runOnUiThread
+                }
+                Log.i(
+                    TAG,
+                    "Capture setup ready mode=$activeCaptureMode in ${formatOne(setupMs.toFloat())} ms " +
+                        "rotation=$recordingDisplayRotationDegrees output=${captureRotationDegrees(currentOption()!!.characteristics)}"
+                )
+                sessionStartElapsedMs = SystemClock.elapsedRealtime()
+                recording = true
+                switchingSession = false
+                startAudioCapture()
+                cameraHandler.post { startRepeating(includeRaw = true) }
+                recordButton.isEnabled = true
+                updateControlModes()
+                updateRecordingChrome()
+                updateStatus(force = true)
+            }
+        }
     }
 
     private fun stopRecording() {
         if (!recording && !switchingSession) return
+        ++recordingStartToken
         previewTimingValues = snapshotCurrentValues()
         recording = false
         switchingSession = true
+        recordButton.isEnabled = false
         updateRecordingChrome()
         finishAudioCapture()
         lockedValues = null
-        finalizeCaptureAfterSessionClose = true
-        createSession(includeRaw = false)
+        cameraHandler.post {
+            startRepeating(includeRaw = false)
+            clearPendingRawImages()
+            resultsByTimestamp.clear()
+            finishPackedOutputs()
+            finishTelemetry()
+            runOnUiThread {
+                switchingSession = false
+                updateControlModes()
+                updateRecordingChrome()
+                updateStatus(force = true)
+            }
+        }
     }
 
     private fun startAudioCapture() {
@@ -2772,7 +2876,7 @@ class MainActivity : Activity() {
                         "elapsed_ms,battery_c,thermal_status,thermal_headroom," +
                             "available_bytes,saved_frames,dropped_frames,pending_writes," +
                             "no_metadata_drops,writer_busy_drops,write_error_drops," +
-                            "cadence_gaps,audio_peak\n"
+                            "cadence_gaps,capture_failure_drops,audio_peak\n"
                         ).toByteArray(Charsets.US_ASCII)
                 )
             }
@@ -2872,7 +2976,7 @@ class MainActivity : Activity() {
             val elapsed = SystemClock.elapsedRealtime() - sessionStartElapsedMs
             val line = String.format(
                 Locale.US,
-                "%d,%s,%d,%s,%d,%d,%d,%d,%d,%d,%d,%d,%.3f\n",
+                "%d,%s,%d,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.3f\n",
                 elapsed,
                 batteryTemperatureC?.let { "%.1f".format(Locale.US, it) } ?: "",
                 thermalStatus,
@@ -2885,6 +2989,7 @@ class MainActivity : Activity() {
                 writerBusyDrops,
                 writeErrorDrops,
                 cadenceGaps,
+                captureFailureDrops,
                 audioPeak
             )
             telemetryExecutor.execute {
@@ -3085,7 +3190,7 @@ class MainActivity : Activity() {
         val descriptionFile = File(directory, "clip.json")
         val description = runCatching { JSONObject(descriptionFile.readText()) }
             .getOrElse { JSONObject() }
-        description.put("finalized", summary != null)
+        description.put("finalized", summary?.finalized == true)
         description.put("video_bytes", File(directory, Pure10Encoder.VIDEO_FILE).length())
         description.put("saved_frames", savedFrames)
         description.put("dropped_frames", droppedFrames)
@@ -3098,6 +3203,7 @@ class MainActivity : Activity() {
             description.put("conversion_max_ms", summary.conversionMaxMs)
             description.put("encoder_first_timestamp_ns", summary.firstTimestampNs)
             description.put("encoder_last_timestamp_ns", summary.lastTimestampNs)
+            description.put("capture_failure_drops", captureFailureDrops)
             summary.error?.let { description.put("encoder_error", it) }
         }
         runCatching { descriptionFile.writeText(description.toString(2)) }
@@ -3171,6 +3277,7 @@ class MainActivity : Activity() {
     }
 
     private fun closeCamera(preservePendingOpen: Boolean = false) {
+        ++recordingStartToken
         sessionGeneration++
         pendingSessionRequest = null
         if (!preservePendingOpen) pendingCameraTexture = null
@@ -3550,6 +3657,17 @@ class MainActivity : Activity() {
         return (base - appliedContentRotation.roundToInt() + 360) % 360
     }
 
+    private fun applyLatestAutomaticRotation() {
+        if (rotationLockedByUser || recording || switchingSession ||
+            !::cameraChrome.isInitialized
+        ) {
+            return
+        }
+        appliedContentRotation = lastAllowedContentRotation
+        cameraChrome.animateContentRotation(lastAllowedContentRotation)
+        settingsDialogFrame?.contentRotationDegrees = lastAllowedContentRotation
+    }
+
     private fun currentRawSize(): Size? = currentOption()?.rawSizes?.getOrNull(selectedRawIndex)
     private fun currentPreviewSize(): Size {
         return PREVIEW_SIZES.getOrElse(selectedPreviewIndex) { PREVIEW_SIZES.last() }
@@ -3664,10 +3782,7 @@ class MainActivity : Activity() {
         cameraChrome.showStatusPopup(
             if (rotationLockedByUser) "GIRO FIJO" else "GIRO AUTO"
         )
-        if (!rotationLockedByUser) {
-            appliedContentRotation = lastAllowedContentRotation
-            cameraChrome.animateContentRotation(lastAllowedContentRotation)
-        }
+        applyLatestAutomaticRotation()
     }
 
     private fun updateAudioLevel(peak: Float) {
@@ -4115,8 +4230,8 @@ class MainActivity : Activity() {
         private const val TELEMETRY_INTERVAL_MS = 2_000L
         private const val CHECKPOINT_SECONDS = 2
         private const val MAX_PENDING_METADATA_IMAGES = 6
-        private const val PURE10_MAX_IMAGES = 4
-        private const val PURE10_MAX_PENDING_WRITES = 2
+        private const val PURE10_MAX_IMAGES = 6
+        private const val PURE10_MAX_PENDING_WRITES = 4
         private const val MIN_FREE_BYTES = 512L * 1024L * 1024L
         private const val BACKGROUND_DRAIN_TIMEOUT_MS = 3_000L
         private const val FASTEST_VIDEO_EXPOSURE_NS = 125_000L

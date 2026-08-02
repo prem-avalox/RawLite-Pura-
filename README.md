@@ -27,6 +27,12 @@ criterios de aceptación se mantienen en [`QUALITY_ROADMAP.md`](QUALITY_ROADMAP.
 - El modo RAW10 usa un escritor C++/JNI alineado para páginas de 16 KB. Escribe
   directamente desde el buffer de `ImageReader` con `writev()`, sin crear un
   `ByteArray` completo por fotograma.
+- La superficie RAW seleccionada permanece configurada durante el preview y se
+  activa como destino sólo durante REC. Esto conserva el mismo encuadre antes,
+  durante y después de grabar sin recrear la sesión Camera2.
+- PURE 10 prepara el encoder fuera del hilo de interfaz. Cada toma reserva su
+  carpeta de forma atómica y nunca reutiliza una carpeta del mismo segundo; un
+  MP4 sólo se declara finalizado si EOS, encoder y muxer cerraron correctamente.
 - La telemetría de temperatura, estado térmico, thermal headroom,
   almacenamiento y duración estimada sigue registrándose, pero no se muestra
   todavía en la interfaz principal.
@@ -126,7 +132,7 @@ color necesarias para construir los CinemaDNG.
 
 ## Compilación
 
-La versión 0.32 fija Android NDK `27.2.12479018` y CMake `3.22.1`. El binario
+La versión 0.33 fija Android NDK `27.2.12479018` y CMake `3.22.1`. El binario
 arm64 está enlazado con alineación ELF de 16 KB para Android 15 y posteriores.
 
 Todas las tareas Android se ejecutan con JDK 21:

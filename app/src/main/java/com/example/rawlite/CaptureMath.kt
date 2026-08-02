@@ -17,9 +17,9 @@ internal object CaptureMath {
         val sensor = normalizedDegrees(sensorDegrees)
         val display = normalizedDegrees(displayRotationDegrees)
         return if (frontFacing) {
-            normalizedDegrees(sensor - display)
-        } else {
             normalizedDegrees(sensor + display)
+        } else {
+            normalizedDegrees(sensor - display)
         }
     }
 
