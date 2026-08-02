@@ -65,7 +65,18 @@ import android.widget.SeekBar
 import android.widget.Spinner
 import android.widget.Switch
 import android.widget.TextView
-import org.json.JSONArray
+import com.example.rawlite.camera.CameraCatalog
+import com.example.rawlite.camera.CameraOption
+import com.example.rawlite.capture.audio.AvSyncContext
+import com.example.rawlite.capture.audio.AvSyncMetadataFactory
+import com.example.rawlite.capture.metadata.CaptureMetadataContext
+import com.example.rawlite.capture.metadata.CaptureMetadataFactory
+import com.example.rawlite.core.config.Pixel6ReferenceProfile
+import com.example.rawlite.core.model.CameraParameter
+import com.example.rawlite.core.model.CaptureFormatPolicy
+import com.example.rawlite.core.model.CaptureMode
+import com.example.rawlite.core.model.CaptureOutput
+import com.example.rawlite.core.state.CaptureOperationState
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -153,29 +164,6 @@ class MainActivity : Activity() {
             private const val SETTINGS_LANDSCAPE_WIDTH_FRACTION = 0.84f
         }
     }
-
-    private enum class CaptureMode {
-        RAW,
-        PURE10
-    }
-
-    private enum class CameraParameter {
-        LENS,
-        FPS,
-        SHUTTER,
-        ISO,
-        WHITE_BALANCE,
-        FOCUS,
-        RESOLUTION
-    }
-
-    private data class CameraOption(
-        val label: String,
-        val openId: String,
-        val physicalId: String?,
-        val characteristics: CameraCharacteristics,
-        val rawSizes: List<Size>
-    )
 
     private data class LockSnapshot(
         val iso: Int?,
@@ -1559,7 +1547,7 @@ class MainActivity : Activity() {
         }
 
         val manager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
-        cameraOptions = discoverCameraOptions(manager)
+        cameraOptions = CameraCatalog(manager).discover()
         if (cameraOptions.isEmpty()) {
             setStatusText("No se encontró ninguna cámara RAW compatible")
             return
@@ -1593,79 +1581,6 @@ class MainActivity : Activity() {
             override fun onSurfaceTextureUpdated(texture: SurfaceTexture) = Unit
         }
         if (preview.isAvailable) openSelectedCamera(preview.surfaceTexture!!)
-    }
-
-    private fun discoverCameraOptions(manager: CameraManager): List<CameraOption> {
-        val options = mutableListOf<CameraOption>()
-        for (id in manager.cameraIdList) {
-            val logicalChars = manager.getCameraCharacteristics(id)
-            val caps = logicalChars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: continue
-            if (!caps.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW)) continue
-
-            val facing = logicalChars.get(CameraCharacteristics.LENS_FACING)
-            val physicalIds = logicalChars.physicalCameraIds
-            if (facing == CameraCharacteristics.LENS_FACING_BACK && physicalIds.isNotEmpty()) {
-                for (physicalId in physicalIds) {
-                    val physicalChars = try {
-                        manager.getCameraCharacteristics(physicalId)
-                    } catch (error: Exception) {
-                        Log.w(TAG, "No characteristics for physical camera $physicalId", error)
-                        continue
-                    }
-                    val sizes = dngCompatibleSizes(physicalChars)
-                    if (sizes.isEmpty()) continue
-                    options += CameraOption(
-                        label = lensLabel(physicalChars, physicalId),
-                        openId = id,
-                        physicalId = physicalId,
-                        characteristics = physicalChars,
-                        rawSizes = sizes
-                    )
-                }
-            } else {
-                val sizes = dngCompatibleSizes(logicalChars)
-                if (sizes.isEmpty()) continue
-                val label = if (facing == CameraCharacteristics.LENS_FACING_FRONT) {
-                    "Frontal"
-                } else {
-                    lensLabel(logicalChars, id)
-                }
-                options += CameraOption(label, id, null, logicalChars, sizes)
-            }
-        }
-
-        return options.sortedWith(
-            compareBy<CameraOption> { if (it.openId == "0") 0 else 1 }
-                .thenByDescending {
-                    it.characteristics.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
-                        ?.firstOrNull() ?: 0f
-                }
-        )
-    }
-
-    private fun lensLabel(chars: CameraCharacteristics, id: String): String {
-        val focal = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
-            ?.firstOrNull() ?: 0f
-        return when {
-            focal >= 5f -> "Principal · ${formatOne(focal)} mm"
-            focal > 0f -> "Ultra gran angular · ${formatOne(focal)} mm"
-            else -> "Cámara $id"
-        }
-    }
-
-    private fun dngCompatibleSizes(chars: CameraCharacteristics): List<Size> {
-        val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return emptyList()
-        val rawSizes = map.getOutputSizes(ImageFormat.RAW_SENSOR)?.toList() ?: return emptyList()
-        val fourThree = rawSizes.filter {
-            kotlin.math.abs(it.width.toDouble() / it.height - 4.0 / 3.0) < 0.02
-        }
-        if (fourThree.isEmpty()) return rawSizes.sortedByDescending { it.width.toLong() * it.height }
-
-        val full = fourThree.maxBy { it.width.toLong() * it.height }
-        val reduced = fourThree
-            .filter { it != full && it.width <= full.width / 2 + 16 }
-            .maxByOrNull { it.width.toLong() * it.height }
-        return listOfNotNull(full, reduced).distinct()
     }
 
     private fun configureUiForCamera() {
@@ -2029,8 +1944,8 @@ class MainActivity : Activity() {
         }
         val maxImages = when {
             configuredPure10 -> PURE10_MAX_IMAGES
-            configuredPackedRaw -> 8
-            else -> 4
+            configuredPackedRaw -> CAPTURE_PROFILE.packedRawImageReaderCapacity
+            else -> CAPTURE_PROFILE.dngImageReaderCapacity
         }
         return ImageReader.newInstance(size.width, size.height, imageFormat, maxImages).apply {
             setOnImageAvailableListener({ reader ->
@@ -2089,7 +2004,7 @@ class MainActivity : Activity() {
 
         val maxPending = when {
             pure10Recording -> PURE10_MAX_PENDING_WRITES
-            packedRawRecording -> 6
+            packedRawRecording -> CAPTURE_PROFILE.packedRawMaximumPendingWrites
             else -> 1
         }
         if (pendingWrites.get() >= maxPending) {
@@ -2536,10 +2451,11 @@ class MainActivity : Activity() {
         savedFrames = 0
         sessionStartElapsedMs = SystemClock.elapsedRealtime()
         activeCaptureMode = captureMode
-        pure10Recording = activeCaptureMode == CaptureMode.PURE10
-        packedRawRecording = activeCaptureMode == CaptureMode.RAW && selectedRawIndex > 0
-        dngRecording = activeCaptureMode == CaptureMode.RAW && !packedRawRecording
-        if (pure10Recording && selectedRawIndex == 0) {
+        val output = CaptureFormatPolicy.output(activeCaptureMode, selectedRawIndex)
+        pure10Recording = output == CaptureOutput.PURE10
+        packedRawRecording = output == CaptureOutput.RAW10
+        dngRecording = output == CaptureOutput.CINEMA_DNG
+        if (!CaptureFormatPolicy.selectionIsValid(activeCaptureMode, selectedRawIndex)) {
             setStatusText("PURE 10 requiere RAW10 reducido")
             pure10Recording = false
             return
@@ -2680,49 +2596,18 @@ class MainActivity : Activity() {
         val timestampSource = currentCharacteristics()
             ?.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE)
             ?: CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_UNKNOWN
-        val cameraStart = firstSensorTimestampNs
-        val audioEnd = if (audio.sampleZeroBoottimeNs > 0L && audio.sampleRate > 0) {
-            audio.sampleZeroBoottimeNs + audio.frames * 1_000_000_000L / audio.sampleRate
-        } else {
-            0L
-        }
-        val offset = if (timestampSource == CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME &&
-            cameraStart > 0L && audio.sampleZeroBoottimeNs > 0L
-        ) {
-            cameraStart - audio.sampleZeroBoottimeNs
-        } else {
-            JSONObject.NULL
-        }
-        val description = JSONObject().apply {
-            put("version", 1)
-            put("video_clock", if (timestampSource ==
-                CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
-            ) "CLOCK_BOOTTIME" else "CAMERA_UNKNOWN")
-            put("audio_clock", "CLOCK_BOOTTIME")
-            put("camera_first_timestamp_ns", cameraStart)
-            put("camera_last_timestamp_ns", lastSensorTimestampNs)
-            put("audio_sample_zero_timestamp_ns", audio.sampleZeroBoottimeNs)
-            put("audio_end_timestamp_ns", audioEnd)
-            put("audio_stop_requested_timestamp_ns", audio.stopRequestedBoottimeNs)
-            put("audio_stopped_timestamp_ns", audio.stoppedBoottimeNs)
-            put("camera_start_minus_audio_start_ns", offset)
-            put("audio_end_minus_camera_last_ns", if (audioEnd > 0L && lastSensorTimestampNs > 0L) {
-                audioEnd - lastSensorTimestampNs
-            } else {
-                JSONObject.NULL
-            })
-            put("timeline_frames", (lastTimelineFrame + 1).coerceAtLeast(savedFrames))
-            put("audio_file", audio.file.name)
-            put("audio_sample_rate", audio.sampleRate)
-            put("audio_channels", audio.channels)
-            put("audio_bits_per_sample", audio.bitsPerSample)
-            put("audio_source", audio.source)
-            put("audio_frames", audio.frames)
-            put("audio_data_bytes", audio.dataBytes)
-            put("cadence_gaps", cadenceGaps)
-            put("finalized", audio.finalized)
-            audio.error?.let { put("audio_error", it) }
-        }
+        val description = AvSyncMetadataFactory.create(
+            context = AvSyncContext(
+                cameraUsesBoottime = timestampSource ==
+                    CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME,
+                cameraFirstTimestampNs = firstSensorTimestampNs,
+                cameraLastTimestampNs = lastSensorTimestampNs,
+                lastTimelineFrame = lastTimelineFrame,
+                savedFrames = savedFrames,
+                cadenceGaps = cadenceGaps
+            ),
+            audio = audio
+        )
         runCatching { File(directory, "sync.json").writeText(description.toString(2)) }
             .onFailure { Log.e(TAG, "Could not write A/V sync metadata", it) }
     }
@@ -3003,127 +2888,15 @@ class MainActivity : Activity() {
     }
 
     private fun buildPackedDescription(size: Size): JSONObject {
-        val option = currentOption() ?: error("No selected camera")
-        val chars = option.characteristics
-        val black = chars.get(CameraCharacteristics.SENSOR_BLACK_LEVEL_PATTERN)
-        val blackLevels = JSONArray()
-        for (row in 0..1) {
-            for (column in 0..1) {
-                blackLevels.put(black?.getOffsetForIndex(column, row) ?: 0)
-            }
-        }
-        val displayDegrees = recordingDisplayRotationDegrees
-        val sensorDegrees = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
-        val frontFacing = chars.get(CameraCharacteristics.LENS_FACING) ==
-            CameraCharacteristics.LENS_FACING_FRONT
-        val rotationDegrees = captureRotationDegrees(chars)
-        return JSONObject().apply {
-            put("format", "rawlite-raw10")
-            put("version", 3)
-            put("camera", option.label)
-            put("camera_id", option.physicalId ?: option.openId)
-            put("width", size.width)
-            put("height", size.height)
-            put("bits_per_sample", 10)
-            put("row_bytes", (size.width * 10 + 7) / 8)
-            put("writer", "native-writev")
-            put("state_file", "clip.state")
-            put("telemetry_file", "telemetry.csv")
-            put("audio_enabled", audioEnabled)
-            put("audio_file", PcmAudioRecorder.AUDIO_FILE)
-            put("audio_metadata_file", PcmAudioRecorder.AUDIO_METADATA_FILE)
-            put("sync_file", "sync.json")
-            put(
-                "camera_timestamp_source",
-                if (chars.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) ==
-                    CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
-                ) "REALTIME" else "UNKNOWN"
-            )
-            put("technical_overlay", technicalMode.name)
-            put("checkpoint_frames", max(selectedFps * CHECKPOINT_SECONDS, 1))
-            put("frame_rate", selectedFps)
-            put("sensor_orientation", sensorDegrees)
-            put("display_rotation_degrees", displayDegrees)
-            put("detected_device_orientation_degrees", detectedDeviceOrientationDegrees)
-            put("ui_content_rotation_degrees", appliedContentRotation.roundToInt())
-            put("front_facing", frontFacing)
-            put("rotation_degrees", rotationDegrees)
-            put(
-                "cfa",
-                cfaName(chars.get(CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT))
-            )
-            put("black_level", blackLevels)
-            put("white_level", chars.get(CameraCharacteristics.SENSOR_INFO_WHITE_LEVEL) ?: 1023)
-            put("binning", JSONArray().put(2).put(2))
-            put(
-                "color_matrix_1",
-                colorTransformJson(chars.get(CameraCharacteristics.SENSOR_COLOR_TRANSFORM1))
-            )
-            put(
-                "color_matrix_2",
-                colorTransformJson(chars.get(CameraCharacteristics.SENSOR_COLOR_TRANSFORM2))
-            )
-            put(
-                "calibration_matrix_1",
-                colorTransformJson(chars.get(CameraCharacteristics.SENSOR_CALIBRATION_TRANSFORM1))
-            )
-            put(
-                "calibration_matrix_2",
-                colorTransformJson(chars.get(CameraCharacteristics.SENSOR_CALIBRATION_TRANSFORM2))
-            )
-            put(
-                "forward_matrix_1",
-                colorTransformJson(chars.get(CameraCharacteristics.SENSOR_FORWARD_MATRIX1))
-            )
-            put(
-                "forward_matrix_2",
-                colorTransformJson(chars.get(CameraCharacteristics.SENSOR_FORWARD_MATRIX2))
-            )
-            put(
-                "reference_illuminant_1",
-                chars.get(CameraCharacteristics.SENSOR_REFERENCE_ILLUMINANT1) ?: 21
-            )
-            put(
-                "reference_illuminant_2",
-                chars.get(CameraCharacteristics.SENSOR_REFERENCE_ILLUMINANT2) ?: 17
-            )
-            put("preview_width", currentPreviewSize().width)
-            put("preview_height", currentPreviewSize().height)
-        }
+        return CaptureMetadataFactory.raw10(
+            context = captureMetadataContext(size),
+            technicalOverlay = technicalMode.name,
+            checkpointFrames = max(selectedFps * CHECKPOINT_SECONDS, 1)
+        )
     }
 
     private fun buildDngDescription(size: Size): JSONObject {
-        val option = currentOption() ?: error("No selected camera")
-        val chars = option.characteristics
-        val sensorDegrees = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
-        val frontFacing = chars.get(CameraCharacteristics.LENS_FACING) ==
-            CameraCharacteristics.LENS_FACING_FRONT
-        return JSONObject().apply {
-            put("format", "rawlite-dng")
-            put("version", 1)
-            put("mode", "RAW")
-            put("container", "CinemaDNG sequence")
-            put("camera", option.label)
-            put("camera_id", option.physicalId ?: option.openId)
-            put("width", size.width)
-            put("height", size.height)
-            put("bits_per_sample", 16)
-            put("frame_rate", selectedFps)
-            put("telemetry_file", "telemetry.csv")
-            put("audio_enabled", audioEnabled)
-            put("audio_file", PcmAudioRecorder.AUDIO_FILE)
-            put("audio_metadata_file", PcmAudioRecorder.AUDIO_METADATA_FILE)
-            put("sync_file", "sync.json")
-            put("sensor_orientation", sensorDegrees)
-            put("display_rotation_degrees", recordingDisplayRotationDegrees)
-            put("detected_device_orientation_degrees", detectedDeviceOrientationDegrees)
-            put("ui_content_rotation_degrees", appliedContentRotation.roundToInt())
-            put("front_facing", frontFacing)
-            put("rotation_degrees", captureRotationDegrees(chars))
-            put("preview_width", currentPreviewSize().width)
-            put("preview_height", currentPreviewSize().height)
-            put("finalized", false)
-        }
+        return CaptureMetadataFactory.cinemaDng(captureMetadataContext(size))
     }
 
     private fun updateDngDescription(directory: File) {
@@ -3140,50 +2913,24 @@ class MainActivity : Activity() {
     }
 
     private fun buildPure10Description(size: Size): JSONObject {
+        return CaptureMetadataFactory.pure10(captureMetadataContext(size), postRawGain)
+    }
+
+    private fun captureMetadataContext(size: Size): CaptureMetadataContext {
         val option = currentOption() ?: error("No selected camera")
-        val chars = option.characteristics
-        val displayDegrees = recordingDisplayRotationDegrees
-        val sensorDegrees = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
-        val frontFacing = chars.get(CameraCharacteristics.LENS_FACING) ==
-            CameraCharacteristics.LENS_FACING_FRONT
-        return JSONObject().apply {
-            put("format", "rawlite-pure10")
-            put("version", 1)
-            put("mode", "PURE 10")
-            put("container", "MP4")
-            put("video_file", Pure10Encoder.VIDEO_FILE)
-            put("codec", "HEVC")
-            put("codec_profile", "Main10")
-            put("encoder", Pure10Encoder.CODEC_NAME)
-            put("bits_per_sample", 10)
-            put("pixel_format", "P010")
-            put("color_primaries", "BT.2020")
-            put("transfer", "HLG (ARIB STD-B67)")
-            put("range", "limited")
-            put("hlg_midtone_gain", Pure10Encoder.HLG_MIDTONE_GAIN * postRawGain / 100f)
-            put("bit_rate", Pure10Encoder.BIT_RATE)
-            put("camera", option.label)
-            put("camera_id", option.physicalId ?: option.openId)
-            put("width", size.width)
-            put("height", size.height)
-            put("frame_rate", selectedFps)
-            put("source", "Camera2 RAW10")
-            put("demosaic", "native 2x2")
-            put("telemetry_file", "telemetry.csv")
-            put("audio_enabled", audioEnabled)
-            put("audio_file", PcmAudioRecorder.AUDIO_FILE)
-            put("audio_metadata_file", PcmAudioRecorder.AUDIO_METADATA_FILE)
-            put("sync_file", "sync.json")
-            put("sensor_orientation", sensorDegrees)
-            put("display_rotation_degrees", displayDegrees)
-            put("detected_device_orientation_degrees", detectedDeviceOrientationDegrees)
-            put("ui_content_rotation_degrees", appliedContentRotation.roundToInt())
-            put("front_facing", frontFacing)
-            put("rotation_degrees", captureRotationDegrees(chars))
-            put("preview_width", currentPreviewSize().width)
-            put("preview_height", currentPreviewSize().height)
-            put("finalized", false)
-        }
+        return CaptureMetadataContext(
+            cameraLabel = option.label,
+            cameraId = option.physicalId ?: option.openId,
+            characteristics = option.characteristics,
+            captureSize = size,
+            previewSize = currentPreviewSize(),
+            frameRate = selectedFps,
+            audioEnabled = audioEnabled,
+            displayRotationDegrees = recordingDisplayRotationDegrees,
+            detectedDeviceOrientationDegrees = detectedDeviceOrientationDegrees,
+            uiContentRotationDegrees = appliedContentRotation.roundToInt(),
+            captureRotationDegrees = captureRotationDegrees(option.characteristics)
+        )
     }
 
     private fun updatePure10Description(directory: File, summary: Pure10Summary?) {
@@ -3219,28 +2966,6 @@ class MainActivity : Activity() {
             recordingDisplayRotationDegrees,
             frontFacing
         )
-    }
-
-    private fun colorTransformJson(transform: ColorSpaceTransform?): JSONArray {
-        val output = JSONArray()
-        if (transform == null) return output
-        for (row in 0..2) {
-            for (column in 0..2) {
-                val value = transform.getElement(column, row)
-                output.put(JSONArray().put(value.numerator).put(value.denominator))
-            }
-        }
-        return output
-    }
-
-    private fun cfaName(value: Int?): String {
-        return when (value) {
-            CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT_RGGB -> "RGGB"
-            CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT_GRBG -> "GRBG"
-            CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT_GBRG -> "GBRG"
-            CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT_BGGR -> "BGGR"
-            else -> "UNKNOWN"
-        }
     }
 
     private fun snapshotCurrentValues(): LockSnapshot {
@@ -3366,7 +3091,8 @@ class MainActivity : Activity() {
         wbControls.mode?.text = if (manualWb) "MAN" else "AUTO"
         focusControls.mode?.text = if (manualFocus) "MAN" else "AUTO"
 
-        val interactionEnabled = !switchingSession && !finalizingOutput && !finalizingAudio
+        val operation = currentOperationState()
+        val interactionEnabled = operation.interactionEnabled
         val exposureAdjustable = interactionEnabled && (!recording || !lockExposure)
         val wbAdjustable = interactionEnabled && (!recording || !lockWhiteBalance)
         val focusAdjustable = interactionEnabled && (!recording || !lockFocus)
@@ -3398,8 +3124,7 @@ class MainActivity : Activity() {
         focusControls.plus.isEnabled = canFocus && manualFocus && focusAdjustable
         if (!canFocus) focusControls.mode?.text = "FIJO"
 
-        val sessionControlsEnabled = !recording && !switchingSession &&
-            !finalizingOutput && !finalizingAudio
+        val sessionControlsEnabled = operation.sessionControlsEnabled
         cameraSpinner.isEnabled = sessionControlsEnabled
         resolutionSpinner.isEnabled = sessionControlsEnabled
         previewSpinner.isEnabled = sessionControlsEnabled
@@ -3500,12 +3225,7 @@ class MainActivity : Activity() {
         val measuredIso = latestResult?.get(CaptureResult.SENSOR_SENSITIVITY)
         val measuredExposure = latestResult?.get(CaptureResult.SENSOR_EXPOSURE_TIME)
         val measuredFrameDuration = latestResult?.get(CaptureResult.SENSOR_FRAME_DURATION)
-        val state = when {
-            finalizingOutput || finalizingAudio -> "GUARDANDO"
-            switchingSession -> "PREPARANDO"
-            recording -> "REC"
-            else -> "LISTO"
-        }
+        val state = currentOperationState().status.label
         if (recording) {
             val elapsed = ((SystemClock.elapsedRealtime() - sessionStartElapsedMs) / 1000L)
                 .coerceAtLeast(0L)
@@ -3582,6 +3302,13 @@ class MainActivity : Activity() {
         val audioBytesPerSecond = if (audioEnabled) 48_000L * 2L * 3L else 0L
         return bytesPerFrame * selectedFps + audioBytesPerSecond
     }
+
+    private fun currentOperationState(): CaptureOperationState = CaptureOperationState(
+        recording = recording,
+        switchingSession = switchingSession,
+        finalizingOutput = finalizingOutput,
+        finalizingAudio = finalizingAudio
+    )
 
     private fun formatStorage(bytes: Long): String {
         if (bytes <= 0L) return "— GB"
@@ -4228,16 +3955,15 @@ class MainActivity : Activity() {
         private const val MAX_KELVIN = 10000
         private const val PREVIEW_METERING_FRAMES = 8
         private const val TELEMETRY_INTERVAL_MS = 2_000L
-        private const val CHECKPOINT_SECONDS = 2
-        private const val MAX_PENDING_METADATA_IMAGES = 6
-        // At 30 FPS, thermal/scheduler spikes on the Pixel 6 can exceed four
-        // frame periods even though average conversion remains below 33 ms.
-        // Ten ImageReader slots keep eight bounded pending frames (~31 MB RAW10)
-        // without changing the encoder workload or allocating per-frame copies.
-        private const val PURE10_MAX_IMAGES = 10
-        private const val PURE10_MAX_PENDING_WRITES = 8
-        private const val MIN_FREE_BYTES = 512L * 1024L * 1024L
-        private const val BACKGROUND_DRAIN_TIMEOUT_MS = 3_000L
+        private val CAPTURE_PROFILE = Pixel6ReferenceProfile.capture
+        private val CHECKPOINT_SECONDS = CAPTURE_PROFILE.checkpointSeconds
+        private val MAX_PENDING_METADATA_IMAGES = CAPTURE_PROFILE.maximumPendingMetadataImages
+        // These queue depths are part of the measured Pixel 6 reference profile. They are not
+        // capability guesses and must remain stable until a different device profile is selected.
+        private val PURE10_MAX_IMAGES = CAPTURE_PROFILE.pure10ImageReaderCapacity
+        private val PURE10_MAX_PENDING_WRITES = CAPTURE_PROFILE.pure10MaximumPendingWrites
+        private val MIN_FREE_BYTES = CAPTURE_PROFILE.minimumFreeBytes
+        private val BACKGROUND_DRAIN_TIMEOUT_MS = CAPTURE_PROFILE.backgroundDrainTimeoutMs
         private const val FASTEST_VIDEO_EXPOSURE_NS = 125_000L
         private const val VIDEO_EXPOSURE_DUTY_PERCENT = 95L
         private const val BG = RawLiteDesign.BLACK
@@ -4249,8 +3975,8 @@ class MainActivity : Activity() {
         private const val UI_PREFS = "ui_preferences"
         private const val PREF_THIRDS_GRID = "thirds_grid"
         private const val PREF_LEFT_HANDED = "left_handed"
-        private val FPS_OPTIONS = listOf(15, 24, 25, 30)
-        private val PREVIEW_SIZES = listOf(Size(1280, 960), Size(1024, 768))
+        private val FPS_OPTIONS = CAPTURE_PROFILE.frameRates
+        private val PREVIEW_SIZES = CAPTURE_PROFILE.previewSizes.map { Size(it.width, it.height) }
         private val STANDARD_VIDEO_SHUTTER_DENOMINATORS = listOf(
             8000, 6400, 5000, 4000, 3200, 2500, 2000, 1600, 1250, 1000,
             800, 640, 500, 400, 320, 250, 240, 200, 160, 125, 120, 100,

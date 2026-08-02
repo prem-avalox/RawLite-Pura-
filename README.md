@@ -4,6 +4,9 @@ MVP de captura Bayer RAW para Google Pixel 6, construido sobre Camera2.
 
 El estado de calidad, los defectos conocidos, las pruebas pendientes y los
 criterios de aceptación se mantienen en [`QUALITY_ROADMAP.md`](QUALITY_ROADMAP.md).
+La separación de responsabilidades, el perfil de referencia del Pixel 6 y las
+reglas para adaptar otros dispositivos se documentan en [`ARCHITECTURE.md`](ARCHITECTURE.md).
+Las versiones entregables se registran en [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Captura
 
@@ -132,7 +135,7 @@ color necesarias para construir los CinemaDNG.
 
 ## Compilación
 
-La versión 0.33 fija Android NDK `27.2.12479018` y CMake `3.22.1`. El binario
+La versión 0.34-alpha1 fija Android NDK `27.2.12479018` y CMake `3.22.1`. El binario
 arm64 está enlazado con alineación ELF de 16 KB para Android 15 y posteriores.
 
 Todas las tareas Android se ejecutan con JDK 21:

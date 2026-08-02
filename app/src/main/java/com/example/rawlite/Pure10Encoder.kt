@@ -9,6 +9,7 @@ import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.util.Log
 import android.util.Size
+import com.example.rawlite.core.config.Pixel6ReferenceProfile
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -35,7 +36,8 @@ internal class Pure10Encoder(
     private val fps: Int,
     private val bitRate: Int,
     private val rotationDegrees: Int,
-    private val characteristics: CameraCharacteristics
+    private val characteristics: CameraCharacteristics,
+    private val codecName: String = CODEC_NAME
 ) {
     private val outputExecutor = Executors.newSingleThreadExecutor()
     private val outputFinished = CountDownLatch(1)
@@ -58,10 +60,12 @@ internal class Pure10Encoder(
     private var minimumInputBufferBytes = 0
 
     fun start() {
-        require(size.width <= 3840 && size.height <= 2176) {
+        require(size.width <= PROFILE.pure10MaximumWidth &&
+            size.height <= PROFILE.pure10MaximumHeight
+        ) {
             "PURE 10 requiere la resolución RAW10 reducida"
         }
-        val localCodec = MediaCodec.createByCodecName(CODEC_NAME)
+        val localCodec = MediaCodec.createByCodecName(codecName)
         val format = MediaFormat.createVideoFormat(
             MediaFormat.MIMETYPE_VIDEO_HEVC,
             size.width,
@@ -302,10 +306,11 @@ internal class Pure10Encoder(
     }
 
     companion object {
+        private val PROFILE = Pixel6ReferenceProfile.capture
         const val VIDEO_FILE = "pure10.mp4"
-        const val BIT_RATE = 50_000_000
-        const val HLG_MIDTONE_GAIN = 3.0f
-        const val CODEC_NAME = "c2.exynos.hevc.encoder"
+        val BIT_RATE = PROFILE.pure10BitRate
+        val HLG_MIDTONE_GAIN = PROFILE.pure10HlgMidtoneGain
+        val CODEC_NAME = PROFILE.preferredHevcMain10Encoder
         private const val TAG = "RawLitePure10"
         private const val INPUT_TIMEOUT_US = 5_000L
         private const val FINISH_TIMEOUT_SECONDS = 15L

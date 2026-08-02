@@ -34,6 +34,7 @@ import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
 import android.text.TextUtils
+import com.example.rawlite.gallery.ClipRepository
 import org.json.JSONObject
 import java.io.File
 import java.text.SimpleDateFormat
@@ -56,6 +57,7 @@ class ReviewActivity : Activity() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val generation = AtomicInteger()
     private val decodeInFlight = AtomicBoolean(false)
+    private val clipRepository = ClipRepository()
     private val uiTypeface by lazy { resources.getFont(R.font.open_sans) }
 
     private var playbackKind = PlaybackKind.NONE
@@ -206,15 +208,7 @@ class ReviewActivity : Activity() {
         setContent(messageView("LEYENDO TOMAS"))
         worker.execute {
             val base = getExternalFilesDir(Environment.DIRECTORY_MOVIES)
-            val clips = base
-                ?.listFiles { file -> file.isDirectory && file.name.startsWith("RawLite_") }
-                ?.mapNotNull { directory ->
-                    Pure10Clip.inspect(directory)
-                        ?: Raw10Clip.inspect(directory)
-                        ?: DngSequenceClip.inspect(directory)
-                }
-                ?.sortedByDescending { it.directory.lastModified() }
-                .orEmpty()
+            val clips = clipRepository.list(base)
             runOnUiThread {
                 if (generation.get() == currentGeneration && !isFinishing) renderClipList(clips)
             }
@@ -1116,7 +1110,7 @@ class ReviewActivity : Activity() {
                 clearPlayback()
                 setContent(messageView("BORRANDO"))
                 worker.execute {
-                    val deleted = summary.directory.deleteRecursively()
+                    val deleted = clipRepository.delete(summary)
                     runOnUiThread {
                         if (deleted) showClipList() else setContent(messageView("NO SE PUDO BORRAR"))
                     }

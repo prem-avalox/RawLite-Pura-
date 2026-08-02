@@ -32,6 +32,7 @@ import android.view.Gravity
 import android.view.Surface
 import android.view.WindowManager
 import android.widget.TextView
+import com.example.rawlite.core.config.Pixel6ReferenceProfile
 import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.Executor
@@ -158,7 +159,7 @@ class TenBitCameraProbeActivity : Activity() {
     }
 
     private fun startEncoder(size: Size) {
-        val codec = MediaCodec.createByCodecName("c2.exynos.hevc.encoder")
+        val codec = MediaCodec.createByCodecName(PROFILE.preferredHevcMain10Encoder)
         val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_HEVC, size.width, size.height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUVP010)
             setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10)
@@ -382,7 +383,7 @@ class TenBitCameraProbeActivity : Activity() {
             put("file_bytes", outputFile.length())
             put("actual_mbps", outputFile.length() * 8.0 / durationNs * 1_000.0)
             put("requested_mbps", BIT_RATE / 1_000_000)
-            put("codec", "c2.exynos.hevc.encoder")
+            put("codec", PROFILE.preferredHevcMain10Encoder)
             put("format", "HEVC Main10 P010 BT.2020 HLG")
         }
         reportFile.writeText(report.toString(2))
@@ -474,9 +475,10 @@ class TenBitCameraProbeActivity : Activity() {
     }
 
     companion object {
+        private val PROFILE = Pixel6ReferenceProfile.capture
         private const val TAG = "RawLite10BitCamera"
         private const val FPS = 24
-        private const val BIT_RATE = 50_000_000
+        private val BIT_RATE = PROFILE.pure10BitRate
         private const val TEST_DURATION_NS = 10_000_000_000L
     }
 }
