@@ -19,6 +19,7 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.util.Log
 import android.view.Gravity
 import android.view.Surface
 import android.view.TextureView
@@ -42,7 +43,6 @@ import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
-import kotlin.math.abs
 import kotlin.math.roundToInt
 
 class ReviewActivity : Activity() {
@@ -74,21 +74,19 @@ class ReviewActivity : Activity() {
     private val thumbnailBitmaps = mutableListOf<Bitmap>()
 
     private var videoPlayer: MediaPlayer? = null
-    private var audioPlayer: MediaPlayer? = null
+    private var audioPlayer: PcmWavPlayer? = null
     private var videoPrepared = false
-    private var audioPrepared = false
     private var playWhenReady = false
     private var playing = false
     private var muted = false
     private var audioOffsetMs = 0
-    private var audioSeekInFlight = false
-    private var audioStartAfterSeek = false
-    private var lastAudioResyncElapsedMs = 0L
+    private var lastAudioDriftLogElapsedMs = 0L
     private var restorePositionMs: Int? = null
     private var restoreShouldPlay = false
 
     private var rawPlaybackStartElapsedMs = 0L
     private var rawPlaybackStartTimeline = 0
+    private var lastVideoProgressMs = 0
 
     private var stage: FrameLayout? = null
     private var textureView: AspectRatioTextureView? = null
@@ -696,7 +694,7 @@ class ReviewActivity : Activity() {
         controls.addView(space(dp(22)))
         audioButton = iconButton(R.drawable.ic_transport_audio, "Silenciar audio") {
             muted = !muted
-            audioPlayer?.setVolume(if (muted) 0f else 1f, if (muted) 0f else 1f)
+            audioPlayer?.setVolume(if (muted) 0f else 1f)
             updateAudioButton()
         }
         controls.addView(audioButton, LinearLayout.LayoutParams(dp(52), dp(52)))
@@ -722,11 +720,11 @@ class ReviewActivity : Activity() {
     }
 
     private fun togglePlayback() {
-        if (playing) pausePlayback() else startPlayback()
+        if (playing || playWhenReady) pausePlayback() else startPlayback()
     }
 
     private fun startPlayback() {
-        when (playbackKind) {
+        val positionMs = when (playbackKind) {
             PlaybackKind.PURE10 -> {
                 if (!videoPrepared) {
                     playWhenReady = true
@@ -734,22 +732,44 @@ class ReviewActivity : Activity() {
                 }
                 val player = videoPlayer ?: return
                 if (player.currentPosition >= player.duration - 20) seekToPosition(0)
-                player.start()
-                syncAndStartAudio(player.currentPosition)
+                player.currentPosition.coerceAtLeast(0)
             }
             PlaybackKind.RAW10, PlaybackKind.DNG -> {
                 val summary = activeSummary ?: return
-                val timeline = sequenceTimelineAt(activeFrameIndex)
-                rawPlaybackStartTimeline = timeline
-                rawPlaybackStartElapsedMs = SystemClock.elapsedRealtime()
-                syncAndStartAudio(sequencePositionMs(activeFrameIndex))
                 if (activeFrameIndex >= sequenceFrameCount() - 1) {
                     activeFrameIndex = 0
                     requestedFrameIndex = 0
-                    rawPlaybackStartTimeline = sequenceTimelineAt(0)
                     requestSequenceFrame(0)
                 }
                 if (summary.frameCount <= 0) return
+                sequencePositionMs(activeFrameIndex)
+            }
+            PlaybackKind.NONE -> return
+        }
+
+        val audio = audioPlayer
+        if (audio != null) {
+            val target = audioTargetMs(audio, positionMs)
+            audio.seekTo(target)
+            audio.setVolume(if (muted) 0f else 1f)
+            if (target < audio.duration - 10) {
+                audio.play()
+            }
+        }
+
+        startVisualPlayback(positionMs)
+    }
+
+    private fun startVisualPlayback(positionMs: Int) {
+        if (playing) return
+        when (playbackKind) {
+            PlaybackKind.PURE10 -> {
+                lastVideoProgressMs = positionMs
+                videoPlayer?.start()
+            }
+            PlaybackKind.RAW10, PlaybackKind.DNG -> {
+                rawPlaybackStartTimeline = sequenceTimelineAt(activeFrameIndex)
+                rawPlaybackStartElapsedMs = SystemClock.elapsedRealtime()
             }
             PlaybackKind.NONE -> return
         }
@@ -763,11 +783,9 @@ class ReviewActivity : Activity() {
 
     private fun pausePlayback() {
         playWhenReady = false
-        if (!playing) return
         playing = false
-        audioStartAfterSeek = false
         runCatching { if (videoPlayer?.isPlaying == true) videoPlayer?.pause() }
-        runCatching { if (audioPlayer?.isPlaying == true) audioPlayer?.pause() }
+        runCatching { audioPlayer?.pause() }
         mainHandler.removeCallbacks(progressTick)
         playButton?.setImageResource(R.drawable.ic_transport_play)
         playButton?.contentDescription = "Reproducir"
@@ -780,6 +798,15 @@ class ReviewActivity : Activity() {
             return
         }
         val position = player.currentPosition.coerceAtLeast(0)
+        if (position + VIDEO_CLOCK_BACKWARD_TOLERANCE_MS < lastVideoProgressMs) {
+            Log.d(
+                AUDIO_SYNC_TAG,
+                "video_clock_reset previous_ms=$lastVideoProgressMs current_ms=$position"
+            )
+            pausePlayback()
+            return
+        }
+        lastVideoProgressMs = position
         seekBar?.progress = position.coerceAtMost(seekBar?.max ?: position)
         updateTimeLabels(position)
         keepAudioSynchronized(position)
@@ -787,9 +814,24 @@ class ReviewActivity : Activity() {
 
     private fun updateSequenceProgress() {
         val summary = activeSummary ?: return
-        val elapsed = SystemClock.elapsedRealtime() - rawPlaybackStartElapsedMs
-        val targetTimeline = rawPlaybackStartTimeline +
-            (elapsed * summary.fps / 1000L).toInt()
+        val audio = audioPlayer
+        if (audio != null && audio.currentPosition >= audio.duration - AUDIO_END_TOLERANCE_MS) {
+            requestSequenceFrame(sequenceFrameCount() - 1)
+            seekBar?.progress = seekBar?.max ?: sequencePositionMs(sequenceFrameCount() - 1)
+            updateTimeLabels(seekBar?.progress ?: 0)
+            pausePlayback()
+            return
+        }
+        val audioPosition = audio
+            ?.takeIf { it.isPlaying }
+            ?.let { (it.currentPosition - audioOffsetMs).coerceAtLeast(0) }
+        val position = audioPosition ?: run {
+            val elapsed = SystemClock.elapsedRealtime() - rawPlaybackStartElapsedMs
+            ((rawPlaybackStartTimeline - sequenceTimelineAt(0)).coerceAtLeast(0) * 1_000L /
+                summary.fps + elapsed).toInt()
+        }
+        val targetTimeline = sequenceTimelineAt(0) +
+            (position * summary.fps / 1_000L).toInt()
         val lastTimeline = sequenceTimelineAt(sequenceFrameCount() - 1)
         if (targetTimeline >= lastTimeline) {
             requestSequenceFrame(sequenceFrameCount() - 1)
@@ -798,8 +840,6 @@ class ReviewActivity : Activity() {
         }
         val targetIndex = sequenceIndexForTimeline(targetTimeline)
         if (targetIndex != requestedFrameIndex) requestSequenceFrame(targetIndex)
-        val position = ((targetTimeline - sequenceTimelineAt(0)).coerceAtLeast(0) * 1000L /
-            summary.fps).toInt()
         seekBar?.progress = position.coerceIn(0, seekBar?.max ?: position)
         updateTimeLabels(position)
         keepAudioSynchronized(position)
@@ -810,6 +850,7 @@ class ReviewActivity : Activity() {
         when (playbackKind) {
             PlaybackKind.PURE10 -> {
                 videoPlayer?.seekTo(bounded.toLong(), MediaPlayer.SEEK_CLOSEST)
+                lastVideoProgressMs = bounded
                 seekAudio(bounded)
             }
             PlaybackKind.RAW10, PlaybackKind.DNG -> {
@@ -943,91 +984,40 @@ class ReviewActivity : Activity() {
         val file = File(directory, "audio.wav")
         audioOffsetMs = readAudioOffsetMs(directory)
         if (!file.isFile) {
-            audioPrepared = false
             updateAudioButton()
             return
         }
-        val player = MediaPlayer()
-        audioPlayer = player
-        runCatching {
-            player.setDataSource(file.absolutePath)
-            player.setOnSeekCompleteListener { completedPlayer ->
-                if (completedPlayer !== audioPlayer) return@setOnSeekCompleteListener
-                audioSeekInFlight = false
-                if (audioStartAfterSeek) {
-                    audioStartAfterSeek = false
-                    if (playing && completedPlayer.currentPosition < completedPlayer.duration - 10) {
-                        completedPlayer.setVolume(if (muted) 0f else 1f, if (muted) 0f else 1f)
-                        completedPlayer.start()
-                    }
-                }
-            }
-            player.setOnPreparedListener {
-                audioPrepared = true
-                updateAudioButton()
-                if (playing) syncAndStartAudio(currentPositionMs())
-            }
-            player.setOnErrorListener { _, _, _ ->
-                audioPrepared = false
-                updateAudioButton()
-                true
-            }
-            player.prepareAsync()
-        }.onFailure {
-            audioPrepared = false
-            updateAudioButton()
+        audioPlayer = PcmWavPlayer.create(file)
+        audioPlayer?.setVolume(if (muted) 0f else 1f)
+        updateAudioButton()
+        if (audioPlayer == null) {
+            Log.e(AUDIO_SYNC_TAG, "No se pudo abrir ${file.name} como PCM WAV")
         }
-    }
-
-    private fun syncAndStartAudio(videoPositionMs: Int) {
-        val player = audioPlayer ?: return
-        if (!audioPrepared) return
-        player.setVolume(if (muted) 0f else 1f, if (muted) 0f else 1f)
-        val target = audioTargetMs(player, videoPositionMs)
-        if (!audioSeekInFlight && abs(player.currentPosition - target) <= AUDIO_START_TOLERANCE_MS) {
-            if (target < player.duration - 10) player.start()
-            return
-        }
-        audioStartAfterSeek = true
-        requestAudioSeek(player, target)
     }
 
     private fun seekAudio(videoPositionMs: Int) {
         val player = audioPlayer ?: return
-        if (!audioPrepared) return
-        audioStartAfterSeek = false
-        requestAudioSeek(player, audioTargetMs(player, videoPositionMs))
+        player.seekTo(audioTargetMs(player, videoPositionMs))
     }
 
     private fun keepAudioSynchronized(videoPositionMs: Int) {
         val player = audioPlayer ?: return
-        if (!audioPrepared || !playing) return
+        if (!playing) return
         val expected = audioTargetMs(player, videoPositionMs)
         val now = SystemClock.elapsedRealtime()
-        if (!audioSeekInFlight &&
-            now - lastAudioResyncElapsedMs >= AUDIO_RESYNC_MIN_INTERVAL_MS &&
-            abs(player.currentPosition - expected) > AUDIO_RESYNC_THRESHOLD_MS
-        ) {
-            lastAudioResyncElapsedMs = now
-            audioStartAfterSeek = true
-            requestAudioSeek(player, expected)
-            return
+        val driftMs = player.currentPosition - expected
+        if (now - lastAudioDriftLogElapsedMs >= AUDIO_DRIFT_LOG_INTERVAL_MS) {
+            lastAudioDriftLogElapsedMs = now
+            Log.d(
+                AUDIO_SYNC_TAG,
+                "drift_ms=$driftMs video_ms=$videoPositionMs audio_ms=${player.currentPosition} " +
+                    "target_ms=$expected"
+            )
         }
-        if (!audioSeekInFlight && !player.isPlaying && expected < player.duration - 10) player.start()
     }
 
-    private fun audioTargetMs(player: MediaPlayer, videoPositionMs: Int): Int {
+    private fun audioTargetMs(player: PcmWavPlayer, videoPositionMs: Int): Int {
         return CaptureMath.audioTargetMs(videoPositionMs, audioOffsetMs, player.duration)
-    }
-
-    private fun requestAudioSeek(player: MediaPlayer, targetMs: Int) {
-        if (audioSeekInFlight) return
-        audioSeekInFlight = true
-        runCatching { player.seekTo(targetMs.toLong(), MediaPlayer.SEEK_CLOSEST) }
-            .onFailure {
-                audioSeekInFlight = false
-                audioStartAfterSeek = false
-            }
     }
 
     private fun readAudioOffsetMs(directory: File): Int {
@@ -1133,10 +1123,8 @@ class ReviewActivity : Activity() {
         videoPlayer = null
         audioPlayer = null
         videoPrepared = false
-        audioPrepared = false
-        audioSeekInFlight = false
-        audioStartAfterSeek = false
-        lastAudioResyncElapsedMs = 0L
+        lastAudioDriftLogElapsedMs = 0L
+        lastVideoProgressMs = 0
         playWhenReady = false
         playbackKind = PlaybackKind.NONE
         activeSummary = null
@@ -1332,9 +1320,10 @@ class ReviewActivity : Activity() {
     companion object {
         private const val FRAME_CACHE_SIZE = 6
         private const val PROGRESS_INTERVAL_MS = 33L
-        private const val AUDIO_START_TOLERANCE_MS = 24
-        private const val AUDIO_RESYNC_THRESHOLD_MS = 240
-        private const val AUDIO_RESYNC_MIN_INTERVAL_MS = 1_000L
+        private const val AUDIO_DRIFT_LOG_INTERVAL_MS = 1_000L
+        private const val AUDIO_END_TOLERANCE_MS = 5
+        private const val VIDEO_CLOCK_BACKWARD_TOLERANCE_MS = 250
+        private const val AUDIO_SYNC_TAG = "RawLiteAudioSync"
         private const val CONTENT_TRANSITION_MS = 240L
     }
 }
