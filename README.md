@@ -84,6 +84,9 @@ La carpeta `dng/` resultante se importa en Resolve como secuencia CinemaDNG.
 El conversor también crea `dng/audio.wav`, recortado o rellenado al inicio a
 partir de los timestamps y con la misma duración que la secuencia. Importa
 ambos elementos, colócalos en el mismo inicio de timeline y enlázalos.
+La toma fuente se abre siempre en modo de solo lectura. La salida incluye
+`clip.json`, `audio.json` y `sync.json`, por lo que conserva orientación,
+geometría y audio también al abrirse en el reproductor interno de RawLite.
 
 Cuando falta un frame, el número temporal se conserva en `frames.csv`. El
 conversor genera un hold frame mediante hard link para que Resolve no comprima
@@ -116,6 +119,30 @@ color necesarias para construir los CinemaDNG.
 
 La versión 0.29 fija Android NDK `27.2.12479018` y CMake `3.22.1`. El binario
 arm64 está enlazado con alineación ELF de 16 KB para Android 15 y posteriores.
+
+Todas las tareas Android se ejecutan con JDK 21:
+
+```bash
+JAVA_HOME=$(/usr/libexec/java_home -v 21) ./gradlew \
+  :app:assembleDebug :app:testDebugUnitTest :app:lintDebug
+```
+
+Las tomas se encuentran en almacenamiento privado de la aplicación y Android
+las elimina si el paquete se desinstala. Para instalar una compilación de
+desarrollo se debe usar `tools/install_debug_safely.sh`: si existen tomas,
+primero las copia al Mac, compara el número de archivos y bytes y sólo entonces
+ejecuta una instalación `adb install -r`, sin desinstalar ni borrar datos.
+
+Las pruebas instrumentadas viven en `com.example.rawlite.qa`, aisladas del
+paquete de producción. Se ejecutan con `tools/run_device_qa.sh`; nunca se debe
+usar `connectedDebugAndroidTest` sobre `:app`.
+
+La integridad de una toma RAW10, CinemaDNG o PURE 10 puede comprobarse sin
+modificarla:
+
+```bash
+python3 tools/validate_clip.py /ruta/a/RawLite_YYYYMMDD_HHMMSS
+```
 - Los CinemaDNG convertidos son de 16 bits de almacenamiento, pero conservan
   los valores originales de 10 bits y el nivel blanco 1023.
 - La apertura es fija. Camera2 no expone un selector público de dual conversion

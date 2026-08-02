@@ -8,7 +8,6 @@ import csv
 import json
 import os
 import shutil
-import struct
 import wave
 from fractions import Fraction
 from pathlib import Path
@@ -169,10 +168,11 @@ def load_json(path: Path) -> dict:
         return {}
 
 
-def repair_wave_header(recording: Path) -> dict:
+def inspect_audio(recording: Path) -> dict:
+    """Inspect recorder audio without ever changing the source take."""
     metadata_path = recording / "audio.json"
     audio_path = recording / "audio.wav"
-    metadata = load_json(metadata_path)
+    metadata = dict(load_json(metadata_path))
     if not metadata or not audio_path.is_file() or audio_path.stat().st_size < 44:
         return metadata
     channels = int(metadata.get("channels", 0))
@@ -183,31 +183,8 @@ def repair_wave_header(recording: Path) -> dict:
         return metadata
     payload = max(0, audio_path.stat().st_size - 44)
     payload -= payload % block_align
-    if payload > 0xFFFF_FFFF - 36:
-        print("Warning: audio.wav exceeds classic RIFF size; leaving its header unchanged")
-        return metadata
-    header = struct.pack(
-        "<4sI4s4sIHHIIHH4sI",
-        b"RIFF",
-        36 + payload,
-        b"WAVE",
-        b"fmt ",
-        16,
-        1,
-        channels,
-        sample_rate,
-        sample_rate * block_align,
-        block_align,
-        bits,
-        b"data",
-        payload,
-    )
-    with audio_path.open("r+b") as stream:
-        stream.seek(0)
-        stream.write(header)
-        stream.truncate(44 + payload)
     if metadata.get("status") != "closed" or not metadata.get("finalized", False):
-        print("Recovered audio.wav header from file length")
+        print("Reading unfinished audio.wav from file length without modifying the take")
     metadata["frames"] = payload // block_align
     metadata["data_bytes"] = payload
     return metadata
@@ -227,6 +204,7 @@ def link_or_copy(source: Path, destination: Path, overwrite: bool) -> None:
 def align_audio(
     recording: Path,
     output: Path,
+    audio_metadata: dict,
     sync: dict,
     start_timeline_frame: int,
     output_frames: int,
@@ -234,18 +212,29 @@ def align_audio(
     overwrite: bool,
 ) -> dict:
     source = recording / "audio.wav"
-    if not source.is_file() or output_frames <= 0 or fps <= 0:
+    channels = int(audio_metadata.get("channels", 0))
+    sample_rate = int(audio_metadata.get("sample_rate", 0))
+    bits = int(audio_metadata.get("bits_per_sample", 0))
+    sample_width = bits // 8
+    frame_bytes = channels * sample_width
+    if (
+        not source.is_file()
+        or source.stat().st_size < 44
+        or output_frames <= 0
+        or fps <= 0
+        or channels <= 0
+        or sample_rate <= 0
+        or sample_width not in (2, 3)
+        or frame_bytes <= 0
+    ):
         return {"available": False}
     destination = output / "audio.wav"
     if destination.exists() and not overwrite:
         raise SystemExit(f"{destination} exists; use --overwrite to replace it")
     offset_ns = sync.get("camera_start_minus_audio_start_ns")
     exact_sync = isinstance(offset_ns, int)
-    with wave.open(str(source), "rb") as reader:
-        channels = reader.getnchannels()
-        sample_width = reader.getsampwidth()
-        sample_rate = reader.getframerate()
-        source_frames = reader.getnframes()
+    source_frames = max(0, source.stat().st_size - 44) // frame_bytes
+    with source.open("rb") as reader:
         timeline_offset_samples = round(start_timeline_frame * sample_rate / fps)
         camera_offset_samples = round(offset_ns * sample_rate / 1e9) if exact_sync else 0
         source_start = camera_offset_samples + timeline_offset_samples
@@ -258,7 +247,6 @@ def align_audio(
             writer.setnchannels(channels)
             writer.setsampwidth(sample_width)
             writer.setframerate(sample_rate)
-            frame_bytes = channels * sample_width
             remaining = target_frames
             if silence_before:
                 silence = min(silence_before, remaining)
@@ -268,11 +256,11 @@ def align_audio(
                     silence -= chunk
                     remaining -= chunk
             if source_start < source_frames and remaining > 0:
-                reader.setpos(source_start)
+                reader.seek(44 + source_start * frame_bytes)
                 available = min(remaining, source_frames - source_start)
                 while available > 0:
                     chunk = min(available, sample_rate)
-                    data = reader.readframes(chunk)
+                    data = reader.read(chunk * frame_bytes)
                     if not data:
                         break
                     frames_read = len(data) // frame_bytes
@@ -296,6 +284,68 @@ def align_audio(
         "frames": target_frames,
         "duration_seconds": target_frames / sample_rate,
     }
+
+
+def write_playback_metadata(
+    output: Path,
+    source_metadata: dict,
+    audio_report: dict,
+    timeline_frames: int,
+) -> None:
+    clip_metadata = dict(source_metadata)
+    clip_metadata.update(
+        {
+            "format": "rawlite-dng",
+            "version": 1,
+            "mode": "RAW",
+            "container": "CinemaDNG sequence",
+            "bits_per_sample": 16,
+            "saved_frames": timeline_frames,
+            "timeline_frames": timeline_frames,
+            "finalized": True,
+            "source_format": source_metadata.get("format"),
+        }
+    )
+    (output / "clip.json").write_text(
+        json.dumps(clip_metadata, indent=2), encoding="utf-8"
+    )
+    if not audio_report.get("available"):
+        return
+    frame_bytes = (
+        int(audio_report["channels"]) * int(audio_report["bits_per_sample"]) // 8
+    )
+    audio_metadata = {
+        "format": "wav-pcm",
+        "status": "closed",
+        "file": audio_report["file"],
+        "sample_rate": audio_report["sample_rate"],
+        "channels": audio_report["channels"],
+        "bits_per_sample": audio_report["bits_per_sample"],
+        "frames": audio_report["frames"],
+        "data_bytes": int(audio_report["frames"]) * frame_bytes,
+        "finalized": True,
+    }
+    (output / "audio.json").write_text(
+        json.dumps(audio_metadata, indent=2), encoding="utf-8"
+    )
+    sync_metadata = {
+        "version": 1,
+        "video_clock": "CINEMADNG_TIMELINE",
+        "audio_clock": "CINEMADNG_TIMELINE",
+        "camera_start_minus_audio_start_ns": 0,
+        "source_camera_start_minus_audio_start_ns": audio_report.get(
+            "camera_start_minus_audio_start_ns"
+        ),
+        "audio_file": audio_report["file"],
+        "audio_sample_rate": audio_report["sample_rate"],
+        "audio_channels": audio_report["channels"],
+        "audio_bits_per_sample": audio_report["bits_per_sample"],
+        "audio_frames": audio_report["frames"],
+        "finalized": True,
+    }
+    (output / "sync.json").write_text(
+        json.dumps(sync_metadata, indent=2), encoding="utf-8"
+    )
 
 
 def dng_tags(
@@ -438,11 +488,12 @@ def main() -> None:
         print(f"\r{stream_index - args.start + 1}/{end - args.start}", end="", flush=True)
 
     output_frame_count = last_timeline_frame - first_timeline_frame + 1
-    audio_metadata = repair_wave_header(recording)
+    audio_metadata = inspect_audio(recording)
     sync = load_json(recording / "sync.json")
     audio_report = align_audio(
         recording=recording,
         output=output,
+        audio_metadata=audio_metadata,
         sync=sync,
         start_timeline_frame=first_timeline_frame,
         output_frames=output_frame_count,
@@ -465,6 +516,7 @@ def main() -> None:
     (output / "conversion_report.json").write_text(
         json.dumps(report, indent=2), encoding="utf-8"
     )
+    write_playback_metadata(output, metadata, audio_report, output_frame_count)
     print(
         f"\nWrote {output_frame_count} CinemaDNG timeline frames to {output} "
         f"({len(repeated_frames)} repeated)"
