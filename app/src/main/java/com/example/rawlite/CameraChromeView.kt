@@ -52,45 +52,50 @@ class CameraChromeView(context: Context) : View(context) {
 
     var selectorValues: List<String> = listOf("24mm", "15FPS", "1/60", "100ISO", "5000K", "∞", "2K")
         set(value) {
+            if (field == value) return
             field = value
             invalidate()
         }
     var selectedParameter: Int = 3
         set(value) {
             val next = value.coerceIn(0, 6)
-            if (field != next) {
-                val previous = field
-                field = next
-                animateSelectorAccent(previous, 0f)
-                animateSelectorAccent(next, 1f)
-                animateCenterLabel(previous, next)
-            }
+            if (field == next) return
+            val previous = field
+            field = next
+            animateSelectorAccent(previous, 0f)
+            animateSelectorAccent(next, 1f)
+            animateCenterLabel(previous, next)
             invalidate()
         }
     var rawActive: Boolean = true
         set(value) {
+            if (field == value) return
             field = value
             invalidate()
         }
     var captureModeLabel: String = "RAW"
         set(value) {
+            if (field == value) return
             field = value
             invalidate()
         }
     var autoSupported: Boolean = true
         set(value) {
+            if (field == value) return
             field = value
             invalidate()
         }
     var autoActive: Boolean = true
         set(value) {
-            if (field != value) animateAutoAccent(if (value) 1f else 0f)
+            if (field == value) return
+            animateAutoAccent(if (value) 1f else 0f)
             field = value
             invalidate()
         }
     var pushAutoActive: Boolean = false
         set(value) {
-            if (field != value) animatePushAutoAccent(if (value) 1f else 0f)
+            if (field == value) return
+            animatePushAutoAccent(if (value) 1f else 0f)
             field = value
             invalidate()
         }
@@ -112,11 +117,13 @@ class CameraChromeView(context: Context) : View(context) {
         }
     var selectedValueEnabled: Boolean = true
         set(value) {
+            if (field == value) return
             field = value
             invalidate()
         }
     var pushAutoEnabled: Boolean = true
         set(value) {
+            if (field == value) return
             field = value
             invalidate()
         }
@@ -130,21 +137,25 @@ class CameraChromeView(context: Context) : View(context) {
         }
     var rotationControlEnabled: Boolean = true
         set(value) {
+            if (field == value) return
             field = value
             invalidate()
         }
     var controlsEnabled: Boolean = true
         set(value) {
+            if (field == value) return
             field = value
             invalidate()
         }
     var recordEnabled: Boolean = false
         set(value) {
+            if (field == value) return
             field = value
             invalidate()
         }
     var timerText: String = "00:00"
         set(value) {
+            if (field == value) return
             field = value
             invalidate()
         }
@@ -292,15 +303,21 @@ class CameraChromeView(context: Context) : View(context) {
         liveDiscrete: Boolean = false,
         formatter: (Int) -> String
     ) {
+        val nextProgress = progress.coerceIn(0, MAX_PROGRESS)
+        val nextMajorStep = majorStep.coerceAtLeast(1)
+        val configurationChanged = wheelProgress != nextProgress ||
+            majorProgressStep != nextMajorStep ||
+            wheelDiscrete != discrete ||
+            wheelLiveDiscrete != liveDiscrete
         if (!wheelDragging) {
-            wheelProgress = progress.coerceIn(0, MAX_PROGRESS)
-            animateWheelTo(wheelProgress.toFloat())
+            wheelProgress = nextProgress
+            if (configurationChanged) animateWheelTo(wheelProgress.toFloat())
         }
-        majorProgressStep = majorStep.coerceAtLeast(1)
+        majorProgressStep = nextMajorStep
         wheelDiscrete = discrete
         wheelLiveDiscrete = liveDiscrete
         valueFormatter = formatter
-        invalidate()
+        if (configurationChanged) invalidate()
     }
 
     private fun animateSelectorAccent(index: Int, target: Float) {

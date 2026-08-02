@@ -2225,20 +2225,15 @@ class MainActivity : Activity() {
     }
 
     private fun timelineFrameForTimestamp(timestampNs: Long): Int {
-        val nominalDuration = 1_000_000_000L / selectedFps
-        if (firstSensorTimestampNs <= 0L || timestampNs <= 0L) {
-            val fallback = lastTimelineFrame + 1
-            lastTimelineFrame = fallback
-            return fallback
-        }
-        val derived = ((timestampNs - firstSensorTimestampNs + nominalDuration / 2L) /
-            nominalDuration).toInt().coerceAtLeast(0)
-        val timeline = max(lastTimelineFrame + 1, derived)
-        if (lastTimelineFrame >= 0 && timeline > lastTimelineFrame + 1) {
-            cadenceGaps += timeline - lastTimelineFrame - 1
-        }
-        lastTimelineFrame = timeline
-        return timeline
+        val result = CaptureMath.timelineFrame(
+            timestampNs = timestampNs,
+            firstTimestampNs = firstSensorTimestampNs,
+            lastTimelineFrame = lastTimelineFrame,
+            fps = selectedFps
+        )
+        cadenceGaps += result.cadenceGap
+        lastTimelineFrame = result.frame
+        return result.frame
     }
 
     private fun maybeUpdateRawHistogram(image: android.media.Image, frame: Int) {
@@ -3099,11 +3094,11 @@ class MainActivity : Activity() {
         val sensorDegrees = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
         val frontFacing = chars.get(CameraCharacteristics.LENS_FACING) ==
             CameraCharacteristics.LENS_FACING_FRONT
-        return if (frontFacing) {
-            (sensorDegrees - recordingDisplayRotationDegrees + 360) % 360
-        } else {
-            (sensorDegrees + recordingDisplayRotationDegrees) % 360
-        }
+        return CaptureMath.rotationDegrees(
+            sensorDegrees,
+            recordingDisplayRotationDegrees,
+            frontFacing
+        )
     }
 
     private fun colorTransformJson(transform: ColorSpaceTransform?): JSONArray {
@@ -4117,7 +4112,7 @@ class MainActivity : Activity() {
         private const val MUTED = RawLiteDesign.TEXT_MUTED
         private const val RECORD = RawLiteDesign.RECORD
         private const val ACCENT = RawLiteDesign.ACCENT
-        private const val CHROME_REFRESH_MS = 33L
+        private const val CHROME_REFRESH_MS = 100L
         private const val UI_PREFS = "ui_preferences"
         private const val PREF_THIRDS_GRID = "thirds_grid"
         private const val PREF_LEFT_HANDED = "left_handed"

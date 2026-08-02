@@ -927,25 +927,16 @@ class ReviewActivity : Activity() {
     }
 
     private fun sequenceIndexForTimeline(timeline: Int): Int {
-        var low = 0
-        var high = sequenceFrameCount() - 1
-        var result = 0
-        while (low <= high) {
-            val middle = (low + high) ushr 1
-            if (sequenceTimelineAt(middle) <= timeline) {
-                result = middle
-                low = middle + 1
-            } else {
-                high = middle - 1
-            }
-        }
-        return result
+        return CaptureMath.indexForTimeline(sequenceFrameCount(), timeline, ::sequenceTimelineAt)
     }
 
     private fun sequencePositionMs(index: Int): Int {
         val fps = activeSummary?.fps?.coerceAtLeast(1) ?: 1
-        return ((sequenceTimelineAt(index) - sequenceTimelineAt(0)).coerceAtLeast(0) * 1000L /
-            fps).toInt()
+        return CaptureMath.sequencePositionMs(
+            sequenceTimelineAt(index),
+            sequenceTimelineAt(0),
+            fps
+        )
     }
 
     private fun prepareAudio(directory: File) {
@@ -1026,7 +1017,7 @@ class ReviewActivity : Activity() {
     }
 
     private fun audioTargetMs(player: MediaPlayer, videoPositionMs: Int): Int {
-        return (videoPositionMs + audioOffsetMs).coerceIn(0, player.duration.coerceAtLeast(0))
+        return CaptureMath.audioTargetMs(videoPositionMs, audioOffsetMs, player.duration)
     }
 
     private fun requestAudioSeek(player: MediaPlayer, targetMs: Int) {
