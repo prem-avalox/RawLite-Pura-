@@ -117,7 +117,7 @@ color necesarias para construir los CinemaDNG.
 
 ## Compilación
 
-La versión 0.29 fija Android NDK `27.2.12479018` y CMake `3.22.1`. El binario
+La versión 0.30 fija Android NDK `27.2.12479018` y CMake `3.22.1`. El binario
 arm64 está enlazado con alineación ELF de 16 KB para Android 15 y posteriores.
 
 Todas las tareas Android se ejecutan con JDK 21:

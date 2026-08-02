@@ -52,7 +52,7 @@ fi
 
 remote_inventory="$("${adb[@]}" shell "if [ -d '${DEVICE_CAPTURE_DIR}' ]; then find '${DEVICE_CAPTURE_DIR}' -type f -exec stat -c '%s' {} +; fi" | tr -d '\r')"
 remote_count="$(awk 'NF {count += 1} END {print count + 0}' <<<"${remote_inventory}")"
-remote_bytes="$(awk 'NF {bytes += $1} END {printf \"%.0f\", bytes + 0}' <<<"${remote_inventory}")"
+remote_bytes="$(awk 'NF {bytes += $1} END {printf "%.0f", bytes + 0}' <<<"${remote_inventory}")"
 
 if [[ "${remote_count}" -gt 0 ]]; then
     timestamp="$(date '+%Y%m%d_%H%M%S')"
@@ -65,7 +65,7 @@ if [[ "${remote_count}" -gt 0 ]]; then
 
     local_inventory="$(find "${incomplete_backup}" -type f -exec stat -f '%z' {} + 2>/dev/null || find "${incomplete_backup}" -type f -exec stat -c '%s' {} +)"
     local_count="$(awk 'NF {count += 1} END {print count + 0}' <<<"${local_inventory}")"
-    local_bytes="$(awk 'NF {bytes += $1} END {printf \"%.0f\", bytes + 0}' <<<"${local_inventory}")"
+    local_bytes="$(awk 'NF {bytes += $1} END {printf "%.0f", bytes + 0}' <<<"${local_inventory}")"
     if [[ "${local_count}" != "${remote_count}" || "${local_bytes}" != "${remote_bytes}" ]]; then
         echo "ERROR: el respaldo no coincide con el dispositivo."
         echo "Origen: ${remote_count} archivos / ${remote_bytes} bytes"
