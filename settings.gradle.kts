@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "RawLite"
 include(":app")
+include(":qa")
