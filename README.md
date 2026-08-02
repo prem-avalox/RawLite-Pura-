@@ -2,6 +2,9 @@
 
 MVP de captura Bayer RAW para Google Pixel 6, construido sobre Camera2.
 
+El estado de calidad, los defectos conocidos, las pruebas pendientes y los
+criterios de aceptación se mantienen en [`QUALITY_ROADMAP.md`](QUALITY_ROADMAP.md).
+
 ## Captura
 
 - Principal, ultra gran angular y frontal cuando el HAL ofrece RAW.
