@@ -154,8 +154,12 @@ se pulsa REC hasta que todos los escritores terminan y la toma queda cerrada.
   270°; faltan las otras dos posiciones reales del teléfono.
 - `[~]` El cierre al enviar la aplicación al fondo drenó y finalizó correctamente
   una toma PURE 10 manual de 125/125 frames. Faltan fallos forzados de cada etapa.
-- `[~]` La cola PURE 10 ampliada eliminó el descarte visto a 30 FPS: 1.629/1.629
-  frames en 54,2 s, sin huecos. Falta repetir durante 5 min.
+- `[~]` La primera ampliación de cola eliminó el descarte corto a 30 FPS:
+  1.629/1.629 frames en 54,2 s. Un estrés posterior de 6 min 21 s cerró bien
+  11.410/11.410 frames enviados al encoder, pero descartó 55 antes del encoder
+  al entrar en térmico 2. Con ocho frames pendientes, una segunda prueba mantuvo
+  cero descartes durante 122 s en térmico 2, pero dejó de sostener 30 FPS al
+  alcanzar térmico 3. Más búfer no corrige una sobrecarga térmica sostenida.
 
 ### Trabajo
 
@@ -181,6 +185,18 @@ se pulsa REC hasta que todos los escritores terminan y la toma queda cerrada.
 - PURE 10, 2032×1536, 30 FPS, automático, 54,2 s: 1.629 capturados,
   enviados y codificados; cero descartes y cero huecos; HEVC Main10 HLG,
   BT.2020, WAV y `sync.json` validados con 0 errores y 0 advertencias.
+- PURE 10, 2032×1536, 30 FPS, automático, 6 min 21 s: MP4, HEVC Main10
+  HLG/BT.2020, WAV y sincronía finalizados y validados sin advertencias;
+  11.410/11.410 frames enviados/codificados, 55 descartes previos al encoder
+  y 25 huecos al alcanzar 36,8 °C y térmico 2. Resultado usado para dimensionar
+  una cola de ocho frames pendientes.
+- Repetición con cola de ocho frames, iniciada con el teléfono ya caliente tras
+  unas seis horas con pantalla encendida, conectado a corriente, en interior y
+  con la ventana cerrada: cero descartes durante los primeros 122 s a 36,3 °C y
+  térmico 2. Al llegar a térmico 3, el rendimiento cayó de forma sostenida; la
+  toma de 5 min cerró correctamente con 8.389/8.389 frames enviados/codificados,
+  pero 602 descartes previos al encoder. Esta condición no representa una prueba
+  térmica controlada y no autoriza todavía 30 FPS prolongado en caliente.
 - RAW10 2K, 24 FPS, automático, 214 frames: stream completo, checkpoint cerrado,
   timestamps crecientes, cero huecos y audio válido.
 - CinemaDNG FULL, 4080×3072, 15 FPS: 14 DNG finalizados y con cabeceras válidas.
@@ -457,7 +473,7 @@ Antes de etiquetar una versión candidata:
 | COL-003 | Color Boost produce ruido/puntos verdes y magenta | P5 | `[!]` | Ganancia no equivale a saturación; rediseño pendiente |
 | COL-004 | Archivo PURE 10 se ve más oscuro que el preview | P5 | `[!]` | Comparación SDR/HLG objetiva pendiente |
 | UI-001 | Reubicar selector de modo y añadir TINT | P5 | `[B]` | Pendiente de diagnóstico y aprobación de maqueta |
-| PERF-001 | Descarte de captura observado a 30 FPS | P2/P6 | `[~]` | Búfer ampliado: 1.629/1.629 en 54,2 s; falta estrés de 5 min |
+| PERF-001 | Descarte de captura observado a 30 FPS | P2/P6 | `[~]` | Cola estable en térmico 2; 30 FPS no sostenible al llegar a térmico 3 bajo prueba acumulada de seis horas |
 | PERF-002 | Evaluar operación 4K | P6 | `[B]` | Espera estabilidad 2K |
 | QA-001 | Matriz automatizada e instrumentada | P7 | `[~]` | Infraestructura parcial |
 | REL-001 | Medir APK/AAB y dependencias | P7 | `[~]` | APK debug base: 4.299.480 bytes |

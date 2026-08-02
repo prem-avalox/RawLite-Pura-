@@ -4230,8 +4230,12 @@ class MainActivity : Activity() {
         private const val TELEMETRY_INTERVAL_MS = 2_000L
         private const val CHECKPOINT_SECONDS = 2
         private const val MAX_PENDING_METADATA_IMAGES = 6
-        private const val PURE10_MAX_IMAGES = 6
-        private const val PURE10_MAX_PENDING_WRITES = 4
+        // At 30 FPS, thermal/scheduler spikes on the Pixel 6 can exceed four
+        // frame periods even though average conversion remains below 33 ms.
+        // Ten ImageReader slots keep eight bounded pending frames (~31 MB RAW10)
+        // without changing the encoder workload or allocating per-frame copies.
+        private const val PURE10_MAX_IMAGES = 10
+        private const val PURE10_MAX_PENDING_WRITES = 8
         private const val MIN_FREE_BYTES = 512L * 1024L * 1024L
         private const val BACKGROUND_DRAIN_TIMEOUT_MS = 3_000L
         private const val FASTEST_VIDEO_EXPOSURE_NS = 125_000L
