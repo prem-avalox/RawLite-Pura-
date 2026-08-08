@@ -3699,20 +3699,22 @@ class MainActivity : Activity() {
         val rollDegrees = Math.toDegrees(
             atan2(screenX.toDouble(), (-screenY).toDouble())
         ).toFloat().normalizeDegrees()
+        val rightAngle = (rollDegrees / 90f).roundToInt() * 90f
+        val leveledRollDegrees = (rollDegrees - rightAngle).normalizeDegrees()
         val now = SystemClock.elapsedRealtime()
         val elapsedMs = (now - lastStabilizerUpdateMs).coerceAtLeast(1L)
         val motionDegrees = if (lastStabilizerUpdateMs == 0L) {
             0f
         } else {
-            abs((rollDegrees - lastStabilizerRollDegrees).normalizeDegrees())
+            abs((leveledRollDegrees - lastStabilizerRollDegrees).normalizeDegrees())
         }
         val motionPerSecond = motionDegrees * 1000f / elapsedMs
-        val stable = abs(rollDegrees) <= STABILIZER_LEVEL_TOLERANCE_DEGREES &&
+        val stable = abs(leveledRollDegrees) <= STABILIZER_LEVEL_TOLERANCE_DEGREES &&
             motionPerSecond <= STABILIZER_MOTION_TOLERANCE_DEGREES_PER_SECOND
-        lastStabilizerRollDegrees = rollDegrees
+        lastStabilizerRollDegrees = leveledRollDegrees
         lastStabilizerUpdateMs = now
         cameraChrome.stabilizerAvailable = true
-        cameraChrome.stabilizerRollDegrees = rollDegrees
+        cameraChrome.stabilizerRollDegrees = leveledRollDegrees
         cameraChrome.stabilizerStable = stable
     }
 

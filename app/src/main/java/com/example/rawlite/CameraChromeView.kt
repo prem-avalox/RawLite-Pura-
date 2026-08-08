@@ -939,32 +939,31 @@ class CameraChromeView(context: Context) : View(context) {
     private fun drawStabilizerGuide(canvas: Canvas, landscape: Boolean) {
         if (!stabilizerAvailable) return
         val center = if (landscape) PointF(1065f, 589.5f) else PointF(589.5f, 1065f)
-        val color = if (stabilizerStable) AUTO else Color.WHITE
-        val alpha = if (stabilizerStable) 235 else 145
+        val color = Color.WHITE
+        val alpha = 255
         val roll = stabilizerRollDegrees
-        canvas.save()
-        canvas.rotate(roll, center.x, center.y)
-        val previousCap = paint.strokeCap
-        paint.strokeCap = Paint.Cap.ROUND
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = 7f
-        paint.color = scaledAlpha(Color.BLACK, 0.52f)
-        drawStabilizerSegments(canvas, center, outline = true)
-        paint.strokeWidth = if (stabilizerStable) 4f else 3f
-        paint.color = scaledAlpha(color, alpha / 255f)
-        drawStabilizerSegments(canvas, center, outline = false)
-        paint.style = Paint.Style.FILL
-        paint.color = scaledAlpha(color, if (stabilizerStable) 0.92f else 0.48f)
-        canvas.drawCircle(center.x, center.y, if (stabilizerStable) 5.5f else 3.5f, paint)
-        paint.strokeCap = previousCap
-        paint.alpha = 255
-        canvas.restore()
+        withContentRotation(canvas, center.x, center.y) {
+            canvas.save()
+            canvas.rotate(roll, center.x, center.y)
+            val previousCap = paint.strokeCap
+            paint.strokeCap = Paint.Cap.ROUND
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = if (stabilizerStable) 4f else 3f
+            paint.color = scaledAlpha(color, alpha / 255f)
+            drawStabilizerSegments(canvas, center)
+            paint.style = Paint.Style.FILL
+            paint.color = color
+            canvas.drawCircle(center.x, center.y, if (stabilizerStable) 5.5f else 3.5f, paint)
+            paint.strokeCap = previousCap
+            paint.alpha = 255
+            canvas.restore()
+        }
     }
 
-    private fun drawStabilizerSegments(canvas: Canvas, center: PointF, outline: Boolean) {
-        val outer = if (outline) 199f else 196f
-        val inner = if (outline) 86f else 90f
-        val tickHalf = if (outline) 17f else 14f
+    private fun drawStabilizerSegments(canvas: Canvas, center: PointF) {
+        val outer = 196f
+        val inner = 90f
+        val tickHalf = 14f
         canvas.drawLine(center.x - outer, center.y, center.x - inner, center.y, paint)
         canvas.drawLine(center.x + inner, center.y, center.x + outer, center.y, paint)
         canvas.drawLine(center.x, center.y - tickHalf, center.x, center.y + tickHalf, paint)
