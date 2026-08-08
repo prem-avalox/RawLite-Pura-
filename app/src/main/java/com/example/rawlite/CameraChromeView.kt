@@ -576,6 +576,8 @@ class CameraChromeView(context: Context) : View(context) {
         }
     }
 
+    fun currentContentRotationDegrees(): Float = contentRotation
+
     fun showStatusPopup(text: String) {
         statusPopupText = text
         repeatHandler.removeCallbacks(hideStatusPopupRunnable)

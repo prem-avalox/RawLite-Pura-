@@ -3728,12 +3728,12 @@ class MainActivity : Activity() {
     }
 
     private fun stabilizerOrientationAnchorDegrees(): Float {
-        return when (((appliedContentRotation / 90f).roundToInt() % 4 + 4) % 4) {
-            0 -> 180f
-            1 -> 90f
-            2 -> 0f
-            else -> -90f
+        val contentRotation = if (::cameraChrome.isInitialized) {
+            cameraChrome.currentContentRotationDegrees()
+        } else {
+            appliedContentRotation
         }
+        return (180f - contentRotation).normalizeDegrees()
     }
 
     private fun Float.normalizeDegrees(): Float {
