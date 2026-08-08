@@ -171,8 +171,16 @@ class CameraChromeView(context: Context) : View(context) {
         set(value) {
             val next = value.coerceIn(-STABILIZER_MAX_ROLL_DEGREES, STABILIZER_MAX_ROLL_DEGREES)
             if (abs(field - next) < 0.08f) return
+            stabilizerRollAnimator?.cancel()
+            val delta = normalizeDegrees(next - displayedStabilizerRollDegrees)
+            stabilizerRollAnimator = animateFloat(
+                displayedStabilizerRollDegrees,
+                displayedStabilizerRollDegrees + delta,
+                STABILIZER_ROLL_TRANSITION_MS
+            ) {
+                displayedStabilizerRollDegrees = normalizeDegrees(it)
+            }
             field = next
-            invalidate()
         }
     var stabilizerStable: Boolean = false
         set(value) {
@@ -264,6 +272,8 @@ class CameraChromeView(context: Context) : View(context) {
     private var recordRingAnimator: ValueAnimator? = null
     private var galleryRecordingVisibility = 1f
     private var galleryRecordingAnimator: ValueAnimator? = null
+    private var displayedStabilizerRollDegrees = 0f
+    private var stabilizerRollAnimator: ValueAnimator? = null
     private var lastBlockedHapticUptime = 0L
     private val lockGroupProgress = FloatArray(3) { 1f }
     private val lockGroupAnimators = arrayOfNulls<ValueAnimator>(3)
@@ -939,9 +949,9 @@ class CameraChromeView(context: Context) : View(context) {
     private fun drawStabilizerGuide(canvas: Canvas, landscape: Boolean) {
         if (!stabilizerAvailable) return
         val center = if (landscape) PointF(1065f, 589.5f) else PointF(589.5f, 1065f)
-        val color = Color.WHITE
+        val color = if (stabilizerStable) AUTO else Color.WHITE
         val alpha = 255
-        val roll = stabilizerRollDegrees
+        val roll = displayedStabilizerRollDegrees
         withContentRotation(canvas, center.x, center.y) {
             canvas.save()
             canvas.rotate(roll, center.x, center.y)
@@ -1794,6 +1804,7 @@ class CameraChromeView(context: Context) : View(context) {
         rotationAccentAnimator?.cancel()
         recordRingAnimator?.cancel()
         galleryRecordingAnimator?.cancel()
+        stabilizerRollAnimator?.cancel()
         wheelAnimator?.cancel()
         centerLabelAnimator?.cancel()
         centerLabelVisibilityAnimator?.cancel()
@@ -1929,6 +1940,13 @@ class CameraChromeView(context: Context) : View(context) {
     private fun canonicalWidth(): Float =
         if (layoutLandscape) LANDSCAPE_WIDTH else PORTRAIT_WIDTH
 
+    private fun normalizeDegrees(degrees: Float): Float {
+        var value = degrees
+        while (value > 180f) value -= 360f
+        while (value < -180f) value += 360f
+        return value
+    }
+
     private fun drawCenteredText(canvas: Canvas, text: String, cx: Float, cy: Float, size: Float, color: Int) {
         paint.typeface = openSans
         paint.textAlign = Paint.Align.CENTER
@@ -2024,6 +2042,7 @@ class CameraChromeView(context: Context) : View(context) {
         private const val RECORD_RING_HALF_CYCLE_MS = 720L
         private const val GALLERY_HIDE_MS = 240L
         private const val GALLERY_SHOW_MS = 280L
+        private const val STABILIZER_ROLL_TRANSITION_MS = 120L
         private const val CENTER_LABEL_TEXT_SIZE = 64f
         private const val CENTER_VALUE_NAME_TEXT_SIZE = 30f
         private const val HAPTIC_DURATION_MS = 14L

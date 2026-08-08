@@ -264,8 +264,6 @@ class MainActivity : Activity() {
     private var recordingDisplayRotationDegrees = 0
     private val stabilizerGravity = FloatArray(3)
     private var stabilizerGravityInitialized = false
-    private var lastStabilizerRollDegrees = 0f
-    private var lastStabilizerUpdateMs = 0L
     private val stabilizerListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
             if (!::cameraChrome.isInitialized) return
@@ -3699,20 +3697,12 @@ class MainActivity : Activity() {
         val rollDegrees = Math.toDegrees(
             atan2(screenX.toDouble(), (-screenY).toDouble())
         ).toFloat().normalizeDegrees()
-        val rightAngle = (rollDegrees / 90f).roundToInt() * 90f
-        val leveledRollDegrees = (rollDegrees - rightAngle).normalizeDegrees()
-        val now = SystemClock.elapsedRealtime()
-        val elapsedMs = (now - lastStabilizerUpdateMs).coerceAtLeast(1L)
-        val motionDegrees = if (lastStabilizerUpdateMs == 0L) {
-            0f
-        } else {
-            abs((leveledRollDegrees - lastStabilizerRollDegrees).normalizeDegrees())
+        val orientationAnchor = when (detectedDeviceOrientationDegrees) {
+            270 -> -90f
+            else -> detectedDeviceOrientationDegrees.toFloat()
         }
-        val motionPerSecond = motionDegrees * 1000f / elapsedMs
-        val stable = abs(leveledRollDegrees) <= STABILIZER_LEVEL_TOLERANCE_DEGREES &&
-            motionPerSecond <= STABILIZER_MOTION_TOLERANCE_DEGREES_PER_SECOND
-        lastStabilizerRollDegrees = leveledRollDegrees
-        lastStabilizerUpdateMs = now
+        val leveledRollDegrees = (rollDegrees - orientationAnchor).normalizeDegrees()
+        val stable = abs(leveledRollDegrees) <= STABILIZER_LEVEL_TOLERANCE_DEGREES
         cameraChrome.stabilizerAvailable = true
         cameraChrome.stabilizerRollDegrees = leveledRollDegrees
         cameraChrome.stabilizerStable = stable
@@ -4290,7 +4280,6 @@ class MainActivity : Activity() {
         private const val TELEMETRY_INTERVAL_MS = 2_000L
         private const val STABILIZER_MIN_PROJECTED_GRAVITY = 1.8f
         private const val STABILIZER_LEVEL_TOLERANCE_DEGREES = 1.25f
-        private const val STABILIZER_MOTION_TOLERANCE_DEGREES_PER_SECOND = 8.0f
         private val CAPTURE_PROFILE = Pixel6ReferenceProfile.capture
         private val CHECKPOINT_SECONDS = CAPTURE_PROFILE.checkpointSeconds
         private val MAX_PENDING_METADATA_IMAGES = CAPTURE_PROFILE.maximumPendingMetadataImages
