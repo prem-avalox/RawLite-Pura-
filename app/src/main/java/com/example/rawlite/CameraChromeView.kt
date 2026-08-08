@@ -963,7 +963,7 @@ class CameraChromeView(context: Context) : View(context) {
         val roll = displayedStabilizerRollDegrees
         withContentRotation(canvas, center.x, center.y) {
             canvas.save()
-            canvas.rotate(roll, center.x, center.y)
+            canvas.rotate(-roll, center.x, center.y)
             val previousCap = paint.strokeCap
             paint.strokeCap = Paint.Cap.ROUND
             paint.style = Paint.Style.STROKE
