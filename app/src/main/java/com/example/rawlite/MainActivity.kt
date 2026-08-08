@@ -2653,8 +2653,8 @@ class MainActivity : Activity() {
                     updateRecordingChrome()
                     return@runOnUiThread
                 }
-                if (!outputOpened || !telemetryOpened || rawReader == null) {
-                    Log.e(TAG, "Capture setup failed output=$outputOpened telemetry=$telemetryOpened raw=${rawReader != null}")
+                if (!outputOpened || !telemetryOpened) {
+                    Log.e(TAG, "Capture setup failed output=$outputOpened telemetry=$telemetryOpened")
                     if (outputOpened) finishPackedOutputs()
                     if (telemetryOpened) finishTelemetry()
                     recording = false
@@ -2675,11 +2675,7 @@ class MainActivity : Activity() {
                         "rotation=$recordingDisplayRotationDegrees output=${captureRotationDegrees(currentOption()!!.characteristics)}"
                 )
                 sessionStartElapsedMs = SystemClock.elapsedRealtime()
-                recording = true
-                switchingSession = false
-                startAudioCapture()
-                cameraHandler.post { startRepeating(includeRaw = true) }
-                recordButton.isEnabled = true
+                cameraHandler.post { createSession(includeRaw = true) }
                 updateControlModes()
                 updateRecordingChrome()
                 updateStatus(force = true)
