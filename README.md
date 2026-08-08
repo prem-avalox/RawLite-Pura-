@@ -7,7 +7,7 @@ The project explores a minimal, one-hand camera interface for recording:
 
 - CinemaDNG image sequences.
 - Packed RAW10 clips.
-- PURE 10 video: HEVC Main10 HLG with separate PCM WAV audio.
+- PURE 10 video: HEVC Main10 HLG with AAC audio in the final MP4.
 
 RawLite was designed as a product architecture and vibe-coding project: the
 product direction, interaction model and visual language were defined by Prem
@@ -53,9 +53,9 @@ Typical files include:
 - `clip.json`: sensor, format, color and capture metadata.
 - `frames.csv`: per-frame timing and camera settings.
 - `telemetry.csv`: thermal and storage telemetry.
-- `audio.wav`: separate PCM audio when audio is enabled.
+- `audio.wav`: PCM audio backup/intermediate when audio is enabled.
 - `sync.json`: audio/video timing information.
-- `frame_XXXXXX.dng`, `clip.raw10` or `pure10.mp4`, depending on the mode.
+- `frame_XXXXXX.dng`, `clip.raw10`, `pure10.mp4` or `pure10_final.mp4`, depending on the mode.
 
 ## Internal Player
 
@@ -78,7 +78,11 @@ timing.
 
 CinemaDNG sequences can be imported directly into DaVinci Resolve.
 
-Packed RAW10 clips use RawLite's converter:
+Packed RAW10 clips can be converted from the internal gallery with the
+`CONVERTIR` action. The conversion creates a separate CinemaDNG take next to
+the original RAW10 folder, preserving the original capture.
+
+The desktop converter remains available for inspection and recovery workflows:
 
 ```bash
 python3 -m venv .venv
@@ -87,7 +91,8 @@ python3 -m venv .venv
 ```
 
 The converter creates a `dng/` folder that can be imported as a CinemaDNG
-sequence. It also exports synchronized audio for the timeline.
+sequence. It also exports synchronized audio for the timeline when audio is
+available.
 
 RAW10 is a RawLite-native recording format. It is preserved as raw capture data
 and converted only when needed for editing software.

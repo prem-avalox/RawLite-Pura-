@@ -37,6 +37,7 @@ import android.widget.TextView
 import android.text.TextUtils
 import com.example.rawlite.gallery.ClipRepository
 import com.example.rawlite.gallery.GalleryConversionEstimator
+import com.example.rawlite.gallery.Raw10CinemaDngConverter
 import org.json.JSONObject
 import java.io.File
 import java.text.SimpleDateFormat
@@ -1333,17 +1334,76 @@ class ReviewActivity : Activity() {
             append("CinemaDNG estimado adicional: ${formatBytes(estimate.estimatedCinemaDngBytes)}.\n")
             append("Uso temporal total: ${formatBytes(estimate.temporaryWorkingBytes)}.")
             append(pressure)
-            append("\n\nLa conversión todavía no se ejecuta en esta versión. ")
-            append("Este aviso existe para evitar duplicar material sin confirmación explícita.")
+            append("\n\nSe creará una toma CinemaDNG nueva junto al RAW10 original. ")
+            append("El RAW10 original no se modifica.")
         }
         val dialog = AlertDialog.Builder(this)
             .setTitle("Convertir RAW10")
+            .setMessage(message)
+            .setNegativeButton("CANCELAR", null)
+            .setPositiveButton("CONVERTIR") { _, _ ->
+                startRaw10Conversion(clips.filter { it.captureFormat == "RAW10" })
+            }
+            .create()
+        dialog.setOnShowListener {
+            dialog.window?.setBackgroundDrawable(roundRect(RawLiteDesign.SURFACE_RAISED, dp(4)))
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(RawLiteDesign.ACCENT)
+            dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setTextColor(RawLiteDesign.TEXT)
+        }
+        dialog.show()
+    }
+
+    private fun startRaw10Conversion(clips: List<ClipSummary>) {
+        if (clips.isEmpty()) return
+        val currentGeneration = generation.incrementAndGet()
+        selectionMode = false
+        selectedClipPaths.clear()
+        val progressView = messageView("CONVIRTIENDO RAW10")
+        setContent(progressView)
+        worker.execute {
+            val results = Raw10CinemaDngConverter.convertBatch(clips.map { it.directory }) { progress ->
+                runOnUiThread {
+                    if (generation.get() == currentGeneration && !isFinishing) {
+                        (progressView as? TextView)?.text =
+                            "CONVIRTIENDO ${progress.clipName}\n" +
+                            "${progress.doneFrames}/${progress.totalFrames} FRAMES"
+                    }
+                }
+            }
+            runOnUiThread {
+                if (generation.get() != currentGeneration || isFinishing) return@runOnUiThread
+                val failed = results.count { it.error != null }
+                val converted = results.count { it.error == null && !it.skipped }
+                val skipped = results.count { it.skipped }
+                val frames = results.sumOf { it.convertedFrames }
+                showClipList()
+                val message = buildString {
+                    append("Convertidas: $converted toma(s).\n")
+                    if (skipped > 0) append("Ya existían: $skipped.\n")
+                    append("Frames CinemaDNG: $frames.")
+                    if (failed > 0) {
+                        append("\n\nFallaron: $failed.\n")
+                        results.filter { it.error != null }.take(3).forEach {
+                            append("\n${it.source.name}: ${it.error}")
+                        }
+                    }
+                }
+                showConversionResultDialog(failed == 0, message)
+            }
+        }
+    }
+
+    private fun showConversionResultDialog(success: Boolean, message: String) {
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(if (success) "Conversión completa" else "Conversión incompleta")
             .setMessage(message)
             .setPositiveButton("ENTENDIDO", null)
             .create()
         dialog.setOnShowListener {
             dialog.window?.setBackgroundDrawable(roundRect(RawLiteDesign.SURFACE_RAISED, dp(4)))
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(RawLiteDesign.ACCENT)
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(
+                if (success) RawLiteDesign.ACCENT else RawLiteDesign.RECORD
+            )
         }
         dialog.show()
     }
