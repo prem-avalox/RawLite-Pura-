@@ -2429,15 +2429,6 @@ class MainActivity : Activity() {
         } else {
             detectedDeviceOrientationDegrees
         }
-        val base = getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: filesDir
-        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        sessionDir = runCatching {
-            CaptureStorage.createUniqueDirectory(base, "RawLite_$stamp")
-        }.getOrElse { error ->
-            Log.e(TAG, "Could not reserve capture directory", error)
-            setStatusText("No se pudo crear una carpeta segura para la toma")
-            return
-        }
         lastTimelineFrame = -1
         cadenceGaps = 0
         firstSensorTimestampNs = 0L
@@ -2458,6 +2449,16 @@ class MainActivity : Activity() {
         if (!CaptureFormatPolicy.selectionIsValid(activeCaptureMode, selectedRawIndex)) {
             setStatusText("PURE 10 requiere RAW10 reducido")
             pure10Recording = false
+            return
+        }
+        val base = getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: filesDir
+        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val stem = CaptureStorage.captureStem(output, stamp)
+        sessionDir = runCatching {
+            CaptureStorage.createUniqueDirectory(base, stem)
+        }.getOrElse { error ->
+            Log.e(TAG, "Could not reserve capture directory", error)
+            setStatusText("No se pudo crear una carpeta segura para la toma")
             return
         }
         lockedValues = if (lockExposure || lockWhiteBalance || lockFocus || selectedFps < 30) {

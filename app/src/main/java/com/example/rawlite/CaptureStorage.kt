@@ -1,10 +1,30 @@
 package com.example.rawlite
 
+import com.example.rawlite.core.model.CaptureOutput
 import java.io.File
 import java.io.IOException
 
 /** Creates capture directories without ever reusing an existing take. */
 internal object CaptureStorage {
+    private val legacyPrefixes = listOf("RawLite_")
+    private val capturePrefixes = mapOf(
+        CaptureOutput.RAW10 to "RAW10",
+        CaptureOutput.PURE10 to "PURE10",
+        CaptureOutput.CINEMA_DNG to "CINEMADNG"
+    )
+
+    fun captureStem(output: CaptureOutput, timestamp: String): String {
+        val prefix = capturePrefixes.getValue(output)
+        return "${prefix}_$timestamp"
+    }
+
+    fun displayName(directoryName: String): String {
+        val prefixes = legacyPrefixes + capturePrefixes.values.map { "${it}_" }
+        return prefixes.firstOrNull { directoryName.startsWith(it) }
+            ?.let { directoryName.removePrefix(it) }
+            ?: directoryName
+    }
+
     fun createUniqueDirectory(base: File, stem: String): File {
         if ((!base.exists() && !base.mkdirs()) || !base.isDirectory) {
             throw IOException("No se pudo preparar el directorio de captura")

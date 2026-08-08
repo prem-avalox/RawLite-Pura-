@@ -9,7 +9,7 @@ import java.io.File
 /** Filesystem boundary for the gallery. Inspection is read-only; deletion remains explicit. */
 internal class ClipRepository {
     fun list(baseDirectory: File?): List<ClipSummary> = baseDirectory
-        ?.listFiles { file -> file.isDirectory && file.name.startsWith(CLIP_PREFIX) }
+        ?.listFiles { file -> file.isDirectory }
         ?.mapNotNull(::inspect)
         ?.sortedByDescending { it.directory.lastModified() }
         .orEmpty()
@@ -21,7 +21,4 @@ internal class ClipRepository {
             ?: Raw10Clip.inspect(directory)
             ?: DngSequenceClip.inspect(directory)
 
-    companion object {
-        private const val CLIP_PREFIX = "RawLite_"
-    }
 }

@@ -444,7 +444,7 @@ class ReviewActivity : Activity() {
     private fun openClip(summary: ClipSummary) {
         clearPlayback()
         activeSummary = summary
-        titleView.text = summary.directory.name.removePrefix("RawLite_")
+        titleView.text = CaptureStorage.displayName(summary.directory.name)
         backButton.contentDescription = "Volver a tomas"
         when (summary.captureFormat) {
             "PURE 10" -> buildPure10Player(summary)
