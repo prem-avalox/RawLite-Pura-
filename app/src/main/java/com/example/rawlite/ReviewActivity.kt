@@ -603,7 +603,11 @@ class ReviewActivity : Activity() {
                 updateTimeLabels(initialPosition)
                 restorePositionMs = null
                 restoreShouldPlay = false
-                prepareAudio(summary.directory)
+                if (!summary.integratedAudio) prepareAudio(summary.directory) else {
+                    audioPlayer = null
+                    audioOffsetMs = 0
+                    updateAudioButton()
+                }
                 if (playWhenReady) startPlayback()
             }
             player.setOnCompletionListener {

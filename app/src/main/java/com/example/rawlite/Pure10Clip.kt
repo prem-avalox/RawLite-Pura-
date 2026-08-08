@@ -11,9 +11,22 @@ internal object Pure10Clip {
         return runCatching {
             val metadata = JSONObject(descriptionFile.readText())
             if (metadata.optString("format") != "rawlite-pure10") return null
-            val videoName = metadata.optString("video_file", Pure10Encoder.VIDEO_FILE)
+            val finalVideoName = metadata.optString("final_video_file", "")
+            val finalVideo = if (metadata.optBoolean(Pure10AudioMuxer.FINAL_VIDEO_HAS_AUDIO, false) &&
+                finalVideoName.isNotBlank()
+            ) {
+                File(directory, finalVideoName)
+            } else {
+                null
+            }
+            val videoName = if (finalVideo?.isFile == true && finalVideo.length() > 0L) {
+                finalVideo.name
+            } else {
+                metadata.optString("video_file", Pure10Encoder.VIDEO_FILE)
+            }
             val video = File(directory, videoName)
             if (!video.isFile || video.length() <= 0L) return null
+            val integratedAudio = videoName == finalVideo?.name
             val fps = metadata.optInt("frame_rate", 0).coerceAtLeast(1)
             var frameCount = metadata.optInt("encoded_frames", 0)
             var durationSeconds = 0.0
@@ -58,7 +71,8 @@ internal object Pure10Clip {
                 finalized = metadata.optBoolean("finalized", false),
                 audioDescription = audio,
                 captureFormat = "PURE 10",
-                videoFileName = videoName
+                videoFileName = videoName,
+                integratedAudio = integratedAudio
             )
         }.getOrNull()
     }

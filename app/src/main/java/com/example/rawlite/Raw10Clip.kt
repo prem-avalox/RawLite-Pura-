@@ -36,7 +36,8 @@ internal data class ClipSummary(
     val finalized: Boolean,
     val audioDescription: String?,
     val captureFormat: String = "RAW10",
-    val videoFileName: String? = null
+    val videoFileName: String? = null,
+    val integratedAudio: Boolean = false
 ) {
     val durationSeconds: Double
         get() = if (fps > 0) timelineFrameCount.toDouble() / fps else 0.0
