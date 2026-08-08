@@ -431,7 +431,7 @@ class ReviewActivity : Activity() {
                             .absolutePath
                     )
                     retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                        ?.let { orientBitmap(it, summary.directory) }
+                        ?.let { orientPure10Bitmap(it, summary) }
                 } finally {
                     retriever.release()
                 }
@@ -457,7 +457,18 @@ class ReviewActivity : Activity() {
         playbackKind = PlaybackKind.PURE10
         val playerUi = buildPlayerShell(summary, usesFrames = false)
         val video = AspectRatioTextureView(this).apply {
-            setVideoGeometry(summary.width, summary.height, readRotation(summary.directory))
+            val rotation = readRotation(summary.directory)
+            setVideoGeometry(
+                summary.width,
+                summary.height,
+                VideoOrientation.textureRotationDegrees(
+                    metadataRotationDegrees = rotation,
+                    encodedWidth = summary.width,
+                    encodedHeight = summary.height,
+                    reportedWidth = summary.width,
+                    reportedHeight = summary.height
+                )
+            )
             surfaceTextureListener = object : TextureView.SurfaceTextureListener {
                 override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) {
                     prepareVideo(summary, texture)
@@ -492,7 +503,18 @@ class ReviewActivity : Activity() {
             player.setDataSource(file.absolutePath)
             player.setSurface(surface)
             player.setOnVideoSizeChangedListener { _, width, height ->
-                textureView?.setVideoGeometry(width, height, readRotation(summary.directory))
+                val rotation = readRotation(summary.directory)
+                textureView?.setVideoGeometry(
+                    width,
+                    height,
+                    VideoOrientation.textureRotationDegrees(
+                        metadataRotationDegrees = rotation,
+                        encodedWidth = summary.width,
+                        encodedHeight = summary.height,
+                        reportedWidth = width,
+                        reportedHeight = height
+                    )
+                )
             }
             player.setOnPreparedListener {
                 videoPrepared = true
@@ -1047,15 +1069,22 @@ class ReviewActivity : Activity() {
         }.getOrDefault(0)
     }
 
-    private fun orientBitmap(bitmap: Bitmap, directory: File): Bitmap {
+    private fun orientPure10Bitmap(bitmap: Bitmap, summary: ClipSummary): Bitmap {
+        val directory = summary.directory
         val metadata = runCatching {
             JSONObject(File(directory, "clip.json").readText())
         }.getOrNull()
-        val rotation = metadata?.optInt("rotation_degrees", 0) ?: 0
+        val rotation = VideoOrientation.bitmapRotationDegrees(
+            metadataRotationDegrees = metadata?.optInt("rotation_degrees", 0) ?: 0,
+            encodedWidth = summary.width,
+            encodedHeight = summary.height,
+            bitmapWidth = bitmap.width,
+            bitmapHeight = bitmap.height
+        )
         val mirrored = metadata?.optBoolean("front_facing", false) == true
         if (rotation % 360 == 0 && !mirrored) return bitmap
         val matrix = Matrix().apply {
-            postRotate((((rotation % 360) + 360) % 360).toFloat())
+            postRotate(rotation.toFloat())
             if (mirrored) postScale(-1f, 1f)
         }
         val oriented = Bitmap.createBitmap(
