@@ -18,6 +18,10 @@ import android.graphics.RectF
 import android.graphics.SurfaceTexture
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
@@ -92,7 +96,9 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
+import kotlin.math.atan2
 import kotlin.math.exp
+import kotlin.math.hypot
 import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
@@ -248,12 +254,37 @@ class MainActivity : Activity() {
     private val telemetryHandler = Handler(Looper.getMainLooper())
     private val chromeHandler = Handler(Looper.getMainLooper())
     private lateinit var contentOrientationListener: OrientationEventListener
+    private lateinit var sensorManager: SensorManager
+    private var stabilizerSensor: Sensor? = null
     private var baseContentOrientation: Int? = null
     private var rotationLockedByUser = false
     private var lastAllowedContentRotation = 0f
     private var appliedContentRotation = 0f
     private var detectedDeviceOrientationDegrees = 0
     private var recordingDisplayRotationDegrees = 0
+    private val stabilizerGravity = FloatArray(3)
+    private var stabilizerGravityInitialized = false
+    private var lastStabilizerRollDegrees = 0f
+    private var lastStabilizerUpdateMs = 0L
+    private val stabilizerListener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent) {
+            if (!::cameraChrome.isInitialized) return
+            val alpha = if (event.sensor.type == Sensor.TYPE_GRAVITY) 1f else 0.22f
+            if (!stabilizerGravityInitialized || alpha >= 1f) {
+                stabilizerGravity[0] = event.values[0]
+                stabilizerGravity[1] = event.values[1]
+                stabilizerGravity[2] = event.values[2]
+                stabilizerGravityInitialized = true
+            } else {
+                stabilizerGravity[0] += (event.values[0] - stabilizerGravity[0]) * alpha
+                stabilizerGravity[1] += (event.values[1] - stabilizerGravity[1]) * alpha
+                stabilizerGravity[2] += (event.values[2] - stabilizerGravity[2]) * alpha
+            }
+            updateStabilizerGuide()
+        }
+
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+    }
 
     private var cameraOptions: List<CameraOption> = emptyList()
     private var selectedCameraIndex = 0
@@ -389,6 +420,9 @@ class MainActivity : Activity() {
             }
         }
         powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        stabilizerSensor = sensorManager.getDefaultSensor(Sensor.TYPE_GRAVITY)
+            ?: sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         requestRequiredPermissions()
     }
 
@@ -433,6 +467,7 @@ class MainActivity : Activity() {
     override fun onStop() {
         chromeHandler.removeCallbacks(chromeRefresh)
         if (::contentOrientationListener.isInitialized) contentOrientationListener.disable()
+        unregisterStabilizerSensor()
         stopTelemetryMonitor()
         if (!isChangingConfigurations) {
             closeCameraForBackground(
@@ -448,6 +483,7 @@ class MainActivity : Activity() {
         if (::contentOrientationListener.isInitialized && contentOrientationListener.canDetectOrientation()) {
             contentOrientationListener.enable()
         }
+        registerStabilizerSensor()
         chromeHandler.removeCallbacks(chromeRefresh)
         chromeHandler.post(chromeRefresh)
         startTelemetryMonitor()
@@ -3617,6 +3653,76 @@ class MainActivity : Activity() {
         settingsDialogFrame?.contentRotationDegrees = lastAllowedContentRotation
     }
 
+    private fun registerStabilizerSensor() {
+        if (!::sensorManager.isInitialized) return
+        val sensor = stabilizerSensor
+        if (sensor == null) {
+            if (::cameraChrome.isInitialized) cameraChrome.stabilizerAvailable = false
+            return
+        }
+        sensorManager.registerListener(
+            stabilizerListener,
+            sensor,
+            SensorManager.SENSOR_DELAY_UI
+        )
+        if (::cameraChrome.isInitialized) cameraChrome.stabilizerAvailable = true
+    }
+
+    private fun unregisterStabilizerSensor() {
+        if (!::sensorManager.isInitialized) return
+        sensorManager.unregisterListener(stabilizerListener)
+        stabilizerGravityInitialized = false
+        if (::cameraChrome.isInitialized) {
+            cameraChrome.stabilizerAvailable = false
+            cameraChrome.stabilizerStable = false
+        }
+    }
+
+    private fun updateStabilizerGuide() {
+        if (!stabilizerGravityInitialized || !::cameraChrome.isInitialized) return
+        val x = stabilizerGravity[0]
+        val y = stabilizerGravity[1]
+        val screenGravity = when (@Suppress("DEPRECATION") windowManager.defaultDisplay.rotation) {
+            Surface.ROTATION_90 -> -y to x
+            Surface.ROTATION_180 -> -x to -y
+            Surface.ROTATION_270 -> y to -x
+            else -> x to y
+        }
+        val screenX = screenGravity.first
+        val screenY = screenGravity.second
+        val projectedGravity = hypot(screenX, screenY)
+        if (projectedGravity < STABILIZER_MIN_PROJECTED_GRAVITY) {
+            cameraChrome.stabilizerAvailable = false
+            cameraChrome.stabilizerStable = false
+            return
+        }
+        val rollDegrees = Math.toDegrees(
+            atan2(screenX.toDouble(), (-screenY).toDouble())
+        ).toFloat().normalizeDegrees()
+        val now = SystemClock.elapsedRealtime()
+        val elapsedMs = (now - lastStabilizerUpdateMs).coerceAtLeast(1L)
+        val motionDegrees = if (lastStabilizerUpdateMs == 0L) {
+            0f
+        } else {
+            abs((rollDegrees - lastStabilizerRollDegrees).normalizeDegrees())
+        }
+        val motionPerSecond = motionDegrees * 1000f / elapsedMs
+        val stable = abs(rollDegrees) <= STABILIZER_LEVEL_TOLERANCE_DEGREES &&
+            motionPerSecond <= STABILIZER_MOTION_TOLERANCE_DEGREES_PER_SECOND
+        lastStabilizerRollDegrees = rollDegrees
+        lastStabilizerUpdateMs = now
+        cameraChrome.stabilizerAvailable = true
+        cameraChrome.stabilizerRollDegrees = rollDegrees
+        cameraChrome.stabilizerStable = stable
+    }
+
+    private fun Float.normalizeDegrees(): Float {
+        var value = this
+        while (value > 180f) value -= 360f
+        while (value < -180f) value += 360f
+        return value
+    }
+
     private fun currentRawSize(): Size? = currentOption()?.rawSizes?.getOrNull(selectedRawIndex)
     private fun currentPreviewSize(): Size {
         return PREVIEW_SIZES.getOrElse(selectedPreviewIndex) { PREVIEW_SIZES.last() }
@@ -4180,6 +4286,9 @@ class MainActivity : Activity() {
         private const val MAX_KELVIN = 10000
         private const val PREVIEW_METERING_FRAMES = 8
         private const val TELEMETRY_INTERVAL_MS = 2_000L
+        private const val STABILIZER_MIN_PROJECTED_GRAVITY = 1.8f
+        private const val STABILIZER_LEVEL_TOLERANCE_DEGREES = 1.25f
+        private const val STABILIZER_MOTION_TOLERANCE_DEGREES_PER_SECOND = 8.0f
         private val CAPTURE_PROFILE = Pixel6ReferenceProfile.capture
         private val CHECKPOINT_SECONDS = CAPTURE_PROFILE.checkpointSeconds
         private val MAX_PENDING_METADATA_IMAGES = CAPTURE_PROFILE.maximumPendingMetadataImages

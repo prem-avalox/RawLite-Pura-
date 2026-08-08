@@ -161,6 +161,25 @@ class CameraChromeView(context: Context) : View(context) {
             field = value
             invalidate()
         }
+    var stabilizerAvailable: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            invalidate()
+        }
+    var stabilizerRollDegrees: Float = 0f
+        set(value) {
+            val next = value.coerceIn(-STABILIZER_MAX_ROLL_DEGREES, STABILIZER_MAX_ROLL_DEGREES)
+            if (abs(field - next) < 0.08f) return
+            field = next
+            invalidate()
+        }
+    var stabilizerStable: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            invalidate()
+        }
     var timerText: String = "00:00"
         set(value) {
             if (field == value) return
@@ -245,6 +264,7 @@ class CameraChromeView(context: Context) : View(context) {
     private var recordRingAnimator: ValueAnimator? = null
     private var galleryRecordingVisibility = 1f
     private var galleryRecordingAnimator: ValueAnimator? = null
+    private var lastBlockedHapticUptime = 0L
     private val lockGroupProgress = FloatArray(3) { 1f }
     private val lockGroupAnimators = arrayOfNulls<ValueAnimator>(3)
     private val dPadAccentProgress = FloatArray(5)
@@ -603,6 +623,7 @@ class CameraChromeView(context: Context) : View(context) {
             drawAuto(canvas, autoRect(landscape = true))
         }
         drawParameterName(canvas, landscape = true)
+        drawStabilizerGuide(canvas, landscape = true)
         drawCaptureControls(canvas, landscape = true)
         drawBezelButtons(canvas, landscape = true)
         if (lockMenuProgress > 0.001f) drawLockMenu(canvas, landscape = true)
@@ -622,6 +643,7 @@ class CameraChromeView(context: Context) : View(context) {
             drawAuto(canvas, autoRect(landscape = false))
         }
         drawParameterName(canvas, landscape = false)
+        drawStabilizerGuide(canvas, landscape = false)
         drawCaptureControls(canvas, landscape = false)
         drawBezelButtons(canvas, landscape = false)
         if (lockMenuProgress > 0.001f) drawLockMenu(canvas, landscape = false)
@@ -912,6 +934,40 @@ class CameraChromeView(context: Context) : View(context) {
         paint.style = Paint.Style.FILL
         paint.color = scaledAlpha(color, alpha)
         canvas.drawText(text, cx, baseline, paint)
+    }
+
+    private fun drawStabilizerGuide(canvas: Canvas, landscape: Boolean) {
+        if (!stabilizerAvailable) return
+        val center = if (landscape) PointF(1065f, 589.5f) else PointF(589.5f, 1065f)
+        val color = if (stabilizerStable) AUTO else Color.WHITE
+        val alpha = if (stabilizerStable) 235 else 145
+        val roll = stabilizerRollDegrees
+        canvas.save()
+        canvas.rotate(roll, center.x, center.y)
+        val previousCap = paint.strokeCap
+        paint.strokeCap = Paint.Cap.ROUND
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 7f
+        paint.color = scaledAlpha(Color.BLACK, 0.52f)
+        drawStabilizerSegments(canvas, center, outline = true)
+        paint.strokeWidth = if (stabilizerStable) 4f else 3f
+        paint.color = scaledAlpha(color, alpha / 255f)
+        drawStabilizerSegments(canvas, center, outline = false)
+        paint.style = Paint.Style.FILL
+        paint.color = scaledAlpha(color, if (stabilizerStable) 0.92f else 0.48f)
+        canvas.drawCircle(center.x, center.y, if (stabilizerStable) 5.5f else 3.5f, paint)
+        paint.strokeCap = previousCap
+        paint.alpha = 255
+        canvas.restore()
+    }
+
+    private fun drawStabilizerSegments(canvas: Canvas, center: PointF, outline: Boolean) {
+        val outer = if (outline) 199f else 196f
+        val inner = if (outline) 86f else 90f
+        val tickHalf = if (outline) 17f else 14f
+        canvas.drawLine(center.x - outer, center.y, center.x - inner, center.y, paint)
+        canvas.drawLine(center.x + inner, center.y, center.x + outer, center.y, paint)
+        canvas.drawLine(center.x, center.y - tickHalf, center.x, center.y + tickHalf, paint)
     }
 
     private fun drawCaptureControls(canvas: Canvas, landscape: Boolean) {
@@ -1600,7 +1656,10 @@ class CameraChromeView(context: Context) : View(context) {
     }
 
     private fun invokeRepeatedAction() {
-        if (!invokeDPadStep(repeatedDirection, repeatedParameterAxis)) stopRepeating()
+        if (!invokeDPadStep(repeatedDirection, repeatedParameterAxis)) {
+            blockedHaptic()
+            stopRepeating()
+        }
     }
 
     private fun invokeDPadStep(direction: Int, parameterAxis: Boolean): Boolean {
@@ -1627,6 +1686,35 @@ class CameraChromeView(context: Context) : View(context) {
         if (value == lastWheelHapticValue) return
         lastWheelHapticValue = value
         pulseHaptic()
+    }
+
+    private fun blockedHaptic() {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastBlockedHapticUptime < BLOCKED_HAPTIC_COOLDOWN_MS) return
+        lastBlockedHapticUptime = now
+        if (performHapticFeedback(
+                HapticFeedbackConstants.LONG_PRESS,
+                HapticFeedbackConstants.FLAG_IGNORE_GLOBAL_SETTING
+            )
+        ) {
+            return
+        }
+        val motor = vibrator ?: return
+        if (!motor.hasVibrator()) return
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                motor.vibrate(
+                    VibrationEffect.createWaveform(
+                        longArrayOf(0L, 24L, 32L, 34L),
+                        intArrayOf(0, 78, 0, 142),
+                        -1
+                    )
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                motor.vibrate(55L)
+            }
+        }
     }
 
     private fun pulseHaptic() {
@@ -1940,8 +2028,10 @@ class CameraChromeView(context: Context) : View(context) {
         private const val CENTER_LABEL_TEXT_SIZE = 64f
         private const val CENTER_VALUE_NAME_TEXT_SIZE = 30f
         private const val HAPTIC_DURATION_MS = 14L
+        private const val BLOCKED_HAPTIC_COOLDOWN_MS = 180L
         private const val AUTO_LONG_PRESS_MS = 550L
         private const val HAPTIC_AMPLITUDE = 110
+        private const val STABILIZER_MAX_ROLL_DEGREES = 18f
         private const val PARAMETER_LENS = 0
         private const val PARAMETER_RESOLUTION = 6
         private const val DPAD_ARM_HALF_WIDTH = 54f
