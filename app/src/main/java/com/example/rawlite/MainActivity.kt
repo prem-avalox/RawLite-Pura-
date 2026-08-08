@@ -2112,7 +2112,10 @@ class MainActivity : Activity() {
             ioExecutor.execute {
                 try {
                     maybeUpdateRawHistogram(image, currentFrame)
-                    val output = File(dir, "frame_%06d.dng".format(currentFrame))
+                    val output = File(
+                        DngSequenceClip.dngFramesDirectory(dir),
+                        "frame_%06d.dng".format(currentFrame)
+                    )
                     FileOutputStream(output).use { stream ->
                         DngCreator(option.characteristics, result).use { dng ->
                             dng.writeImage(stream, image)
@@ -2643,6 +2646,10 @@ class MainActivity : Activity() {
         val dir = sessionDir ?: return false
         val size = currentRawSize() ?: return false
         return runCatching {
+            val dngDir = File(dir, DngSequenceClip.DNG_DIRECTORY)
+            if ((!dngDir.exists() && !dngDir.mkdirs()) || !dngDir.isDirectory) {
+                throw IOException("No se pudo crear la carpeta DNG")
+            }
             File(dir, "clip.json").writeText(buildDngDescription(size).toString(2))
             true
         }.getOrElse { error ->

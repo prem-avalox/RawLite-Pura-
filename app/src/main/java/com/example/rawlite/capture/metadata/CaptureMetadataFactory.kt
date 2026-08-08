@@ -3,6 +3,7 @@ package com.example.rawlite.capture.metadata
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.params.ColorSpaceTransform
 import android.util.Size
+import com.example.rawlite.DngSequenceClip
 import com.example.rawlite.PcmAudioRecorder
 import com.example.rawlite.Pure10Encoder
 import org.json.JSONArray
@@ -90,6 +91,7 @@ internal object CaptureMetadataFactory {
         put("version", 1)
         put("mode", "RAW")
         put("container", "CinemaDNG sequence")
+        put("dng_directory", DngSequenceClip.DNG_DIRECTORY)
         put("bits_per_sample", 16)
         put("finalized", false)
     }

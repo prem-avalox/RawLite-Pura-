@@ -67,7 +67,8 @@ internal class DngSequenceClip private constructor(
         }
 
         private fun openInternal(directory: File, summaryOnly: Boolean): DngSequenceClip? {
-            val files = directory.listFiles { file ->
+            val sequenceDirectory = dngFramesDirectory(directory)
+            val files = sequenceDirectory.listFiles { file ->
                 file.isFile && file.name.startsWith("frame_") && file.extension.equals("dng", true)
             }?.sortedBy(::timelineFrame).orEmpty()
             if (files.isEmpty()) return null
@@ -137,6 +138,13 @@ internal class DngSequenceClip private constructor(
         private fun timelineFrame(file: File): Int {
             return file.nameWithoutExtension.substringAfter("frame_").toIntOrNull() ?: 0
         }
+
+        fun dngFramesDirectory(directory: File): File {
+            val nested = File(directory, DNG_DIRECTORY)
+            return if (nested.isDirectory) nested else directory
+        }
+
+        const val DNG_DIRECTORY = "dng"
 
         private fun readAudioMetadata(directory: File): JSONObject? {
             return runCatching { JSONObject(File(directory, "audio.json").readText()) }.getOrNull()
