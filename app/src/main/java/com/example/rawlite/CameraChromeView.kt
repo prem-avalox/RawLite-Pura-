@@ -2042,7 +2042,7 @@ class CameraChromeView(context: Context) : View(context) {
         private const val RECORD_RING_HALF_CYCLE_MS = 720L
         private const val GALLERY_HIDE_MS = 240L
         private const val GALLERY_SHOW_MS = 280L
-        private const val STABILIZER_ROLL_TRANSITION_MS = 120L
+        private const val STABILIZER_ROLL_TRANSITION_MS = 180L
         private const val CENTER_LABEL_TEXT_SIZE = 64f
         private const val CENTER_VALUE_NAME_TEXT_SIZE = 30f
         private const val HAPTIC_DURATION_MS = 14L

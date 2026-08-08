@@ -404,12 +404,7 @@ class MainActivity : Activity() {
         contentOrientationListener = object : OrientationEventListener(this) {
             override fun onOrientationChanged(orientation: Int) {
                 if (orientation == ORIENTATION_UNKNOWN || !::cameraChrome.isInitialized) return
-                val compensation = when {
-                    orientation < 45 || orientation >= 315 -> 0
-                    orientation < 135 -> 90
-                    orientation < 225 -> return
-                    else -> 270
-                }
+                val compensation = orientationCompensationWithHysteresis(orientation) ?: return
                 detectedDeviceOrientationDegrees = compensation
                 val base = baseContentOrientation ?: 0
                 val relative = (base - compensation + 360) % 360
@@ -3640,6 +3635,33 @@ class MainActivity : Activity() {
         return (base - appliedContentRotation.roundToInt() + 360) % 360
     }
 
+    private fun orientationCompensationWithHysteresis(orientation: Int): Int? {
+        return when (detectedDeviceOrientationDegrees) {
+            0 -> when {
+                orientation in 60..120 -> 90
+                orientation in 240..300 -> 270
+                orientation in 120..240 -> null
+                else -> 0
+            }
+            90 -> when {
+                orientation <= 30 || orientation >= 330 -> 0
+                orientation in 240..300 -> 270
+                else -> 90
+            }
+            270 -> when {
+                orientation <= 30 || orientation >= 330 -> 0
+                orientation in 60..120 -> 90
+                else -> 270
+            }
+            else -> when {
+                orientation < 45 || orientation >= 315 -> 0
+                orientation < 135 -> 90
+                orientation >= 225 -> 270
+                else -> null
+            }
+        }
+    }
+
     private fun applyLatestAutomaticRotation() {
         if (rotationLockedByUser || recording || switchingSession ||
             !::cameraChrome.isInitialized
@@ -3697,12 +3719,21 @@ class MainActivity : Activity() {
         val rollDegrees = Math.toDegrees(
             atan2(screenX.toDouble(), (-screenY).toDouble())
         ).toFloat().normalizeDegrees()
-        val orientationAnchor = appliedContentRotation.normalizeDegrees()
+        val orientationAnchor = stabilizerOrientationAnchorDegrees()
         val leveledRollDegrees = (rollDegrees - orientationAnchor).normalizeDegrees()
         val stable = abs(leveledRollDegrees) <= STABILIZER_LEVEL_TOLERANCE_DEGREES
         cameraChrome.stabilizerAvailable = true
         cameraChrome.stabilizerRollDegrees = leveledRollDegrees
         cameraChrome.stabilizerStable = stable
+    }
+
+    private fun stabilizerOrientationAnchorDegrees(): Float {
+        return when (((appliedContentRotation / 90f).roundToInt() % 4 + 4) % 4) {
+            0 -> 180f
+            1 -> 90f
+            2 -> 0f
+            else -> -90f
+        }
     }
 
     private fun Float.normalizeDegrees(): Float {
@@ -4276,7 +4307,7 @@ class MainActivity : Activity() {
         private const val PREVIEW_METERING_FRAMES = 8
         private const val TELEMETRY_INTERVAL_MS = 2_000L
         private const val STABILIZER_MIN_PROJECTED_GRAVITY = 1.8f
-        private const val STABILIZER_LEVEL_TOLERANCE_DEGREES = 1.25f
+        private const val STABILIZER_LEVEL_TOLERANCE_DEGREES = 1.8f
         private val CAPTURE_PROFILE = Pixel6ReferenceProfile.capture
         private val CHECKPOINT_SECONDS = CAPTURE_PROFILE.checkpointSeconds
         private val MAX_PENDING_METADATA_IMAGES = CAPTURE_PROFILE.maximumPendingMetadataImages
