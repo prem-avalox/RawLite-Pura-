@@ -32,6 +32,7 @@ class CameraChromeView(context: Context) : View(context) {
     var onParameterSelected: ((Int) -> Unit)? = null
     var onRawPressed: (() -> Unit)? = null
     var onAutoPressed: (() -> Unit)? = null
+    var onAutoLongPressed: (() -> Unit)? = null
     var onPushAutoChanged: ((Boolean) -> Unit)? = null
     var onWheelChanged: ((Int) -> Unit)? = null
     var onStep: ((Int) -> Unit)? = null
@@ -54,6 +55,13 @@ class CameraChromeView(context: Context) : View(context) {
         set(value) {
             if (field == value) return
             field = value
+            invalidate()
+        }
+    var autoParameterStates: List<Boolean> = listOf(false, false, true, true, true, true, false)
+        set(value) {
+            val normalized = List(7) { index -> value.getOrNull(index) == true }
+            if (field == normalized) return
+            field = normalized
             invalidate()
         }
     var selectedParameter: Int = 3
@@ -212,6 +220,7 @@ class CameraChromeView(context: Context) : View(context) {
     private var dPadLastMoveUptime = 0L
     private var dPadDragAccumulator = 0f
     private var dPadIntensity = 0f
+    private var autoLongPressTriggered = false
     private val repeatHandler = Handler(Looper.getMainLooper())
     private var chromeToolsVisible = true
     private var chromeReveal = 1f
@@ -634,6 +643,7 @@ class CameraChromeView(context: Context) : View(context) {
             }
             val color = when {
                 index == 7 && rawActive -> ACCENT
+                index in 0..6 && autoParameterStates.getOrNull(index) == true -> AUTO
                 else -> blendColor(Color.WHITE, ACCENT, selectorAccentProgress[index])
             }
             val label = if (index == 7) captureModeLabel else selectorValues.getOrElse(index) { "—" }
@@ -1282,6 +1292,8 @@ class CameraChromeView(context: Context) : View(context) {
             autoRect(layoutLandscape).contains(point.x, point.y)
         ) {
             touchTarget = TARGET_AUTO
+            autoLongPressTriggered = false
+            repeatHandler.postDelayed(autoLongPressRunnable, AUTO_LONG_PRESS_MS)
             return true
         }
         if (insideCircle(point, pushAutoCenter(layoutLandscape), 108f) && pushAutoEnabled) {
@@ -1377,6 +1389,7 @@ class CameraChromeView(context: Context) : View(context) {
         stopRepeating()
         val target = touchTarget
         touchTarget = TARGET_NONE
+        if (target == TARGET_AUTO) repeatHandler.removeCallbacks(autoLongPressRunnable)
         if (target == TARGET_RECORD) animateRecordPress(false)
         if (target == TARGET_REVIEW) invalidate()
         if (target == TARGET_PRECISION) {
@@ -1415,7 +1428,8 @@ class CameraChromeView(context: Context) : View(context) {
                 onParameterSelected?.invoke(nextParameter)
             }
             target == TARGET_SELECTOR_BASE + 7 && controlsEnabled -> onRawPressed?.invoke()
-            target == TARGET_AUTO && controlsEnabled && selectedValueEnabled -> onAutoPressed?.invoke()
+            target == TARGET_AUTO && controlsEnabled && selectedValueEnabled &&
+                !autoLongPressTriggered -> onAutoPressed?.invoke()
             target == TARGET_RECORD && recordEnabled && insideCircle(point, recordCenter(layoutLandscape), 115f) -> {
                 onRecordPressed?.invoke()
             }
@@ -1441,6 +1455,13 @@ class CameraChromeView(context: Context) : View(context) {
             }
         }
         return true
+    }
+
+    private val autoLongPressRunnable = Runnable {
+        if (touchTarget != TARGET_AUTO || !controlsEnabled || !selectedValueEnabled) return@Runnable
+        autoLongPressTriggered = true
+        pulseHaptic()
+        onAutoLongPressed?.invoke()
     }
 
     override fun performClick(): Boolean {
@@ -1690,6 +1711,7 @@ class CameraChromeView(context: Context) : View(context) {
         centerLabelAnimator?.cancel()
         centerLabelVisibilityAnimator?.cancel()
         repeatHandler.removeCallbacks(hideCenterLabelRunnable)
+        repeatHandler.removeCallbacks(autoLongPressRunnable)
         statusPopupAnimator?.cancel()
         repeatHandler.removeCallbacks(hideStatusPopupRunnable)
         autoAccentAnimator?.cancel()
@@ -1918,6 +1940,7 @@ class CameraChromeView(context: Context) : View(context) {
         private const val CENTER_LABEL_TEXT_SIZE = 64f
         private const val CENTER_VALUE_NAME_TEXT_SIZE = 30f
         private const val HAPTIC_DURATION_MS = 14L
+        private const val AUTO_LONG_PRESS_MS = 550L
         private const val HAPTIC_AMPLITUDE = 110
         private const val PARAMETER_LENS = 0
         private const val PARAMETER_RESOLUTION = 6
@@ -1951,6 +1974,7 @@ class CameraChromeView(context: Context) : View(context) {
         private const val TARGET_LOCK_ITEM_BASE = 300
 
         private const val ACCENT = RawLiteDesign.ACCENT
+        private const val AUTO = RawLiteDesign.AUTO
         private const val DIVIDER = RawLiteDesign.DIVIDER
         private const val CHROME_OVERLAY = RawLiteDesign.OVERLAY
         private val PARAMETER_NAMES = listOf(

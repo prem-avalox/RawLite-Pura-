@@ -13,6 +13,7 @@ internal object RawLiteDesign {
     const val ACCENT = 0xFFFFC100.toInt()
     const val ACCENT_DIM = 0x66FFC100
     const val ACCENT_SURFACE = 0xFF5A4700.toInt()
+    const val AUTO = 0xFF35D66B.toInt()
     const val RECORD = 0xFFFF2B2B.toInt()
     const val OVERLAY = 0x80000000.toInt()
 

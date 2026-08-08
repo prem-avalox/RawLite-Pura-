@@ -359,13 +359,11 @@ class MainActivity : Activity() {
             chromeHandler.postDelayed(this, CHROME_REFRESH_MS)
         }
     }
+    private val savePreferencesRunnable = Runnable { saveUserPreferencesNow() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        thirdsGridEnabled = getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE)
-            .getBoolean(PREF_THIRDS_GRID, false)
-        leftHandedMode = getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE)
-            .getBoolean(PREF_LEFT_HANDED, false)
+        loadUserPreferences()
         buildUi()
         @Suppress("DEPRECATION")
         baseContentOrientation = when (windowManager.defaultDisplay.rotation) {
@@ -402,7 +400,10 @@ class MainActivity : Activity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode != REQUEST_PERMISSIONS) return
         audioEnabled = checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
-            PackageManager.PERMISSION_GRANTED
+            PackageManager.PERMISSION_GRANTED &&
+            getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE)
+                .getBoolean(PREF_AUDIO_ENABLED, true)
+        scheduleUserPreferencesSave()
         updateMicrophoneUi()
         if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             if (!::cameraThread.isInitialized) startCameraSystem()
@@ -413,6 +414,8 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         chromeHandler.removeCallbacks(chromeRefresh)
+        chromeHandler.removeCallbacks(savePreferencesRunnable)
+        saveUserPreferencesNow()
         if (::contentOrientationListener.isInitialized) contentOrientationListener.disable()
         recording = false
         closeCamera()
@@ -473,12 +476,78 @@ class MainActivity : Activity() {
             }
         }
         if (missing.isEmpty()) {
-            audioEnabled = true
+            audioEnabled = audioEnabled && checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED
             updateMicrophoneUi()
             startCameraSystem()
         } else {
             requestPermissions(missing.toTypedArray(), REQUEST_PERMISSIONS)
         }
+    }
+
+    private fun loadUserPreferences() {
+        val prefs = getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE)
+        thirdsGridEnabled = prefs.getBoolean(PREF_THIRDS_GRID, false)
+        leftHandedMode = prefs.getBoolean(PREF_LEFT_HANDED, false)
+        selectedCameraIndex = prefs.getInt(PREF_CAMERA_INDEX, selectedCameraIndex).coerceAtLeast(0)
+        selectedRawIndex = prefs.getInt(PREF_RAW_INDEX, selectedRawIndex).coerceAtLeast(0)
+        selectedPreviewIndex = prefs.getInt(PREF_PREVIEW_INDEX, selectedPreviewIndex)
+            .coerceIn(PREVIEW_SIZES.indices)
+        selectedFps = prefs.getInt(PREF_FPS, selectedFps)
+            .takeIf { FPS_OPTIONS.contains(it) } ?: selectedFps
+        captureMode = runCatching {
+            CaptureMode.valueOf(prefs.getString(PREF_CAPTURE_MODE, captureMode.name) ?: captureMode.name)
+        }.getOrDefault(captureMode)
+        selectedParameter = runCatching {
+            CameraParameter.valueOf(
+                prefs.getString(PREF_SELECTED_PARAMETER, selectedParameter.name)
+                    ?: selectedParameter.name
+            )
+        }.getOrDefault(selectedParameter)
+        lockExposure = prefs.getBoolean(PREF_LOCK_EXPOSURE, lockExposure)
+        lockWhiteBalance = prefs.getBoolean(PREF_LOCK_WB, lockWhiteBalance)
+        lockFocus = prefs.getBoolean(PREF_LOCK_FOCUS, lockFocus)
+        manualExposure = prefs.getBoolean(PREF_MANUAL_EXPOSURE, manualExposure)
+        manualWb = prefs.getBoolean(PREF_MANUAL_WB, manualWb)
+        manualFocus = prefs.getBoolean(PREF_MANUAL_FOCUS, manualFocus)
+        isoValue = prefs.getInt(PREF_ISO, isoValue)
+        exposureNs = prefs.getLong(PREF_EXPOSURE_NS, exposureNs)
+        evSteps = prefs.getInt(PREF_EV_STEPS, evSteps)
+        postRawGain = prefs.getInt(PREF_POST_RAW_GAIN, postRawGain)
+        kelvin = prefs.getInt(PREF_KELVIN, kelvin)
+        focusDiopters = prefs.getFloat(PREF_FOCUS_DIOPTERS, focusDiopters)
+        audioEnabled = prefs.getBoolean(PREF_AUDIO_ENABLED, audioEnabled)
+    }
+
+    private fun scheduleUserPreferencesSave() {
+        chromeHandler.removeCallbacks(savePreferencesRunnable)
+        chromeHandler.postDelayed(savePreferencesRunnable, PREF_SAVE_DELAY_MS)
+    }
+
+    private fun saveUserPreferencesNow() {
+        getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE).edit()
+            .putBoolean(PREF_THIRDS_GRID, thirdsGridEnabled)
+            .putBoolean(PREF_LEFT_HANDED, leftHandedMode)
+            .putInt(PREF_CAMERA_INDEX, selectedCameraIndex)
+            .putInt(PREF_RAW_INDEX, selectedRawIndex)
+            .putInt(PREF_PREVIEW_INDEX, selectedPreviewIndex)
+            .putInt(PREF_FPS, selectedFps)
+            .putString(PREF_CAPTURE_MODE, captureMode.name)
+            .putString(PREF_SELECTED_PARAMETER, selectedParameter.name)
+            .putBoolean(PREF_LOCK_EXPOSURE, lockExposure)
+            .putBoolean(PREF_LOCK_WB, lockWhiteBalance)
+            .putBoolean(PREF_LOCK_FOCUS, lockFocus)
+            .putBoolean(PREF_MANUAL_EXPOSURE, manualExposure)
+            .putBoolean(PREF_MANUAL_WB, manualWb)
+            .putBoolean(PREF_MANUAL_FOCUS, manualFocus)
+            .putInt(PREF_ISO, isoValue)
+            .putLong(PREF_EXPOSURE_NS, exposureNs)
+            .putInt(PREF_EV_STEPS, evSteps)
+            .putInt(PREF_POST_RAW_GAIN, postRawGain)
+            .putInt(PREF_KELVIN, kelvin)
+            .putFloat(PREF_FOCUS_DIOPTERS, focusDiopters)
+            .putBoolean(PREF_AUDIO_ENABLED, audioEnabled)
+            .apply()
     }
 
     private fun buildUi() {
@@ -555,6 +624,10 @@ class MainActivity : Activity() {
             background = null
             contentDescription = "Alternar ajuste automático"
             setOnClickListener { toggleSelectedParameterAuto() }
+            setOnLongClickListener {
+                setAllAdjustableParametersAuto()
+                true
+            }
         }
         wheelPanel.addView(wheelAutoButton)
         chromeLayer.addView(wheelPanel)
@@ -648,6 +721,7 @@ class MainActivity : Activity() {
                 toggleCaptureMode()
             }
             onAutoPressed = { toggleSelectedParameterAuto() }
+            onAutoLongPressed = { setAllAdjustableParametersAuto() }
             onPushAutoChanged = { pressed ->
                 if (pressed) beginPushAuto() else endPushAuto()
             }
@@ -669,6 +743,7 @@ class MainActivity : Activity() {
                     CameraChromeView.LockGroup.FOCUS -> lockFocus = enabled
                 }
                 lockSwitch.isChecked = lockExposure || lockWhiteBalance || lockFocus
+                scheduleUserPreferencesSave()
                 updateChromeValues()
             }
         }
@@ -761,6 +836,7 @@ class MainActivity : Activity() {
                 setOnClickListener {
                     if (index != selectedPreviewIndex) {
                         selectedPreviewIndex = index
+                        scheduleUserPreferencesSave()
                         suppressSpinnerEvents = true
                         previewSpinner.setSelection(index)
                         suppressSpinnerEvents = false
@@ -789,6 +865,7 @@ class MainActivity : Activity() {
                     control.isChecked = false
                 } else {
                     audioEnabled = checked
+                    scheduleUserPreferencesSave()
                     updateMicrophoneUi()
                 }
             })
@@ -796,19 +873,13 @@ class MainActivity : Activity() {
         panel.addView(settingsSwitch("Cuadrícula de tercios", thirdsGridEnabled) { _, checked ->
                 thirdsGridEnabled = checked
                 technicalOverlay.thirdsGridEnabled = checked
-                getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE)
-                    .edit()
-                    .putBoolean(PREF_THIRDS_GRID, checked)
-                    .apply()
+                scheduleUserPreferencesSave()
             })
         panel.addView(settingsDivider())
         panel.addView(settingsSwitch("Controles para zurdos", leftHandedMode) { _, checked ->
                 leftHandedMode = checked
                 cameraChrome.leftHanded = checked
-                getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE)
-                    .edit()
-                    .putBoolean(PREF_LEFT_HANDED, checked)
-                    .apply()
+                scheduleUserPreferencesSave()
             })
         lateinit var dialog: AlertDialog
         panel.addView(settingsDivider())
@@ -894,10 +965,24 @@ class MainActivity : Activity() {
         selectedParameter = parameter
         if (::cameraChrome.isInitialized) cameraChrome.selectedParameter = parameter.ordinal
         selectorButtons.forEach { (candidate, button) ->
-            button.setTextColor(if (candidate == parameter) ACCENT else Color.WHITE)
+            button.setTextColor(parameterTextColor(candidate))
         }
+        scheduleUserPreferencesSave()
         syncWheelToSelectedParameter()
         updateChromeValues()
+    }
+
+    private fun parameterTextColor(parameter: CameraParameter): Int = when {
+        parameter == selectedParameter && !parameterIsAuto(parameter) -> ACCENT
+        parameterIsAuto(parameter) -> RawLiteDesign.AUTO
+        else -> Color.WHITE
+    }
+
+    private fun parameterIsAuto(parameter: CameraParameter): Boolean = when (parameter) {
+        CameraParameter.SHUTTER, CameraParameter.ISO -> !manualExposure
+        CameraParameter.WHITE_BALANCE -> !manualWb
+        CameraParameter.FOCUS -> !manualFocus
+        else -> false
     }
 
     private fun syncWheelToSelectedParameter() {
@@ -1000,6 +1085,7 @@ class MainActivity : Activity() {
                 if (index != selectedCameraIndex) {
                     selectedCameraIndex = index
                     selectedRawIndex = 1
+                    scheduleUserPreferencesSave()
                     cameraSpinner.setSelection(index)
                     configureUiForCamera()
                     reopenSelectedCamera()
@@ -1010,6 +1096,7 @@ class MainActivity : Activity() {
                 val fps = FPS_OPTIONS.getOrNull(index) ?: return
                 if (fps != selectedFps) {
                     selectedFps = fps
+                    scheduleUserPreferencesSave()
                     constrainExposureToVideoRange()
                     fpsSpinner.setSelection(index)
                     beginPreviewCadenceMetering()
@@ -1020,6 +1107,7 @@ class MainActivity : Activity() {
             }
             CameraParameter.SHUTTER -> {
                 manualExposure = true
+                scheduleUserPreferencesSave()
                 val snappedProgress = shutterProgressFor(shutterValueForProgress(progress))
                 wheelView.setProgressSilently(snappedProgress)
                 exposureControls.seek.progress = snappedProgress
@@ -1028,6 +1116,7 @@ class MainActivity : Activity() {
             }
             CameraParameter.ISO -> {
                 manualExposure = true
+                scheduleUserPreferencesSave()
                 isoControls.seek.progress = progress
                 updateIsoFromProgress(progress)
                 scheduleControlApply()
@@ -1036,6 +1125,7 @@ class MainActivity : Activity() {
                 manualWb = true
                 manualWbGains = null
                 manualWbTransform = null
+                scheduleUserPreferencesSave()
                 wbControls.seek.progress = progress
                 updateKelvinFromProgress(progress)
                 scheduleControlApply()
@@ -1045,6 +1135,7 @@ class MainActivity : Activity() {
                     ?.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
                 if (maxFocus > 0f) {
                     manualFocus = true
+                    scheduleUserPreferencesSave()
                     focusControls.seek.progress = progress
                     updateFocusFromProgress(progress)
                     scheduleControlApply()
@@ -1060,6 +1151,7 @@ class MainActivity : Activity() {
                 }
                 if (index != selectedRawIndex) {
                     selectedRawIndex = index
+                    scheduleUserPreferencesSave()
                     resolutionSpinner.setSelection(index)
                     updateFormatHint()
                     updateChromeValues()
@@ -1122,9 +1214,38 @@ class MainActivity : Activity() {
             }
             else -> return
         }
+        scheduleUserPreferencesSave()
         beginPreviewCadenceMetering()
         updateControlModes()
         restartRepeating()
+    }
+
+    private fun setAllAdjustableParametersAuto() {
+        if (switchingSession || finalizingOutput || finalizingAudio || finalizingPure10Mux) return
+        var changed = false
+        if (!recording || !lockExposure) {
+            changed = changed || manualExposure
+            manualExposure = false
+        }
+        if (!recording || !lockWhiteBalance) {
+            changed = changed || manualWb || manualWbGains != null || manualWbTransform != null
+            manualWb = false
+            manualWbGains = null
+            manualWbTransform = null
+        }
+        val canFocus = (currentCharacteristics()
+            ?.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f) > 0f
+        if (canFocus && (!recording || !lockFocus)) {
+            changed = changed || manualFocus
+            manualFocus = false
+        }
+        if (!changed) return
+        beginPreviewCadenceMetering()
+        updateControlModes()
+        syncWheelToSelectedParameter()
+        scheduleUserPreferencesSave()
+        restartRepeating()
+        if (::cameraChrome.isInitialized) cameraChrome.showStatusPopup("AUTO")
     }
 
     private fun selectedParameterCanChangeNow(): Boolean {
@@ -1216,6 +1337,7 @@ class MainActivity : Activity() {
         pushAutoCapturesWb = false
         pushAutoCapturesFocus = false
         cameraChrome.pushAutoActive = false
+        scheduleUserPreferencesSave()
         updateAllControlValues()
         syncWheelToSelectedParameter()
         updateControlModes()
@@ -1237,7 +1359,7 @@ class MainActivity : Activity() {
             else -> false
         }
         wheelAutoButton.visibility = if (supportsAuto) View.VISIBLE else View.INVISIBLE
-        wheelAutoButton.setTextColor(if (automatic) ACCENT else Color.WHITE)
+        wheelAutoButton.setTextColor(if (automatic) RawLiteDesign.AUTO else Color.WHITE)
         wheelAutoButton.text = "AUTO"
         if (::cameraChrome.isInitialized) {
             cameraChrome.autoSupported = supportsAuto
@@ -1260,6 +1382,7 @@ class MainActivity : Activity() {
         updateFormatHint()
         updateChromeValues()
         syncWheelToSelectedParameter()
+        scheduleUserPreferencesSave()
         val label = if (captureMode == CaptureMode.PURE10) {
             "PURE 10 · HEVC MAIN10 · HLG"
         } else {
@@ -1294,6 +1417,9 @@ class MainActivity : Activity() {
         selectorButtons[CameraParameter.FOCUS]?.text = formatFocus(displayedFocus)
         selectorButtons[CameraParameter.RESOLUTION]?.text = currentRawSize()
             ?.let(::resolutionDisplayLabel) ?: "RAW"
+        selectorButtons.forEach { (parameter, button) ->
+            button.setTextColor(parameterTextColor(parameter))
+        }
         val modeLabel = if (captureMode == CaptureMode.RAW) "RAW" else "PURE 10"
         rawModeButton.text = modeLabel
         rawModeButton.setTextColor(ACCENT)
@@ -1307,6 +1433,7 @@ class MainActivity : Activity() {
                 formatFocus(displayedFocus),
                 currentRawSize()?.let(::resolutionDisplayLabel) ?: "RAW"
             )
+            cameraChrome.autoParameterStates = CameraParameter.entries.map(::parameterIsAuto)
             cameraChrome.selectedParameter = selectedParameter.ordinal
             cameraChrome.rawActive = true
             cameraChrome.captureModeLabel = modeLabel
@@ -1436,6 +1563,7 @@ class MainActivity : Activity() {
                 if (suppressSpinnerEvents || position == selectedCameraIndex) return
                 selectedCameraIndex = position
                 selectedRawIndex = 1
+                scheduleUserPreferencesSave()
                 configureUiForCamera()
                 reopenSelectedCamera()
             }
@@ -1454,6 +1582,7 @@ class MainActivity : Activity() {
                     return
                 }
                 selectedRawIndex = position
+                scheduleUserPreferencesSave()
                 updateFormatHint()
                 updateChromeValues()
                 syncWheelToSelectedParameter()
@@ -1467,6 +1596,7 @@ class MainActivity : Activity() {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                 if (suppressSpinnerEvents || position == selectedPreviewIndex) return
                 selectedPreviewIndex = position
+                scheduleUserPreferencesSave()
                 reopenSelectedCamera()
             }
 
@@ -1478,6 +1608,7 @@ class MainActivity : Activity() {
                 val fps = FPS_OPTIONS.getOrNull(position) ?: return
                 if (suppressSpinnerEvents || fps == selectedFps) return
                 selectedFps = fps
+                scheduleUserPreferencesSave()
                 constrainExposureToVideoRange()
                 beginPreviewCadenceMetering()
                 updateFormatHint()
@@ -1490,6 +1621,7 @@ class MainActivity : Activity() {
 
         exposureControls.mode?.setOnClickListener {
             manualExposure = !manualExposure
+            scheduleUserPreferencesSave()
             beginPreviewCadenceMetering()
             updateControlModes()
             restartRepeating()
@@ -1498,6 +1630,7 @@ class MainActivity : Activity() {
             manualWb = !manualWb
             manualWbGains = null
             manualWbTransform = null
+            scheduleUserPreferencesSave()
             updateControlModes()
             restartRepeating()
         }
@@ -1506,6 +1639,7 @@ class MainActivity : Activity() {
                 ?.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
             if (maxFocus <= 0f) return@setOnClickListener
             manualFocus = !manualFocus
+            scheduleUserPreferencesSave()
             updateControlModes()
             restartRepeating()
         }
@@ -1537,6 +1671,7 @@ class MainActivity : Activity() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 if (fromUser) {
                     onProgress(progress)
+                    scheduleUserPreferencesSave()
                     restartRepeating()
                 }
             }
@@ -1547,11 +1682,13 @@ class MainActivity : Activity() {
         widgets.minus.setOnClickListener {
             widgets.seek.progress = (widgets.seek.progress + minusDelta()).coerceIn(0, widgets.seek.max)
             onProgress(widgets.seek.progress)
+            scheduleUserPreferencesSave()
             restartRepeating()
         }
         widgets.plus.setOnClickListener {
             widgets.seek.progress = (widgets.seek.progress + plusDelta()).coerceIn(0, widgets.seek.max)
             onProgress(widgets.seek.progress)
+            scheduleUserPreferencesSave()
             restartRepeating()
         }
     }
@@ -1574,6 +1711,7 @@ class MainActivity : Activity() {
         selectedCameraIndex = selectedCameraIndex.coerceIn(cameraOptions.indices)
         cameraSpinner.setSelection(selectedCameraIndex)
         configureUiForCamera()
+        fpsSpinner.setSelection(FPS_OPTIONS.indexOf(selectedFps).coerceAtLeast(0))
         suppressSpinnerEvents = false
 
         preview.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
@@ -1609,6 +1747,9 @@ class MainActivity : Activity() {
             "$mode ${size.width}×${size.height}"
         })
         selectedRawIndex = selectedRawIndex.coerceIn(option.rawSizes.indices)
+        if (captureMode == CaptureMode.PURE10 && selectedRawIndex == 0 && option.rawSizes.size > 1) {
+            selectedRawIndex = 1
+        }
         resolutionSpinner.setSelection(selectedRawIndex)
         suppressSpinnerEvents = false
         updateFormatHint()
@@ -3171,6 +3312,9 @@ class MainActivity : Activity() {
         }
         wbControls.mode?.text = if (manualWb) "MAN" else "AUTO"
         focusControls.mode?.text = if (manualFocus) "MAN" else "AUTO"
+        exposureControls.mode?.setTextColor(if (!manualExposure) RawLiteDesign.AUTO else Color.WHITE)
+        wbControls.mode?.setTextColor(if (!manualWb) RawLiteDesign.AUTO else Color.WHITE)
+        focusControls.mode?.setTextColor(if (!manualFocus) RawLiteDesign.AUTO else Color.WHITE)
 
         val operation = currentOperationState()
         val interactionEnabled = operation.interactionEnabled
@@ -3543,6 +3687,7 @@ class MainActivity : Activity() {
             return
         }
         audioEnabled = !audioEnabled
+        scheduleUserPreferencesSave()
         updateMicrophoneUi()
     }
 
@@ -4056,9 +4201,29 @@ class MainActivity : Activity() {
         private const val RECORD = RawLiteDesign.RECORD
         private const val ACCENT = RawLiteDesign.ACCENT
         private const val CHROME_REFRESH_MS = 100L
+        private const val PREF_SAVE_DELAY_MS = 250L
         private const val UI_PREFS = "ui_preferences"
         private const val PREF_THIRDS_GRID = "thirds_grid"
         private const val PREF_LEFT_HANDED = "left_handed"
+        private const val PREF_CAMERA_INDEX = "camera_index"
+        private const val PREF_RAW_INDEX = "raw_index"
+        private const val PREF_PREVIEW_INDEX = "preview_index"
+        private const val PREF_FPS = "fps"
+        private const val PREF_CAPTURE_MODE = "capture_mode"
+        private const val PREF_SELECTED_PARAMETER = "selected_parameter"
+        private const val PREF_LOCK_EXPOSURE = "lock_exposure"
+        private const val PREF_LOCK_WB = "lock_white_balance"
+        private const val PREF_LOCK_FOCUS = "lock_focus"
+        private const val PREF_MANUAL_EXPOSURE = "manual_exposure"
+        private const val PREF_MANUAL_WB = "manual_white_balance"
+        private const val PREF_MANUAL_FOCUS = "manual_focus"
+        private const val PREF_ISO = "iso"
+        private const val PREF_EXPOSURE_NS = "exposure_ns"
+        private const val PREF_EV_STEPS = "ev_steps"
+        private const val PREF_POST_RAW_GAIN = "post_raw_gain"
+        private const val PREF_KELVIN = "kelvin"
+        private const val PREF_FOCUS_DIOPTERS = "focus_diopters"
+        private const val PREF_AUDIO_ENABLED = "audio_enabled"
         private val FPS_OPTIONS = CAPTURE_PROFILE.frameRates
         private val PREVIEW_SIZES = CAPTURE_PROFILE.previewSizes.map { Size(it.width, it.height) }
         private val STANDARD_VIDEO_SHUTTER_DENOMINATORS = listOf(
