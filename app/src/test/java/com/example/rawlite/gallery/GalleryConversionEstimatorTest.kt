@@ -5,22 +5,21 @@ import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
-class GalleryExportEstimatorTest {
+class GalleryConversionEstimatorTest {
     @Test
-    fun estimate_countsFormatsAndTemporaryDuplication() {
+    fun estimateRaw10ToCinemaDng_ignoresNonRaw10Selections() {
         val raw = clip("RAW10", byteCount = 10_000, width = 4, height = 2, frames = 3)
         val pure = clip("PURE 10", byteCount = 20_000)
         val dng = clip("CinemaDNG", byteCount = 30_000)
 
-        val estimate = GalleryExportEstimator.estimate(listOf(raw, pure, dng))
+        val estimate = GalleryConversionEstimator.estimateRaw10ToCinemaDng(listOf(raw, pure, dng))
 
-        assertEquals(3, estimate.clipCount)
-        assertEquals(1, estimate.raw10Count)
-        assertEquals(1, estimate.pure10Count)
-        assertEquals(1, estimate.cinemaDngCount)
-        assertEquals(60_000, estimate.sourceBytes)
-        assertEquals(60_000, estimate.extraOutputBytes)
-        assertEquals(120_000, estimate.temporaryWorkingBytes)
+        assertEquals(3, estimate.selectedClipCount)
+        assertEquals(1, estimate.raw10ClipCount)
+        assertEquals(2, estimate.ignoredClipCount)
+        assertEquals(10_000, estimate.raw10SourceBytes)
+        assertEquals(10_000, estimate.estimatedCinemaDngBytes)
+        assertEquals(20_000, estimate.temporaryWorkingBytes)
     }
 
     private fun clip(

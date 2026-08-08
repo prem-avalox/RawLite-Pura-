@@ -36,7 +36,7 @@ import android.widget.SeekBar
 import android.widget.TextView
 import android.text.TextUtils
 import com.example.rawlite.gallery.ClipRepository
-import com.example.rawlite.gallery.GalleryExportEstimator
+import com.example.rawlite.gallery.GalleryConversionEstimator
 import org.json.JSONObject
 import java.io.File
 import java.text.SimpleDateFormat
@@ -1277,8 +1277,8 @@ class ReviewActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(0, dp(6), 0, dp(6))
-            addView(selectionActionButton("EXPORTAR", RawLiteDesign.ACCENT) {
-                showExportWarning(selectedClips())
+            addView(selectionActionButton("CONVERTIR", RawLiteDesign.ACCENT) {
+                showConversionWarning(selectedClips())
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
             addView(space(dp(8)))
             addView(selectionActionButton("BORRAR", RawLiteDesign.RECORD) {
@@ -1306,29 +1306,51 @@ class ReviewActivity : Activity() {
             setOnClickListener { if (selectedClipPaths.isNotEmpty() || label == "CANCELAR") action() }
         }
 
-    private fun showExportWarning(clips: List<ClipSummary>) {
+    private fun showConversionWarning(clips: List<ClipSummary>) {
         if (clips.isEmpty()) return
-        val estimate = GalleryExportEstimator.estimate(clips)
+        val estimate = GalleryConversionEstimator.estimateRaw10ToCinemaDng(clips)
+        if (estimate.raw10ClipCount == 0) {
+            showNoRaw10ConversionDialog()
+            return
+        }
         val available = availableMovieBytes()
-        val pressure = if (available > 0L && estimate.extraOutputBytes > available) {
+        val pressure = if (available > 0L && estimate.estimatedCinemaDngBytes > available) {
             "\n\nESPACIO INSUFICIENTE PROBABLE: disponible ${formatBytes(available)}."
         } else {
             "\n\nDisponible aproximado: ${formatBytes(available)}."
         }
         val message = buildString {
-            append("${estimate.clipCount} toma(s) seleccionada(s).\n")
-            append("RAW10: ${estimate.raw10Count}  PURE 10: ${estimate.pure10Count}  ")
-            append("CinemaDNG: ${estimate.cinemaDngCount}\n\n")
-            append("Originales actuales: ${formatBytes(estimate.sourceBytes)}.\n")
-            append("Salida estimada adicional: ${formatBytes(estimate.extraOutputBytes)}.\n")
+            append("Conversión: RAW10 → CinemaDNG 2K.\n")
+            append("${estimate.raw10ClipCount} toma(s) RAW10 seleccionada(s).")
+            if (estimate.ignoredClipCount > 0) {
+                append("\n${estimate.ignoredClipCount} toma(s) no RAW10 se ignorarán.")
+            }
+            append("\n\nRAW10 original: ${formatBytes(estimate.raw10SourceBytes)}.\n")
+            append("CinemaDNG estimado adicional: ${formatBytes(estimate.estimatedCinemaDngBytes)}.\n")
             append("Uso temporal total: ${formatBytes(estimate.temporaryWorkingBytes)}.")
             append(pressure)
-            append("\n\nLa exportación por lotes todavía no ejecuta conversiones en esta versión. ")
+            append("\n\nLa conversión todavía no se ejecuta en esta versión. ")
             append("Este aviso existe para evitar duplicar material sin confirmación explícita.")
         }
         val dialog = AlertDialog.Builder(this)
-            .setTitle("Exportar tomas")
+            .setTitle("Convertir RAW10")
             .setMessage(message)
+            .setPositiveButton("ENTENDIDO", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.window?.setBackgroundDrawable(roundRect(RawLiteDesign.SURFACE_RAISED, dp(4)))
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(RawLiteDesign.ACCENT)
+        }
+        dialog.show()
+    }
+
+    private fun showNoRaw10ConversionDialog() {
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Sin RAW10")
+            .setMessage(
+                "La conversión disponible para este flujo es RAW10 → CinemaDNG 2K.\n\n" +
+                    "PURE 10 ya es video MP4 y CinemaDNG ya es una secuencia DNG; no se convierten aquí."
+            )
             .setPositiveButton("ENTENDIDO", null)
             .create()
         dialog.setOnShowListener {
