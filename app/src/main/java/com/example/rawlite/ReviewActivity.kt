@@ -607,6 +607,7 @@ class ReviewActivity : Activity() {
                 if (!summary.integratedAudio) prepareAudio(summary.directory) else {
                     audioPlayer = null
                     audioOffsetMs = 0
+                    applyIntegratedVideoAudioVolume()
                     updateAudioButton()
                 }
                 if (playWhenReady) startPlayback()
@@ -794,6 +795,7 @@ class ReviewActivity : Activity() {
         audioButton = iconButton(R.drawable.ic_transport_audio, "Silenciar audio") {
             muted = !muted
             audioPlayer?.setVolume(if (muted) 0f else 1f)
+            applyIntegratedVideoAudioVolume()
             updateAudioButton()
         }
         controls.addView(audioButton, LinearLayout.LayoutParams(dp(52), dp(52)))
@@ -867,6 +869,7 @@ class ReviewActivity : Activity() {
         when (playbackKind) {
             PlaybackKind.PURE10 -> {
                 lastVideoProgressMs = positionMs
+                applyIntegratedVideoAudioVolume()
                 videoPlayer?.start()
             }
             PlaybackKind.RAW10, PlaybackKind.DNG -> {
@@ -1201,7 +1204,7 @@ class ReviewActivity : Activity() {
 
     private fun updateAudioButton() {
         val button = audioButton ?: return
-        val available = audioPlayer != null
+        val available = audioPlayer != null || hasIntegratedVideoAudio()
         button.isEnabled = available
         button.alpha = if (available) 1f else 0.35f
         button.setImageResource(
@@ -1209,6 +1212,16 @@ class ReviewActivity : Activity() {
             else R.drawable.ic_transport_audio
         )
         button.contentDescription = if (muted) "Activar audio" else "Silenciar audio"
+    }
+
+    private fun hasIntegratedVideoAudio(): Boolean {
+        return playbackKind == PlaybackKind.PURE10 && activeSummary?.integratedAudio == true
+    }
+
+    private fun applyIntegratedVideoAudioVolume() {
+        if (!hasIntegratedVideoAudio()) return
+        val volume = if (muted) 0f else 1f
+        runCatching { videoPlayer?.setVolume(volume, volume) }
     }
 
     private fun confirmDelete(summary: ClipSummary) {
