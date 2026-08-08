@@ -111,6 +111,10 @@ class CameraChromeView(context: Context) : View(context) {
         set(value) {
             if (field == value) return
             field = value
+            if (value) {
+                stabilizerWasStable = false
+                displayedStabilizerRollDegrees = stabilizerRollDegrees
+            }
             updateRecordRingAnimation()
             updateGalleryRecordingAnimation()
             invalidate()
@@ -170,21 +174,25 @@ class CameraChromeView(context: Context) : View(context) {
     var stabilizerRollDegrees: Float = 0f
         set(value) {
             val next = value.coerceIn(-STABILIZER_MAX_ROLL_DEGREES, STABILIZER_MAX_ROLL_DEGREES)
-            if (abs(field - next) < 0.08f) return
-            stabilizerRollAnimator?.cancel()
+            if (abs(field - next) < 0.04f) return
             val delta = normalizeDegrees(next - displayedStabilizerRollDegrees)
-            stabilizerRollAnimator = animateFloat(
-                displayedStabilizerRollDegrees,
-                displayedStabilizerRollDegrees + delta,
-                STABILIZER_ROLL_TRANSITION_MS
-            ) {
-                displayedStabilizerRollDegrees = normalizeDegrees(it)
-            }
+            val frameDelta = delta.coerceIn(
+                -STABILIZER_MAX_FRAME_STEP_DEGREES,
+                STABILIZER_MAX_FRAME_STEP_DEGREES
+            )
+            displayedStabilizerRollDegrees = normalizeDegrees(
+                displayedStabilizerRollDegrees + frameDelta * STABILIZER_ROLL_FOLLOW_ALPHA
+            )
             field = next
+            invalidate()
         }
     var stabilizerStable: Boolean = false
         set(value) {
             if (field == value) return
+            if (value && !stabilizerWasStable && stabilizerGuideVisible()) {
+                levelHaptic()
+            }
+            stabilizerWasStable = value
             field = value
             invalidate()
         }
@@ -273,7 +281,8 @@ class CameraChromeView(context: Context) : View(context) {
     private var galleryRecordingVisibility = 1f
     private var galleryRecordingAnimator: ValueAnimator? = null
     private var displayedStabilizerRollDegrees = 0f
-    private var stabilizerRollAnimator: ValueAnimator? = null
+    private var stabilizerWasStable = false
+    private var lastLevelHapticUptime = 0L
     private var lastBlockedHapticUptime = 0L
     private val lockGroupProgress = FloatArray(3) { 1f }
     private val lockGroupAnimators = arrayOfNulls<ValueAnimator>(3)
@@ -947,10 +956,10 @@ class CameraChromeView(context: Context) : View(context) {
     }
 
     private fun drawStabilizerGuide(canvas: Canvas, landscape: Boolean) {
-        if (!stabilizerAvailable) return
+        if (!stabilizerGuideVisible()) return
         val center = if (landscape) PointF(1065f, 589.5f) else PointF(589.5f, 1065f)
         val color = if (stabilizerStable) AUTO else Color.WHITE
-        val alpha = 255
+        val alpha = if (stabilizerStable) STABILIZER_STABLE_ALPHA else STABILIZER_ACTIVE_ALPHA
         val roll = displayedStabilizerRollDegrees
         withContentRotation(canvas, center.x, center.y) {
             canvas.save()
@@ -958,17 +967,22 @@ class CameraChromeView(context: Context) : View(context) {
             val previousCap = paint.strokeCap
             paint.strokeCap = Paint.Cap.ROUND
             paint.style = Paint.Style.STROKE
-            paint.strokeWidth = if (stabilizerStable) 4f else 3f
-            paint.color = scaledAlpha(color, alpha / 255f)
+            paint.strokeWidth = if (stabilizerStable) 3f else 3.5f
+            paint.color = scaledAlpha(color, alpha)
             drawStabilizerSegments(canvas, center)
             paint.style = Paint.Style.FILL
-            paint.color = color
-            canvas.drawCircle(center.x, center.y, if (stabilizerStable) 5.5f else 3.5f, paint)
+            paint.color = scaledAlpha(color, alpha)
+            canvas.drawCircle(center.x, center.y, if (stabilizerStable) 4.5f else 3.5f, paint)
             paint.strokeCap = previousCap
             paint.alpha = 255
             canvas.restore()
         }
     }
+
+    private fun stabilizerGuideVisible(): Boolean =
+        stabilizerAvailable &&
+            !recording &&
+            centerLabelVisibility <= 0.001f
 
     private fun drawStabilizerSegments(canvas: Canvas, center: PointF) {
         val outer = 196f
@@ -1726,6 +1740,29 @@ class CameraChromeView(context: Context) : View(context) {
         }
     }
 
+    private fun levelHaptic() {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastLevelHapticUptime < LEVEL_HAPTIC_COOLDOWN_MS) return
+        lastLevelHapticUptime = now
+        if (performHapticFeedback(
+                HapticFeedbackConstants.CLOCK_TICK,
+                HapticFeedbackConstants.FLAG_IGNORE_GLOBAL_SETTING
+            )
+        ) {
+            return
+        }
+        val motor = vibrator ?: return
+        if (!motor.hasVibrator()) return
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                motor.vibrate(VibrationEffect.createOneShot(LEVEL_HAPTIC_DURATION_MS, LEVEL_HAPTIC_AMPLITUDE))
+            } else {
+                @Suppress("DEPRECATION")
+                motor.vibrate(LEVEL_HAPTIC_DURATION_MS)
+            }
+        }
+    }
+
     private fun pulseHaptic() {
         if (performHapticFeedback(
                 HapticFeedbackConstants.CLOCK_TICK,
@@ -1804,7 +1841,6 @@ class CameraChromeView(context: Context) : View(context) {
         rotationAccentAnimator?.cancel()
         recordRingAnimator?.cancel()
         galleryRecordingAnimator?.cancel()
-        stabilizerRollAnimator?.cancel()
         wheelAnimator?.cancel()
         centerLabelAnimator?.cancel()
         centerLabelVisibilityAnimator?.cancel()
@@ -2042,14 +2078,20 @@ class CameraChromeView(context: Context) : View(context) {
         private const val RECORD_RING_HALF_CYCLE_MS = 720L
         private const val GALLERY_HIDE_MS = 240L
         private const val GALLERY_SHOW_MS = 280L
-        private const val STABILIZER_ROLL_TRANSITION_MS = 180L
+        private const val STABILIZER_ROLL_FOLLOW_ALPHA = 0.42f
+        private const val STABILIZER_MAX_FRAME_STEP_DEGREES = 8f
+        private const val STABILIZER_ACTIVE_ALPHA = 0.92f
+        private const val STABILIZER_STABLE_ALPHA = 0.42f
         private const val CENTER_LABEL_TEXT_SIZE = 64f
         private const val CENTER_VALUE_NAME_TEXT_SIZE = 30f
         private const val HAPTIC_DURATION_MS = 14L
         private const val BLOCKED_HAPTIC_COOLDOWN_MS = 180L
+        private const val LEVEL_HAPTIC_COOLDOWN_MS = 420L
+        private const val LEVEL_HAPTIC_DURATION_MS = 18L
         private const val AUTO_LONG_PRESS_MS = 550L
         private const val HAPTIC_AMPLITUDE = 110
-        private const val STABILIZER_MAX_ROLL_DEGREES = 18f
+        private const val LEVEL_HAPTIC_AMPLITUDE = 150
+        private const val STABILIZER_MAX_ROLL_DEGREES = 85f
         private const val PARAMETER_LENS = 0
         private const val PARAMETER_RESOLUTION = 6
         private const val DPAD_ARM_HALF_WIDTH = 54f
