@@ -3697,10 +3697,7 @@ class MainActivity : Activity() {
         val rollDegrees = Math.toDegrees(
             atan2(screenX.toDouble(), (-screenY).toDouble())
         ).toFloat().normalizeDegrees()
-        val orientationAnchor = when (detectedDeviceOrientationDegrees) {
-            270 -> -90f
-            else -> detectedDeviceOrientationDegrees.toFloat()
-        }
+        val orientationAnchor = appliedContentRotation.normalizeDegrees()
         val leveledRollDegrees = (rollDegrees - orientationAnchor).normalizeDegrees()
         val stable = abs(leveledRollDegrees) <= STABILIZER_LEVEL_TOLERANCE_DEGREES
         cameraChrome.stabilizerAvailable = true
