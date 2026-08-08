@@ -55,9 +55,18 @@ internal class Raw10Clip private constructor(
     private val blackLevels = IntArray(4) { index ->
         metadata.optJSONArray("black_level")?.optInt(index, 0) ?: 0
     }
-    private val rotationDegrees = metadata.optInt(
-        "rotation_degrees",
-        metadata.optInt("sensor_orientation", 0)
+    private val rotationDegrees = VideoOrientation.rawSequenceRotationDegrees(
+        metadataRotationDegrees = metadata.optInt(
+            "rotation_degrees",
+            metadata.optInt("sensor_orientation", 0)
+        ),
+        sensorOrientationDegrees = metadata.optInt("sensor_orientation", 0),
+        uiContentRotationDegrees = if (metadata.has("ui_content_rotation_degrees")) {
+            metadata.optInt("ui_content_rotation_degrees", 0)
+        } else {
+            null
+        },
+        frontFacing = metadata.optBoolean("front_facing", false)
     )
     private val mirrorPreview = metadata.optBoolean("front_facing", false)
     private val rawStream = RandomAccessFile(rawFile, "r")

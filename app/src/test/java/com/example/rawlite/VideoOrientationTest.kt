@@ -5,6 +5,58 @@ import org.junit.Test
 
 class VideoOrientationTest {
     @Test
+    fun rawSequenceFallsBackToMetadataRotationForLegacyClips() {
+        assertEquals(
+            180,
+            VideoOrientation.rawSequenceRotationDegrees(
+                metadataRotationDegrees = 180,
+                sensorOrientationDegrees = 90,
+                uiContentRotationDegrees = null,
+                frontFacing = false
+            )
+        )
+    }
+
+    @Test
+    fun rawSequenceKeepsPortraitSensorRotationWhenUiWasPortrait() {
+        assertEquals(
+            90,
+            VideoOrientation.rawSequenceRotationDegrees(
+                metadataRotationDegrees = 90,
+                sensorOrientationDegrees = 90,
+                uiContentRotationDegrees = 0,
+                frontFacing = false
+            )
+        )
+    }
+
+    @Test
+    fun rawSequenceDoesNotInvertRightLandscapeUiPreview() {
+        assertEquals(
+            0,
+            VideoOrientation.rawSequenceRotationDegrees(
+                metadataRotationDegrees = 180,
+                sensorOrientationDegrees = 90,
+                uiContentRotationDegrees = 90,
+                frontFacing = false
+            )
+        )
+    }
+
+    @Test
+    fun rawSequenceFlipsOppositeLandscapeUiPreview() {
+        assertEquals(
+            180,
+            VideoOrientation.rawSequenceRotationDegrees(
+                metadataRotationDegrees = 0,
+                sensorOrientationDegrees = 90,
+                uiContentRotationDegrees = 270,
+                frontFacing = false
+            )
+        )
+    }
+
+    @Test
     fun textureKeepsRotationWhenCodecReportsEncodedDimensions() {
         assertEquals(
             90,

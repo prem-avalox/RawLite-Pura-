@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.rawlite"
         minSdk = 28
         targetSdk = 35
-        versionCode = 35
-        versionName = "0.34-alpha2"
+        versionCode = 36
+        versionName = "0.34-alpha3"
 
         ndk {
             abiFilters += "arm64-v8a"

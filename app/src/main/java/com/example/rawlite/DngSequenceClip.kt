@@ -116,9 +116,18 @@ internal class DngSequenceClip private constructor(
                     summary = summary,
                     files = if (summaryOnly) emptyList() else files,
                     timelineFrames = if (summaryOnly) emptyList() else timeline,
-                    rotationDegrees = metadata.optInt(
-                        "rotation_degrees",
-                        metadata.optInt("sensor_orientation", 0)
+                    rotationDegrees = VideoOrientation.rawSequenceRotationDegrees(
+                        metadataRotationDegrees = metadata.optInt(
+                            "rotation_degrees",
+                            metadata.optInt("sensor_orientation", 0)
+                        ),
+                        sensorOrientationDegrees = metadata.optInt("sensor_orientation", 0),
+                        uiContentRotationDegrees = if (metadata.has("ui_content_rotation_degrees")) {
+                            metadata.optInt("ui_content_rotation_degrees", 0)
+                        } else {
+                            null
+                        },
+                        frontFacing = metadata.optBoolean("front_facing", false)
                     ),
                     mirrorPreview = metadata.optBoolean("front_facing", false)
                 )

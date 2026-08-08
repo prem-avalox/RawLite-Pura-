@@ -1,6 +1,22 @@
 package com.example.rawlite
 
 internal object VideoOrientation {
+    fun rawSequenceRotationDegrees(
+        metadataRotationDegrees: Int,
+        sensorOrientationDegrees: Int,
+        uiContentRotationDegrees: Int?,
+        frontFacing: Boolean
+    ): Int {
+        if (uiContentRotationDegrees == null) return normalize(metadataRotationDegrees)
+        val sensor = normalize(sensorOrientationDegrees)
+        val uiRotation = normalize(uiContentRotationDegrees)
+        return if (frontFacing) {
+            normalize(sensor + uiRotation)
+        } else {
+            normalize(sensor - uiRotation)
+        }
+    }
+
     fun textureRotationDegrees(
         metadataRotationDegrees: Int,
         encodedWidth: Int,
