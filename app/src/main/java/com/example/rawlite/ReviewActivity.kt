@@ -18,6 +18,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.os.StatFs
 import android.os.SystemClock
 import android.util.Log
 import android.view.Gravity
@@ -35,6 +36,7 @@ import android.widget.SeekBar
 import android.widget.TextView
 import android.text.TextUtils
 import com.example.rawlite.gallery.ClipRepository
+import com.example.rawlite.gallery.GalleryExportEstimator
 import org.json.JSONObject
 import java.io.File
 import java.text.SimpleDateFormat
@@ -52,6 +54,7 @@ class ReviewActivity : Activity() {
 
     private lateinit var titleView: TextView
     private lateinit var backButton: TextView
+    private lateinit var selectButton: TextView
     private lateinit var content: FrameLayout
     private val worker = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -59,6 +62,9 @@ class ReviewActivity : Activity() {
     private val decodeInFlight = AtomicBoolean(false)
     private val clipRepository = ClipRepository()
     private val uiTypeface by lazy { resources.getFont(R.font.open_sans) }
+    private var galleryClips: List<ClipSummary> = emptyList()
+    private var selectionMode = false
+    private val selectedClipPaths = linkedSetOf<String>()
 
     private var playbackKind = PlaybackKind.NONE
     private var activeSummary: ClipSummary? = null
@@ -149,7 +155,9 @@ class ReviewActivity : Activity() {
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        if (playbackKind != PlaybackKind.NONE) {
+        if (selectionMode) {
+            exitSelectionMode()
+        } else if (playbackKind != PlaybackKind.NONE) {
             showClipList()
         } else {
             super.onBackPressed()
@@ -188,8 +196,24 @@ class ReviewActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
             setTextColor(RawLiteDesign.TEXT)
         }
+        selectButton = TextView(this).apply {
+            text = "SEL"
+            textSize = 12f
+            typeface = uiTypeface
+            gravity = Gravity.CENTER
+            setTextColor(RawLiteDesign.ACCENT)
+            isClickable = true
+            isFocusable = true
+            background = selectableSurface()
+            contentDescription = "Seleccionar tomas"
+            tooltipText = "Seleccionar"
+            setOnClickListener {
+                if (galleryClips.isNotEmpty()) enterSelectionMode()
+            }
+        }
         toolbar.addView(backButton, LinearLayout.LayoutParams(dp(52), dp(52)))
         toolbar.addView(titleView, LinearLayout.LayoutParams(0, dp(52), 1f))
+        toolbar.addView(selectButton, LinearLayout.LayoutParams(dp(112), dp(44)))
         root.addView(toolbar)
         root.addView(View(this).apply { setBackgroundColor(RawLiteDesign.DIVIDER) },
             LinearLayout.LayoutParams.MATCH_PARENT, dp(1))
@@ -203,30 +227,52 @@ class ReviewActivity : Activity() {
         clearPlayback()
         recycleThumbnails()
         val currentGeneration = generation.incrementAndGet()
+        selectedClipPaths.removeAll { selected ->
+            galleryClips.none { it.directory.absolutePath == selected }
+        }
         titleView.text = "TOMAS"
         backButton.contentDescription = "Volver a la cámara"
+        selectButton.visibility = View.GONE
         setContent(messageView("LEYENDO TOMAS"))
         worker.execute {
             val base = getExternalFilesDir(Environment.DIRECTORY_MOVIES)
             val clips = clipRepository.list(base)
             runOnUiThread {
-                if (generation.get() == currentGeneration && !isFinishing) renderClipList(clips)
+                if (generation.get() == currentGeneration && !isFinishing) {
+                    galleryClips = clips
+                    if (galleryClips.isEmpty()) {
+                        selectionMode = false
+                        selectedClipPaths.clear()
+                    }
+                    renderClipList(clips)
+                }
             }
         }
     }
 
     private fun renderClipList(clips: List<ClipSummary>) {
         if (clips.isEmpty()) {
+            selectButton.visibility = View.GONE
             setContent(messageView("NO HAY TOMAS"))
             return
         }
+        recycleThumbnails()
+        updateSelectionToolbar()
         val list = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), 0, dp(16), dp(28))
         }
+        if (selectionMode) {
+            list.addView(selectionActionBar(), LinearLayout.LayoutParams.MATCH_PARENT, dp(60))
+        }
         list.addView(TextView(this).apply {
-            text = "${clips.size} ${if (clips.size == 1) "TOMA" else "TOMAS"}   " +
-                formatBytes(clips.sumOf { it.byteCount })
+            text = if (selectionMode) {
+                "${selectedClipPaths.size}/${clips.size} SELECCIONADAS   " +
+                    formatBytes(selectedClips().sumOf { it.byteCount })
+            } else {
+                "${clips.size} ${if (clips.size == 1) "TOMA" else "TOMAS"}   " +
+                    formatBytes(clips.sumOf { it.byteCount })
+            }
             textSize = 11f
             typeface = uiTypeface
             gravity = Gravity.CENTER_VERTICAL
@@ -282,14 +328,24 @@ class ReviewActivity : Activity() {
     }
 
     private fun clipRow(summary: ClipSummary): View {
+        val selected = isSelected(summary)
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(0, dp(12), 0, dp(12))
             isClickable = true
             isFocusable = true
-            background = selectableSurface()
-            setOnClickListener { openClip(summary) }
+            background = selectableSurface(selected)
+            setOnClickListener {
+                if (selectionMode) toggleSelection(summary) else openClip(summary)
+            }
+            setOnLongClickListener {
+                enterSelectionMode(summary)
+                true
+            }
+        }
+        if (selectionMode) {
+            row.addView(selectionBadge(selected), LinearLayout.LayoutParams(dp(36), dp(48)))
         }
         val thumbnail = ImageView(this).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
@@ -320,23 +376,32 @@ class ReviewActivity : Activity() {
             if (summary.finalized) RawLiteDesign.ACCENT else RawLiteDesign.RECORD
         ))
         row.addView(textColumn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        row.addView(ImageView(this).apply {
-            setImageResource(R.drawable.ic_transport_play)
-            setPadding(dp(14), dp(14), dp(14), dp(14))
-            background = transportControl(primary = false)
-            contentDescription = "Reproducir toma"
-        }, LinearLayout.LayoutParams(dp(48), dp(48)))
+        if (!selectionMode) {
+            row.addView(ImageView(this).apply {
+                setImageResource(R.drawable.ic_transport_play)
+                setPadding(dp(14), dp(14), dp(14), dp(14))
+                background = transportControl(primary = false)
+                contentDescription = "Reproducir toma"
+            }, LinearLayout.LayoutParams(dp(48), dp(48)))
+        }
         loadThumbnail(summary, thumbnail)
         return row
     }
 
     private fun portraitClipCard(summary: ClipSummary): View {
+        val selected = isSelected(summary)
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             isClickable = true
             isFocusable = true
-            background = selectableSurface()
-            setOnClickListener { openClip(summary) }
+            background = selectableSurface(selected)
+            setOnClickListener {
+                if (selectionMode) toggleSelection(summary) else openClip(summary)
+            }
+            setOnLongClickListener {
+                enterSelectionMode(summary)
+                true
+            }
         }
         val imageStage = FrameLayout(this).apply {
             setBackgroundColor(RawLiteDesign.SURFACE_RAISED)
@@ -371,16 +436,27 @@ class ReviewActivity : Activity() {
             marginStart = dp(12)
             topMargin = dp(12)
         })
-        imageStage.addView(ImageView(this).apply {
-            setImageResource(R.drawable.ic_transport_play)
-            setColorFilter(RawLiteDesign.BLACK)
-            setPadding(dp(17), dp(17), dp(17), dp(17))
-            background = transportControl(primary = true)
-            contentDescription = "Reproducir toma"
-        }, FrameLayout.LayoutParams(dp(56), dp(56), Gravity.END or Gravity.BOTTOM).apply {
-            marginEnd = dp(12)
-            bottomMargin = dp(12)
-        })
+        if (selectionMode) {
+            imageStage.addView(selectionBadge(selected), FrameLayout.LayoutParams(
+                dp(40),
+                dp(40),
+                Gravity.END or Gravity.TOP
+            ).apply {
+                marginEnd = dp(12)
+                topMargin = dp(12)
+            })
+        } else {
+            imageStage.addView(ImageView(this).apply {
+                setImageResource(R.drawable.ic_transport_play)
+                setColorFilter(RawLiteDesign.BLACK)
+                setPadding(dp(17), dp(17), dp(17), dp(17))
+                background = transportControl(primary = true)
+                contentDescription = "Reproducir toma"
+            }, FrameLayout.LayoutParams(dp(56), dp(56), Gravity.END or Gravity.BOTTOM).apply {
+                marginEnd = dp(12)
+                bottomMargin = dp(12)
+            })
+        }
         card.addView(imageStage, LinearLayout.LayoutParams.MATCH_PARENT, dp(188))
 
         val date = SimpleDateFormat("dd MMM  HH:mm", Locale.getDefault())
@@ -443,6 +519,7 @@ class ReviewActivity : Activity() {
 
     private fun openClip(summary: ClipSummary) {
         clearPlayback()
+        selectButton.visibility = View.GONE
         activeSummary = summary
         titleView.text = CaptureStorage.displayName(summary.directory.name)
         backButton.contentDescription = "Volver a tomas"
@@ -1154,6 +1231,163 @@ class ReviewActivity : Activity() {
         dialog.show()
     }
 
+    private fun enterSelectionMode(initial: ClipSummary? = null) {
+        selectionMode = true
+        initial?.let { selectedClipPaths += it.directory.absolutePath }
+        renderClipList(galleryClips)
+    }
+
+    private fun exitSelectionMode() {
+        selectionMode = false
+        selectedClipPaths.clear()
+        renderClipList(galleryClips)
+    }
+
+    private fun toggleSelection(summary: ClipSummary) {
+        val key = summary.directory.absolutePath
+        if (!selectedClipPaths.add(key)) selectedClipPaths.remove(key)
+        if (selectedClipPaths.isEmpty()) {
+            selectionMode = false
+        }
+        renderClipList(galleryClips)
+    }
+
+    private fun selectedClips(): List<ClipSummary> =
+        galleryClips.filter { selectedClipPaths.contains(it.directory.absolutePath) }
+
+    private fun isSelected(summary: ClipSummary): Boolean =
+        selectedClipPaths.contains(summary.directory.absolutePath)
+
+    private fun updateSelectionToolbar() {
+        selectButton.visibility = if (playbackKind == PlaybackKind.NONE && galleryClips.isNotEmpty()) {
+            View.VISIBLE
+        } else {
+            View.GONE
+        }
+        selectButton.text = if (selectionMode) "CANCELAR" else "SEL"
+        selectButton.contentDescription = if (selectionMode) "Cancelar selección" else "Seleccionar tomas"
+        selectButton.setOnClickListener {
+            if (selectionMode) exitSelectionMode() else enterSelectionMode()
+        }
+        titleView.text = if (selectionMode) "SELECCIÓN" else "TOMAS"
+    }
+
+    private fun selectionActionBar(): View {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(6), 0, dp(6))
+            addView(selectionActionButton("EXPORTAR", RawLiteDesign.ACCENT) {
+                showExportWarning(selectedClips())
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
+            addView(space(dp(8)))
+            addView(selectionActionButton("BORRAR", RawLiteDesign.RECORD) {
+                confirmDeleteSelected(selectedClips())
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
+            addView(space(dp(8)))
+            addView(selectionActionButton("CANCELAR", RawLiteDesign.TEXT) {
+                exitSelectionMode()
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
+        }
+    }
+
+    private fun selectionActionButton(label: String, color: Int, action: () -> Unit): TextView =
+        TextView(this).apply {
+            text = label
+            textSize = 11f
+            typeface = uiTypeface
+            gravity = Gravity.CENTER
+            minHeight = dp(44)
+            setPadding(dp(8), 0, dp(8), 0)
+            setTextColor(color)
+            isClickable = true
+            isFocusable = true
+            background = roundRect(RawLiteDesign.SURFACE_RAISED, dp(RawLiteDesign.RADIUS_SMALL_DP))
+            setOnClickListener { if (selectedClipPaths.isNotEmpty() || label == "CANCELAR") action() }
+        }
+
+    private fun showExportWarning(clips: List<ClipSummary>) {
+        if (clips.isEmpty()) return
+        val estimate = GalleryExportEstimator.estimate(clips)
+        val available = availableMovieBytes()
+        val pressure = if (available > 0L && estimate.extraOutputBytes > available) {
+            "\n\nESPACIO INSUFICIENTE PROBABLE: disponible ${formatBytes(available)}."
+        } else {
+            "\n\nDisponible aproximado: ${formatBytes(available)}."
+        }
+        val message = buildString {
+            append("${estimate.clipCount} toma(s) seleccionada(s).\n")
+            append("RAW10: ${estimate.raw10Count}  PURE 10: ${estimate.pure10Count}  ")
+            append("CinemaDNG: ${estimate.cinemaDngCount}\n\n")
+            append("Originales actuales: ${formatBytes(estimate.sourceBytes)}.\n")
+            append("Salida estimada adicional: ${formatBytes(estimate.extraOutputBytes)}.\n")
+            append("Uso temporal total: ${formatBytes(estimate.temporaryWorkingBytes)}.")
+            append(pressure)
+            append("\n\nLa exportación por lotes todavía no ejecuta conversiones en esta versión. ")
+            append("Este aviso existe para evitar duplicar material sin confirmación explícita.")
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Exportar tomas")
+            .setMessage(message)
+            .setPositiveButton("ENTENDIDO", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.window?.setBackgroundDrawable(roundRect(RawLiteDesign.SURFACE_RAISED, dp(4)))
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(RawLiteDesign.ACCENT)
+        }
+        dialog.show()
+    }
+
+    private fun confirmDeleteSelected(clips: List<ClipSummary>) {
+        if (clips.isEmpty()) return
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Borrar tomas")
+            .setMessage(
+                "Se eliminarán permanentemente ${clips.size} toma(s), " +
+                    "${formatBytes(clips.sumOf { it.byteCount })}."
+            )
+            .setNegativeButton("CANCELAR", null)
+            .setPositiveButton("BORRAR") { _, _ ->
+                setContent(messageView("BORRANDO"))
+                worker.execute {
+                    val deleted = clips.count { clipRepository.delete(it) }
+                    runOnUiThread {
+                        selectionMode = false
+                        selectedClipPaths.clear()
+                        showClipList()
+                        if (deleted != clips.size) {
+                            setContent(messageView("NO SE PUDIERON BORRAR TODAS LAS TOMAS"))
+                        }
+                    }
+                }
+            }
+            .create()
+        dialog.setOnShowListener {
+            dialog.window?.setBackgroundDrawable(roundRect(RawLiteDesign.SURFACE_RAISED, dp(4)))
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(RawLiteDesign.RECORD)
+            dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setTextColor(RawLiteDesign.TEXT)
+        }
+        dialog.show()
+    }
+
+    private fun availableMovieBytes(): Long {
+        val dir = getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: filesDir
+        return runCatching { StatFs(dir.absolutePath).availableBytes }.getOrDefault(0L)
+    }
+
+    private fun selectionBadge(selected: Boolean): TextView = TextView(this).apply {
+        text = if (selected) "✓" else "○"
+        textSize = 18f
+        typeface = uiTypeface
+        gravity = Gravity.CENTER
+        setTextColor(if (selected) RawLiteDesign.BLACK else RawLiteDesign.TEXT)
+        background = roundRect(
+            if (selected) RawLiteDesign.ACCENT else 0x99000000.toInt(),
+            dp(3)
+        )
+        contentDescription = if (selected) "Seleccionada" else "No seleccionada"
+    }
+
     private fun clearPlayback() {
         generation.incrementAndGet()
         pausePlayback()
@@ -1168,6 +1402,7 @@ class ReviewActivity : Activity() {
         lastVideoProgressMs = 0
         playWhenReady = false
         playbackKind = PlaybackKind.NONE
+        if (::selectButton.isInitialized) updateSelectionToolbar()
         activeSummary = null
         activeRawClip?.close()
         activeRawClip = null
@@ -1306,7 +1541,7 @@ class ReviewActivity : Activity() {
         bar.thumbOffset = 0
     }
 
-    private fun selectableSurface(): android.graphics.drawable.StateListDrawable {
+    private fun selectableSurface(selected: Boolean = false): android.graphics.drawable.StateListDrawable {
         return android.graphics.drawable.StateListDrawable().apply {
             addState(
                 intArrayOf(android.R.attr.state_pressed),
@@ -1314,7 +1549,10 @@ class ReviewActivity : Activity() {
             )
             addState(
                 intArrayOf(),
-                roundRect(RawLiteDesign.BLACK, dp(RawLiteDesign.RADIUS_SMALL_DP))
+                roundRect(
+                    if (selected) RawLiteDesign.ACCENT_SURFACE else RawLiteDesign.BLACK,
+                    dp(RawLiteDesign.RADIUS_SMALL_DP)
+                )
             )
         }
     }
