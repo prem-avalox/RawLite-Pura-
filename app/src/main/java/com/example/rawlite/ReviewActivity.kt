@@ -371,10 +371,9 @@ class ReviewActivity : Activity() {
             RawLiteDesign.TEXT_MUTED
         ))
         textColumn.addView(labelText(
-            "${formatDuration(summary.durationSeconds)}  ${formatBytes(summary.byteCount)}" +
-                if (summary.audioDescription != null) "  AUDIO" else "  SIN AUDIO",
+            clipStatusLine(summary, separator = "  "),
             11f,
-            if (summary.finalized) RawLiteDesign.ACCENT else RawLiteDesign.RECORD
+            clipStatusColor(summary)
         ))
         row.addView(textColumn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         if (!selectionMode) {
@@ -473,14 +472,28 @@ class ReviewActivity : Activity() {
             RawLiteDesign.TEXT_MUTED
         ))
         metadata.addView(labelText(
-            "${formatDuration(summary.durationSeconds)}   ${formatBytes(summary.byteCount)}" +
-                if (summary.audioDescription != null) "   AUDIO" else "   SIN AUDIO",
+            clipStatusLine(summary, separator = "   "),
             12f,
-            if (summary.finalized) RawLiteDesign.ACCENT else RawLiteDesign.RECORD
+            clipStatusColor(summary)
         ))
         card.addView(metadata)
         loadThumbnail(summary, thumbnail)
         return card
+    }
+
+    private fun clipStatusLine(summary: ClipSummary, separator: String): String {
+        val audio = when {
+            summary.postProcessing -> "PROCESANDO AUDIO"
+            summary.audioDescription != null -> "AUDIO"
+            else -> "SIN AUDIO"
+        }
+        return "${formatDuration(summary.durationSeconds)}${separator}${formatBytes(summary.byteCount)}$separator$audio"
+    }
+
+    private fun clipStatusColor(summary: ClipSummary): Int = when {
+        summary.postProcessing -> RawLiteDesign.ACCENT
+        summary.finalized -> RawLiteDesign.ACCENT
+        else -> RawLiteDesign.RECORD
     }
 
     private fun loadThumbnail(summary: ClipSummary, target: ImageView) {

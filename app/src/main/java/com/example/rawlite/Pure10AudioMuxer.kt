@@ -26,6 +26,7 @@ internal data class Pure10AudioMuxResult(
 internal object Pure10AudioMuxer {
     const val FINAL_VIDEO_FILE = "pure10_final.mp4"
     const val FINAL_VIDEO_HAS_AUDIO = "final_video_has_audio"
+    const val MUX_IN_PROGRESS_FILE = ".pure10_muxing"
 
     fun mux(directory: File): Pure10AudioMuxResult {
         val sourceVideo = File(directory, Pure10Encoder.VIDEO_FILE)

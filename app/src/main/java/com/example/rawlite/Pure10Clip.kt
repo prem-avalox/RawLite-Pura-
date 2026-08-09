@@ -27,6 +27,8 @@ internal object Pure10Clip {
             val video = File(directory, videoName)
             if (!video.isFile || video.length() <= 0L) return null
             val integratedAudio = videoName == finalVideo?.name
+            val muxInProgress = File(directory, Pure10AudioMuxer.MUX_IN_PROGRESS_FILE).isFile &&
+                !integratedAudio
             val fps = metadata.optInt("frame_rate", 0).coerceAtLeast(1)
             var frameCount = metadata.optInt("encoded_frames", 0)
             var durationSeconds = 0.0
@@ -72,7 +74,8 @@ internal object Pure10Clip {
                 audioDescription = audio,
                 captureFormat = "PURE 10",
                 videoFileName = videoName,
-                integratedAudio = integratedAudio
+                integratedAudio = integratedAudio,
+                postProcessing = muxInProgress
             )
         }.getOrNull()
     }
