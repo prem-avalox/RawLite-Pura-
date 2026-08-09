@@ -406,6 +406,11 @@ class MainActivity : Activity() {
         }
     }
     private val savePreferencesRunnable = Runnable { saveUserPreferencesNow() }
+    private val clearTemporaryPreviewFocusRunnable = Runnable {
+        if (!previewMeteringLocked && previewMeteringRegion != null) {
+            clearPreviewFocusMetering(updateCamera = true)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -1241,9 +1246,13 @@ class MainActivity : Activity() {
     }
 
     private fun toggleSelectedParameterAuto() {
-        if (switchingSession || finalizingOutput || finalizingAudio || pure10MuxInProgress() ||
-            !selectedParameterCanChangeNow()
-        ) return
+        if (switchingSession || finalizingOutput || finalizingAudio || pure10MuxInProgress()) return
+        if (!recording && previewMeteringRegion != null) {
+            clearPreviewFocusMetering(updateCamera = true)
+            if (::cameraChrome.isInitialized) cameraChrome.showStatusPopup("AF AUTO")
+            return
+        }
+        if (!selectedParameterCanChangeNow()) return
         when (selectedParameter) {
             CameraParameter.SHUTTER, CameraParameter.ISO -> manualExposure = !manualExposure
             CameraParameter.WHITE_BALANCE -> {
@@ -1321,6 +1330,13 @@ class MainActivity : Activity() {
         previewMeteringRegion = region
         previewMeteringLocked = locked
         previewFocusConfirmationPending = !locked
+        chromeHandler.removeCallbacks(clearTemporaryPreviewFocusRunnable)
+        if (!locked) {
+            chromeHandler.postDelayed(
+                clearTemporaryPreviewFocusRunnable,
+                PREVIEW_FOCUS_TEMPORARY_HOLD_MS
+            )
+        }
         manualFocus = false
         updateControlModes()
         updateChromeValues()
@@ -1329,6 +1345,7 @@ class MainActivity : Activity() {
     }
 
     private fun clearPreviewFocusMetering(updateCamera: Boolean = true) {
+        chromeHandler.removeCallbacks(clearTemporaryPreviewFocusRunnable)
         previewMeteringRegion = null
         previewMeteringLocked = false
         previewFocusConfirmationPending = false
@@ -2606,7 +2623,7 @@ class MainActivity : Activity() {
                 previewFocusConfirmationPending = false
                 if (!previewMeteringLocked) {
                     runOnUiThread {
-                        if (::cameraChrome.isInitialized) cameraChrome.hideFocusReticle()
+                        clearPreviewFocusMetering(updateCamera = true)
                     }
                 }
             }
@@ -4605,6 +4622,7 @@ class MainActivity : Activity() {
         private const val STABILIZER_LEVEL_TOLERANCE_DEGREES = 1.8f
         private const val PREVIEW_METERING_REGION_FRACTION = 0.13f
         private const val PREVIEW_METERING_REGION_MIN_PX = 160
+        private const val PREVIEW_FOCUS_TEMPORARY_HOLD_MS = 1_800L
         private val CAPTURE_PROFILE = Pixel6ReferenceProfile.capture
         private val CHECKPOINT_SECONDS = CAPTURE_PROFILE.checkpointSeconds
         private val MAX_PENDING_METADATA_IMAGES = CAPTURE_PROFILE.maximumPendingMetadataImages
