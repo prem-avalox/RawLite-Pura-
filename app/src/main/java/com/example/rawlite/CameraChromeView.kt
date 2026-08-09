@@ -119,6 +119,13 @@ class CameraChromeView(context: Context) : View(context) {
             updateGalleryRecordingAnimation()
             invalidate()
         }
+    var saving: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            if (value) closeMenus()
+            invalidate()
+        }
     var leftHanded: Boolean = false
         set(value) {
             if (field == value) return
@@ -984,6 +991,7 @@ class CameraChromeView(context: Context) : View(context) {
     private fun stabilizerGuideVisible(): Boolean =
         stabilizerAvailable &&
             !recording &&
+            !saving &&
             centerLabelVisibility <= 0.001f
 
     private fun drawStabilizerSegments(canvas: Canvas, center: PointF) {
@@ -1043,6 +1051,8 @@ class CameraChromeView(context: Context) : View(context) {
                 canvas.drawRoundRect(timerRect, 37.5f, 37.5f, paint)
                 drawCenteredText(canvas, timerText, timerCenter.x, timerCenter.y, 48f, 0xFFFFF0F0.toInt())
             }
+        } else if (saving) {
+            drawSavingStatus(canvas, timerCenter)
         } else {
             drawStatusPopup(canvas, timerCenter)
         }
@@ -1075,6 +1085,23 @@ class CameraChromeView(context: Context) : View(context) {
                 32f,
                 scaledAlpha(ACCENT, visibility)
             )
+        }
+    }
+
+    private fun drawSavingStatus(canvas: Canvas, center: PointF) {
+        withContentRotation(canvas, center.x, center.y) {
+            paint.style = Paint.Style.FILL
+            paint.color = 0xD9000000.toInt()
+            val label = "GUARDANDO"
+            val halfWidth = max(126f, 30f + textWidth(label, 30f) / 2f)
+            val rect = RectF(
+                center.x - halfWidth,
+                center.y - 37.5f,
+                center.x + halfWidth,
+                center.y + 37.5f
+            )
+            canvas.drawRoundRect(rect, 37.5f, 37.5f, paint)
+            drawCenteredText(canvas, label, center.x, center.y, 30f, ACCENT)
         }
     }
 

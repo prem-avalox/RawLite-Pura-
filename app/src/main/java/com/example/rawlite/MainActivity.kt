@@ -205,6 +205,13 @@ class MainActivity : Activity() {
         val mode: Button?
     )
 
+    private enum class CaptureUiState {
+        READY,
+        PREPARING,
+        RECORDING,
+        SAVING
+    }
+
     private lateinit var preview: TextureView
     private lateinit var status: TextView
     private lateinit var cameraSpinner: Spinner
@@ -336,6 +343,7 @@ class MainActivity : Activity() {
     private var recordTimerText = "00:00"
     private var recording = false
     private var switchingSession = false
+    private var captureStopPending = false
     private var recordingStartToken = 0
     private var stopMeasureId = 0
     private var stopMeasureStartMs = 0L
@@ -2611,6 +2619,7 @@ class MainActivity : Activity() {
         ) {
             return
         }
+        captureStopPending = false
         if (!rawVideoSupportedForCurrentCamera()) {
             setStatusText("La cámara frontal queda disponible solo como preview; RAW no sostiene 15 FPS")
             if (::cameraChrome.isInitialized) {
@@ -2724,6 +2733,7 @@ class MainActivity : Activity() {
         previewTimingValues = snapshotCurrentValues()
         recording = false
         switchingSession = true
+        captureStopPending = true
         recordButton.isEnabled = false
         updateRecordingChrome()
         logStopMeasurement("AUDIO_FINISH_REQUEST")
@@ -3295,6 +3305,7 @@ class MainActivity : Activity() {
         if (!preservePendingOpen) pendingCameraTexture = null
         switchingSession = false
         recording = false
+        captureStopPending = false
         closeCameraAfterSession = true
         val activeSession = captureSession
         captureSession = null
@@ -3325,6 +3336,7 @@ class MainActivity : Activity() {
     private fun closeCameraForBackground(finalizeCapture: Boolean) {
         recording = false
         switchingSession = false
+        if (!finalizeCapture) captureStopPending = false
         if (finalizeCapture) finishAudioCapture()
         lockedValues = null
         resultsByTimestamp.clear()
@@ -3516,7 +3528,12 @@ class MainActivity : Activity() {
         val measuredIso = latestResult?.get(CaptureResult.SENSOR_SENSITIVITY)
         val measuredExposure = latestResult?.get(CaptureResult.SENSOR_EXPOSURE_TIME)
         val measuredFrameDuration = latestResult?.get(CaptureResult.SENSOR_FRAME_DURATION)
-        val state = currentOperationState().status.label
+        val state = when (currentCaptureUiState()) {
+            CaptureUiState.READY -> "LISTO"
+            CaptureUiState.PREPARING -> "PREPARANDO"
+            CaptureUiState.RECORDING -> "REC"
+            CaptureUiState.SAVING -> "GUARDANDO"
+        }
         if (recording) {
             val elapsed = ((SystemClock.elapsedRealtime() - sessionStartElapsedMs) / 1000L)
                 .coerceAtLeast(0L)
@@ -3600,6 +3617,15 @@ class MainActivity : Activity() {
         finalizingOutput = finalizingOutput || finalizingPure10Mux,
         finalizingAudio = finalizingAudio
     )
+
+    private fun currentCaptureUiState(): CaptureUiState = when {
+        recording -> CaptureUiState.RECORDING
+        captureStopPending || finalizingOutput || finalizingAudio || finalizingPure10Mux -> {
+            CaptureUiState.SAVING
+        }
+        switchingSession -> CaptureUiState.PREPARING
+        else -> CaptureUiState.READY
+    }
 
     private fun formatStorage(bytes: Long): String {
         if (bytes <= 0L) return "— GB"
@@ -3872,8 +3898,18 @@ class MainActivity : Activity() {
             runOnUiThread { updateRecordingChrome() }
             return
         }
+        val readyForNextCapture = recordButton.isEnabled &&
+            !recording && !switchingSession && !finalizingOutput &&
+            !finalizingAudio && !finalizingPure10Mux
+        if (readyForNextCapture) captureStopPending = false
+        val uiState = currentCaptureUiState()
         recordButton.background = recordButtonBackground(recording)
-        recordButton.contentDescription = if (recording) "Detener grabación" else "Grabar"
+        recordButton.contentDescription = when (uiState) {
+            CaptureUiState.RECORDING -> "Detener grabación"
+            CaptureUiState.SAVING -> "Guardando toma"
+            CaptureUiState.PREPARING -> "Preparando cámara"
+            CaptureUiState.READY -> "Grabar"
+        }
         recordButton.alpha = if (!recordButton.isEnabled || switchingSession ||
             finalizingOutput || finalizingAudio || finalizingPure10Mux
         ) 0.55f else 1f
@@ -3881,6 +3917,7 @@ class MainActivity : Activity() {
         if (!recording) recordTimerText = "00:00"
         if (::cameraChrome.isInitialized) {
             cameraChrome.recording = recording
+            cameraChrome.saving = uiState == CaptureUiState.SAVING
             cameraChrome.rotationLocked = rotationLockedByUser || recording || switchingSession
             cameraChrome.rotationControlEnabled = !recording && !switchingSession
             cameraChrome.recordEnabled = recordButton.isEnabled &&
@@ -3890,9 +3927,6 @@ class MainActivity : Activity() {
             cameraChrome.timerText = if (recording) recordTimerText else "00:00"
             if (recording) cameraChrome.closeMenus()
         }
-        val readyForNextCapture = recordButton.isEnabled &&
-            !recording && !switchingSession && !finalizingOutput &&
-            !finalizingAudio && !finalizingPure10Mux
         if (readyForNextCapture && stopMeasureId > 0 && stopMeasureReadyLoggedFor != stopMeasureId) {
             stopMeasureReadyLoggedFor = stopMeasureId
             logStopMeasurement("REC_READY")
