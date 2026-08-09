@@ -43,7 +43,7 @@ internal object CaptureMetadataFactory {
             put("version", 3)
             put("bits_per_sample", 10)
             put("row_bytes", (context.captureSize.width * 10 + 7) / 8)
-            put("writer", "native-writev")
+            put("writer", "native-adaptive")
             put("state_file", "clip.state")
             put("technical_overlay", technicalOverlay)
             put("checkpoint_frames", checkpointFrames)

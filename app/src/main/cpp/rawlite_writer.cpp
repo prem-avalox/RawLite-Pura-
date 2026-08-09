@@ -8,9 +8,11 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <mutex>
+#include <numeric>
 #include <string>
 #include <sys/uio.h>
 #include <unistd.h>
@@ -19,6 +21,8 @@
 namespace {
 
 constexpr char kLogTag[] = "RawLiteNative";
+constexpr size_t kDirectAlignment = 4096;
+constexpr int kMaximumDirectBatchFrames = 8;
 constexpr char kMetadataHeader[] =
     "frame,timestamp_ns,iso,exposure_ns,frame_duration_ns,focus_diopters,"
     "wb_r,wb_ge,wb_go,wb_b\n";
@@ -109,11 +113,95 @@ struct Writer {
     int checkpoint_frames = 0;
     int completed_frames = 0;
     int64_t raw_bytes = 0;
+    std::string raw_path;
+    bool direct_io = false;
+    bool staged_io = false;
+    void* staging_buffer = nullptr;
+    size_t frame_bytes = 0;
+    size_t staging_bytes = 0;
+    int direct_batch_frames = 0;
+    int staged_frames = 0;
+    std::vector<std::string> staged_metadata;
+    int64_t write_total_ns = 0;
+    int64_t write_max_ns = 0;
+    int write_operations = 0;
+    int direct_fallbacks = 0;
     bool closed = false;
     std::mutex mutex;
 
     ~Writer() {
         close_files(false);
+        std::free(staging_buffer);
+        staging_buffer = nullptr;
+    }
+
+    bool open_buffered_raw(bool truncate) {
+        const int flags = O_WRONLY | O_CREAT | O_CLOEXEC | (truncate ? O_TRUNC : 0);
+        raw_fd = ::open(raw_path.c_str(), flags, 0644);
+        if (raw_fd < 0) {
+            set_errno_error("open buffered RAW");
+            return false;
+        }
+        if (!truncate && ::lseek(raw_fd, raw_bytes, SEEK_SET) < 0) {
+            set_errno_error("seek buffered RAW");
+            ::close(raw_fd);
+            raw_fd = -1;
+            return false;
+        }
+        return true;
+    }
+
+    bool configure_raw_output() {
+        frame_bytes = static_cast<size_t>(row_bytes) * static_cast<size_t>(height);
+        if (frame_bytes == 0) {
+            errno = EINVAL;
+            set_errno_error("calculate RAW frame size");
+            return false;
+        }
+
+        const size_t divisor = std::gcd(frame_bytes, kDirectAlignment);
+        const size_t batch_frames = kDirectAlignment / divisor;
+        if (batch_frames <= static_cast<size_t>(kMaximumDirectBatchFrames)) {
+#ifdef O_DIRECT
+            raw_fd = ::open(
+                raw_path.c_str(),
+                O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_DIRECT,
+                0644
+            );
+            if (raw_fd >= 0) {
+                staging_bytes = frame_bytes * batch_frames;
+                if (::posix_memalign(&staging_buffer, kDirectAlignment, staging_bytes) == 0) {
+                    direct_io = true;
+                    staged_io = true;
+                    direct_batch_frames = static_cast<int>(batch_frames);
+                    staged_metadata.reserve(batch_frames);
+                    __android_log_print(
+                        ANDROID_LOG_INFO,
+                        kLogTag,
+                        "RAW writer opened direct frame_bytes=%zu batch_frames=%d batch_bytes=%zu",
+                        frame_bytes,
+                        direct_batch_frames,
+                        staging_bytes
+                    );
+                    return true;
+                }
+                ::close(raw_fd);
+                raw_fd = -1;
+                staging_buffer = nullptr;
+            }
+#endif
+        }
+
+        direct_io = false;
+        staged_io = false;
+        direct_batch_frames = 0;
+        __android_log_print(
+            ANDROID_LOG_INFO,
+            kLogTag,
+            "RAW writer using buffered fallback frame_bytes=%zu",
+            frame_bytes
+        );
+        return open_buffered_raw(true);
     }
 
     bool open_files(
@@ -121,9 +209,8 @@ struct Writer {
         const std::string& metadata_path,
         const std::string& state_path
     ) {
-        raw_fd = ::open(raw_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-        if (raw_fd < 0) {
-            set_errno_error("open RAW");
+        this->raw_path = raw_path;
+        if (!configure_raw_output()) {
             return false;
         }
         metadata_fd =
@@ -146,18 +233,30 @@ struct Writer {
     }
 
     bool write_state(const char* status, bool sync) {
-        char state[256];
+        char state[512];
+        const char* io_mode = direct_io ? "direct" : (staged_io ? "buffered_staged" : "buffered");
+        const int64_t average_write_us = write_operations > 0
+            ? write_total_ns / write_operations / 1000
+            : 0;
         const int length = std::snprintf(
             state,
             sizeof(state),
             "version=1\nstatus=%s\ncompleted_frames=%d\nraw_bytes=%lld\n"
-            "width=%d\nheight=%d\nrow_bytes=%d\n",
+            "width=%d\nheight=%d\nrow_bytes=%d\nio_mode=%s\n"
+            "direct_batch_frames=%d\ndirect_fallbacks=%d\n"
+            "write_operations=%d\nwrite_average_us=%lld\nwrite_max_us=%lld\n",
             status,
             completed_frames,
             static_cast<long long>(raw_bytes),
             width,
             height,
-            row_bytes
+            row_bytes,
+            io_mode,
+            direct_batch_frames,
+            direct_fallbacks,
+            write_operations,
+            static_cast<long long>(average_write_us),
+            static_cast<long long>(write_max_ns / 1000)
         );
         if (length <= 0 || length >= static_cast<int>(sizeof(state))) {
             errno = EOVERFLOW;
@@ -178,6 +277,105 @@ struct Writer {
 
     bool checkpoint() {
         return write_state("recording", false);
+    }
+
+    bool copy_frame(
+        const uint8_t* buffer,
+        int buffer_offset,
+        int row_stride,
+        uint8_t* destination
+    ) {
+        const auto* first_row = buffer + buffer_offset;
+        if (row_stride == row_bytes) {
+            std::memcpy(destination, first_row, frame_bytes);
+            return true;
+        }
+        for (int row = 0; row < height; ++row) {
+            std::memcpy(
+                destination + static_cast<size_t>(row) * row_bytes,
+                first_row + static_cast<size_t>(row) * row_stride,
+                static_cast<size_t>(row_bytes)
+            );
+        }
+        return true;
+    }
+
+    bool switch_to_buffered_raw() {
+        ++direct_fallbacks;
+        const int original_errno = errno;
+        __android_log_print(
+            ANDROID_LOG_WARN,
+            kLogTag,
+            "Direct RAW write failed (%s); switching to buffered I/O",
+            std::strerror(original_errno)
+        );
+        if (raw_fd >= 0) {
+            if (::ftruncate(raw_fd, raw_bytes) < 0) {
+                set_errno_error("truncate failed direct RAW batch");
+                return false;
+            }
+            ::close(raw_fd);
+            raw_fd = -1;
+        }
+        direct_io = false;
+        return open_buffered_raw(false);
+    }
+
+    bool flush_staged(bool final_batch) {
+        if (staged_frames <= 0) {
+            return true;
+        }
+        const size_t logical_bytes = frame_bytes * static_cast<size_t>(staged_frames);
+        size_t write_bytes = logical_bytes;
+        if (direct_io) {
+            write_bytes = (logical_bytes + kDirectAlignment - 1) & ~(kDirectAlignment - 1);
+            if (write_bytes > logical_bytes) {
+                std::memset(
+                    static_cast<uint8_t*>(staging_buffer) + logical_bytes,
+                    0,
+                    write_bytes - logical_bytes
+                );
+            }
+        }
+
+        const auto write_started = std::chrono::steady_clock::now();
+        if (!write_all(raw_fd, staging_buffer, write_bytes)) {
+            if (!direct_io || !switch_to_buffered_raw() ||
+                !write_all(raw_fd, staging_buffer, logical_bytes)) {
+                set_errno_error("write staged RAW frames");
+                return false;
+            }
+            write_bytes = logical_bytes;
+        }
+        const auto write_finished = std::chrono::steady_clock::now();
+        const int64_t write_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            write_finished - write_started
+        ).count();
+        write_total_ns += write_ns;
+        write_max_ns = std::max(write_max_ns, write_ns);
+        ++write_operations;
+
+        if (direct_io && final_batch && write_bytes != logical_bytes) {
+            if (::ftruncate(raw_fd, raw_bytes + static_cast<int64_t>(logical_bytes)) < 0) {
+                set_errno_error("truncate final direct RAW padding");
+                return false;
+            }
+        }
+        for (const std::string& metadata : staged_metadata) {
+            if (!write_all(metadata_fd, metadata.data(), metadata.size())) {
+                set_errno_error("write staged frame metadata");
+                return false;
+            }
+        }
+
+        completed_frames += staged_frames;
+        raw_bytes += static_cast<int64_t>(logical_bytes);
+        staged_frames = 0;
+        staged_metadata.clear();
+        if (checkpoint_frames > 0 && completed_frames % checkpoint_frames == 0) {
+            return checkpoint();
+        }
+        return true;
     }
 
     bool write_frame(
@@ -214,30 +412,6 @@ struct Writer {
             return false;
         }
 
-        auto* first_row = buffer + buffer_offset;
-        if (row_stride == row_bytes) {
-            const size_t frame_size = static_cast<size_t>(row_bytes) * height;
-            if (!write_all(raw_fd, first_row, frame_size)) {
-                set_errno_error("write RAW frame");
-                return false;
-            }
-        } else {
-            std::vector<iovec> rows;
-            rows.reserve(static_cast<size_t>(height));
-            for (int row = 0; row < height; ++row) {
-                rows.push_back(
-                    iovec{
-                        .iov_base = first_row + static_cast<size_t>(row) * row_stride,
-                        .iov_len = static_cast<size_t>(row_bytes),
-                    }
-                );
-            }
-            if (!write_vectors(raw_fd, rows)) {
-                set_errno_error("write RAW rows");
-                return false;
-            }
-        }
-
         char metadata[512];
         const int metadata_length = std::snprintf(
             metadata,
@@ -258,13 +432,57 @@ struct Writer {
             set_error("metadata line is too long");
             return false;
         }
+        if (staged_io) {
+            auto* destination = static_cast<uint8_t*>(staging_buffer) +
+                static_cast<size_t>(staged_frames) * frame_bytes;
+            if (!copy_frame(buffer, buffer_offset, row_stride, destination)) {
+                return false;
+            }
+            staged_metadata.emplace_back(metadata, static_cast<size_t>(metadata_length));
+            ++staged_frames;
+            if (staged_frames >= direct_batch_frames) {
+                return flush_staged(false);
+            }
+            return true;
+        }
+
+        auto* first_row = buffer + buffer_offset;
+        const auto write_started = std::chrono::steady_clock::now();
+        if (row_stride == row_bytes) {
+            if (!write_all(raw_fd, first_row, frame_bytes)) {
+                set_errno_error("write RAW frame");
+                return false;
+            }
+        } else {
+            std::vector<iovec> rows;
+            rows.reserve(static_cast<size_t>(height));
+            for (int row = 0; row < height; ++row) {
+                rows.push_back(
+                    iovec{
+                        .iov_base = first_row + static_cast<size_t>(row) * row_stride,
+                        .iov_len = static_cast<size_t>(row_bytes),
+                    }
+                );
+            }
+            if (!write_vectors(raw_fd, rows)) {
+                set_errno_error("write RAW rows");
+                return false;
+            }
+        }
+        const auto write_finished = std::chrono::steady_clock::now();
+        const int64_t write_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            write_finished - write_started
+        ).count();
+        write_total_ns += write_ns;
+        write_max_ns = std::max(write_max_ns, write_ns);
+        ++write_operations;
+
         if (!write_all(metadata_fd, metadata, static_cast<size_t>(metadata_length))) {
             set_errno_error("write frame metadata");
             return false;
         }
-
         ++completed_frames;
-        raw_bytes += static_cast<int64_t>(row_bytes) * height;
+        raw_bytes += static_cast<int64_t>(frame_bytes);
         if (checkpoint_frames > 0 && completed_frames % checkpoint_frames == 0) {
             return checkpoint();
         }
@@ -278,7 +496,7 @@ struct Writer {
         }
         int result = 0;
         if (finalize && raw_fd >= 0 && metadata_fd >= 0 && state_fd >= 0) {
-            if (::fdatasync(raw_fd) < 0 || ::fdatasync(metadata_fd) < 0 ||
+            if (!flush_staged(true) || ::fdatasync(raw_fd) < 0 || ::fdatasync(metadata_fd) < 0 ||
                 !write_state("closed", true)) {
                 set_errno_error("finalize recording");
                 result = -errno;
@@ -297,6 +515,19 @@ struct Writer {
         metadata_fd = -1;
         state_fd = -1;
         closed = true;
+        __android_log_print(
+            ANDROID_LOG_INFO,
+            kLogTag,
+            "RAW writer closed mode=%s frames=%d bytes=%lld writes=%d avg_us=%lld max_us=%lld fallbacks=%d result=%d",
+            direct_io ? "direct" : (staged_io ? "buffered_staged" : "buffered"),
+            completed_frames,
+            static_cast<long long>(raw_bytes),
+            write_operations,
+            static_cast<long long>(write_operations > 0 ? write_total_ns / write_operations / 1000 : 0),
+            static_cast<long long>(write_max_ns / 1000),
+            direct_fallbacks,
+            result
+        );
         return result;
     }
 };
