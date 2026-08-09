@@ -337,6 +337,11 @@ class MainActivity : Activity() {
     private var recording = false
     private var switchingSession = false
     private var recordingStartToken = 0
+    private var stopMeasureId = 0
+    private var stopMeasureStartMs = 0L
+    private var stopMeasureMode = ""
+    private var stopMeasureDir = ""
+    private var stopMeasureReadyLoggedFor = 0
     @Volatile
     private var finalizingOutput = false
     @Volatile
@@ -2714,22 +2719,29 @@ class MainActivity : Activity() {
 
     private fun stopRecording() {
         if (!recording && !switchingSession) return
+        beginStopMeasurement()
         ++recordingStartToken
         previewTimingValues = snapshotCurrentValues()
         recording = false
         switchingSession = true
         recordButton.isEnabled = false
         updateRecordingChrome()
+        logStopMeasurement("AUDIO_FINISH_REQUEST")
         finishAudioCapture()
         lockedValues = null
         cameraHandler.post {
+            logStopMeasurement("PREVIEW_RESTART_START")
             startRepeating(includeRaw = false)
+            logStopMeasurement("PREVIEW_REPEATING_REQUESTED")
             clearPendingRawImages()
             resultsByTimestamp.clear()
+            logStopMeasurement("OUTPUT_FINISH_REQUEST")
             finishPackedOutputs()
+            logStopMeasurement("TELEMETRY_FINISH_REQUEST")
             finishTelemetry()
             runOnUiThread {
                 switchingSession = false
+                logStopMeasurement("SWITCHING_DONE")
                 updateControlModes()
                 updateRecordingChrome()
                 updateStatus(force = true)
@@ -2760,6 +2772,7 @@ class MainActivity : Activity() {
         audioRecorder = null
         val dir = sessionDir ?: return
         finalizingAudio = true
+        logStopMeasurement("AUDIO_STOP_START")
         runOnUiThread {
             updateMicrophoneUi()
             updateControlModes()
@@ -2767,7 +2780,12 @@ class MainActivity : Activity() {
         }
         audioExecutor.execute {
             val summary = recorder.stop()
+            logStopMeasurement(
+                "AUDIO_STOP_DONE",
+                "frames=${summary.frames} bytes=${summary.dataBytes} finalized=${summary.finalized}"
+            )
             writeSyncDescription(dir, summary)
+            logStopMeasurement("SYNC_WRITE_DONE")
             schedulePure10AudioMuxIfReady(dir)
             finalizingAudio = false
             runOnUiThread {
@@ -2877,6 +2895,7 @@ class MainActivity : Activity() {
         if (pureEncoder != null) {
             pure10Encoder = null
             finalizingOutput = true
+            logStopMeasurement("PURE10_ENCODER_FINISH_START")
             runOnUiThread {
                 recordButton.isEnabled = false
                 updateControlModes()
@@ -2886,9 +2905,15 @@ class MainActivity : Activity() {
                 val summary = runCatching { pureEncoder.finish() }
                     .onFailure { Log.e(TAG, "Could not finalize PURE 10 output", it) }
                     .getOrNull()
+                logStopMeasurement(
+                    "PURE10_ENCODER_FINISH_DONE",
+                    "encoded=${summary?.encodedFrames ?: -1} submitted=${summary?.submittedFrames ?: -1} " +
+                        "video_bytes=${sessionDir?.let { File(it, Pure10Encoder.VIDEO_FILE).length() } ?: -1L}"
+                )
                 val directory = sessionDir
                 if (directory != null) {
                     updatePure10Description(directory, summary)
+                    logStopMeasurement("PURE10_DESCRIPTION_DONE")
                     schedulePure10AudioMuxIfReady(directory)
                 }
                 pure10Recording = false
@@ -2906,6 +2931,7 @@ class MainActivity : Activity() {
         if (dngRecording) {
             dngRecording = false
             finalizingOutput = true
+            logStopMeasurement("DNG_DESCRIPTION_START")
             runOnUiThread {
                 recordButton.isEnabled = false
                 updateControlModes()
@@ -2913,6 +2939,7 @@ class MainActivity : Activity() {
             }
             ioExecutor.execute {
                 sessionDir?.let(::updateDngDescription)
+                logStopMeasurement("DNG_DESCRIPTION_DONE")
                 finalizingOutput = false
                 runOnUiThread {
                     recordButton.isEnabled = cameraDevice != null && !switchingSession &&
@@ -2928,6 +2955,7 @@ class MainActivity : Activity() {
         if (handle == 0L) return
         nativeWriterHandle = 0L
         finalizingOutput = true
+        logStopMeasurement("RAW10_CLOSE_START")
         runOnUiThread {
             recordButton.isEnabled = false
             updateControlModes()
@@ -2935,6 +2963,10 @@ class MainActivity : Activity() {
         }
         ioExecutor.execute {
             val closeResult = NativeRawWriter.close(handle)
+            logStopMeasurement(
+                "RAW10_CLOSE_DONE",
+                "result=$closeResult raw_bytes=${sessionDir?.let { File(it, "clip.raw10").length() } ?: -1L}"
+            )
             if (closeResult != 0) {
                 Log.e(
                     TAG,
@@ -2977,12 +3009,15 @@ class MainActivity : Activity() {
     private fun finishTelemetry() {
         val stream = telemetryStream ?: return
         telemetryStream = null
+        logStopMeasurement("TELEMETRY_CLOSE_START")
         telemetryExecutor.execute {
             try {
                 stream.fd.sync()
                 stream.close()
+                logStopMeasurement("TELEMETRY_CLOSE_DONE")
             } catch (error: IOException) {
                 Log.e(TAG, "Could not finalize telemetry", error)
+                logStopMeasurement("TELEMETRY_CLOSE_ERROR", error.javaClass.simpleName)
             }
         }
     }
@@ -3160,12 +3195,17 @@ class MainActivity : Activity() {
         if (!isPure10AudioMuxReady(directory)) return
         if (!pure10MuxQueued.compareAndSet(false, true)) return
         finalizingPure10Mux = true
+        logStopMeasurement("PURE10_AUDIO_MUX_START")
         runOnUiThread {
             updateControlModes()
             updateStatus(force = true)
         }
         ioExecutor.execute {
             val result = Pure10AudioMuxer.mux(directory)
+            logStopMeasurement(
+                "PURE10_AUDIO_MUX_DONE",
+                "finalized=${result.finalized} final_bytes=${File(directory, "pure10_final.mp4").length()}"
+            )
             if (!result.finalized) {
                 Log.e(TAG, "PURE 10 audio mux failed: ${result.error}")
             }
@@ -3850,6 +3890,13 @@ class MainActivity : Activity() {
             cameraChrome.timerText = if (recording) recordTimerText else "00:00"
             if (recording) cameraChrome.closeMenus()
         }
+        val readyForNextCapture = recordButton.isEnabled &&
+            !recording && !switchingSession && !finalizingOutput &&
+            !finalizingAudio && !finalizingPure10Mux
+        if (readyForNextCapture && stopMeasureId > 0 && stopMeasureReadyLoggedFor != stopMeasureId) {
+            stopMeasureReadyLoggedFor = stopMeasureId
+            logStopMeasurement("REC_READY")
+        }
     }
 
     private fun toggleRotationLock() {
@@ -4298,6 +4345,34 @@ class MainActivity : Activity() {
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).roundToInt()
     private fun formatOne(value: Float): String = String.format(Locale.US, "%.1f", value)
+
+    private fun beginStopMeasurement() {
+        stopMeasureId += 1
+        stopMeasureStartMs = SystemClock.elapsedRealtime()
+        stopMeasureMode = when {
+            pure10Recording -> "PURE10"
+            packedRawRecording -> "RAW10"
+            dngRecording -> "DNG"
+            else -> activeCaptureMode.name
+        }
+        stopMeasureDir = sessionDir?.name.orEmpty()
+        stopMeasureReadyLoggedFor = 0
+        logStopMeasurement(
+            "STOP_PRESSED",
+            "frames=$savedFrames dropped=$droppedFrames pending=${pendingWrites.get()}"
+        )
+    }
+
+    private fun logStopMeasurement(stage: String, detail: String = "") {
+        if (stopMeasureId <= 0 || stopMeasureStartMs <= 0L) return
+        val now = SystemClock.elapsedRealtime()
+        val suffix = if (detail.isBlank()) "" else " $detail"
+        Log.i(
+            TAG,
+            "RL_MEASURE id=$stopMeasureId mode=$stopMeasureMode dir=$stopMeasureDir " +
+                "stage=$stage t=$now dt_ms=${now - stopMeasureStartMs}$suffix"
+        )
+    }
 
     companion object {
         private const val REQUEST_PERMISSIONS = 10
