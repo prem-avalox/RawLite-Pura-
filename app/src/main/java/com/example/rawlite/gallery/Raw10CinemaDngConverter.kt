@@ -256,15 +256,13 @@ internal object Raw10CinemaDngConverter {
                 if (sourceStart < sourceFrames && remaining > 0) {
                     input.seek(WAVE_HEADER_BYTES + sourceStart * frameBytes)
                     var available = minOf(remaining, sourceFrames - sourceStart)
-                    val copyBuffer = ByteArray(64 * 1024)
+                    val copyBuffer = ByteArray(alignedCopyBufferBytes(frameBytes))
                     while (available > 0) {
                         val bytes = minOf(copyBuffer.size.toLong(), available * frameBytes).toInt()
-                        val read = input.read(copyBuffer, 0, bytes)
-                        if (read <= 0) break
-                        val aligned = read - read % frameBytes
-                        writer.write(copyBuffer, 0, aligned)
-                        val copiedFrames = aligned / frameBytes
-                        payload += aligned
+                        input.readFully(copyBuffer, 0, bytes)
+                        writer.write(copyBuffer, 0, bytes)
+                        val copiedFrames = bytes / frameBytes
+                        payload += bytes
                         remaining -= copiedFrames.toLong()
                         available -= copiedFrames.toLong()
                     }
@@ -426,6 +424,11 @@ internal object Raw10CinemaDngConverter {
         }
     }
 
+    private fun alignedCopyBufferBytes(frameBytes: Int): Int {
+        val aligned = COPY_BUFFER_BYTES - COPY_BUFFER_BYTES % frameBytes
+        return aligned.coerceAtLeast(frameBytes)
+    }
+
     private fun readState(file: File): Map<String, String> {
         if (!file.isFile) return emptyMap()
         return file.readLines(Charsets.US_ASCII).mapNotNull { line ->
@@ -435,4 +438,5 @@ internal object Raw10CinemaDngConverter {
     }
 
     private const val WAVE_HEADER_BYTES = 44L
+    private const val COPY_BUFFER_BYTES = 64 * 1024
 }

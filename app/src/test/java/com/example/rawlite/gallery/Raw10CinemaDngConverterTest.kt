@@ -122,6 +122,72 @@ class Raw10CinemaDngConverterTest {
     }
 
     @Test
+    fun `converter preserves 24 bit stereo audio byte alignment across copy chunks`() {
+        val root = createTempDirectory().toFile()
+        val source = File(root, "RAW10_20260808_130000").apply { mkdirs() }
+        val width = 4
+        val height = 2
+        val frameCount = 20
+        val fps = 24
+        File(source, "clip.json").writeText(
+            raw10Metadata(width = width, height = height).apply {
+                put("frame_rate", fps)
+            }.toString(2)
+        )
+        File(source, "frames.csv").writeText(buildString {
+            append("frame,timestamp_ns,iso,exposure_ns,frame_duration_ns,focus_diopters,wb_r,wb_ge,wb_go,wb_b\n")
+            repeat(frameCount) { frame ->
+                append("$frame,${1_000L + frame},100,10000000,41666666,0.0,2.0,1.0,1.0,1.5\n")
+            }
+        })
+        File(source, "clip.state").writeText(
+            "version=1\nstatus=closed\ncompleted_frames=$frameCount\n" +
+                "raw_bytes=${frameCount * 10}\nwidth=$width\nheight=$height\nrow_bytes=5\n"
+        )
+        File(source, "clip.raw10").writeBytes(
+            ByteArray(frameCount * 10) { index -> (index and 0xff).toByte() }
+        )
+        val sampleRate = 48_000
+        val channels = 2
+        val bits = 24
+        val frameBytes = channels * bits / 8
+        val outputAudioFrames = frameCount * sampleRate / fps
+        val sourceAudioFrames = outputAudioFrames + 1_000
+        val sourcePayload = ByteArray(sourceAudioFrames * frameBytes) { index ->
+            ((index * 37 + 11) and 0xff).toByte()
+        }
+        File(source, "audio.wav").writeBytes(waveHeader(sourcePayload.size, sampleRate, channels, bits) + sourcePayload)
+        File(source, "audio.json").writeText(
+            JSONObject().apply {
+                put("format", "wav-pcm")
+                put("status", "closed")
+                put("file", "audio.wav")
+                put("sample_rate", sampleRate)
+                put("channels", channels)
+                put("bits_per_sample", bits)
+                put("frames", sourceAudioFrames)
+                put("data_bytes", sourcePayload.size)
+                put("finalized", true)
+            }.toString(2)
+        )
+        File(source, "sync.json").writeText(
+            JSONObject().apply {
+                put("version", 1)
+                put("camera_start_minus_audio_start_ns", 0)
+            }.toString(2)
+        )
+
+        val result = Raw10CinemaDngConverter.convert(source) {}
+
+        assertEquals(null, result.error)
+        val output = requireNotNull(result.output)
+        val converted = File(output, "audio.wav").readBytes()
+        val payload = converted.copyOfRange(44, converted.size)
+        assertEquals(outputAudioFrames * frameBytes, payload.size)
+        assertArrayEquals(sourcePayload.copyOfRange(0, payload.size), payload)
+    }
+
+    @Test
     fun `DNG writer preserves Pixel 6 DNG color profile tags`() {
         val directory = createTempDirectory().toFile()
         val destination = File(directory, "frame_000000.dng")
@@ -242,6 +308,28 @@ class Raw10CinemaDngConverterTest {
         put("color_matrix_2", identityMatrix())
         put("reference_illuminant_1", 17)
         put("reference_illuminant_2", 21)
+    }
+
+    private fun waveHeader(payloadBytes: Int, sampleRate: Int, channels: Int, bits: Int): ByteArray {
+        val frameBytes = channels * bits / 8
+        return ByteBuffer.allocate(44)
+            .order(ByteOrder.LITTLE_ENDIAN)
+            .apply {
+                put("RIFF".toByteArray(Charsets.US_ASCII))
+                putInt(36 + payloadBytes)
+                put("WAVE".toByteArray(Charsets.US_ASCII))
+                put("fmt ".toByteArray(Charsets.US_ASCII))
+                putInt(16)
+                putShort(1)
+                putShort(channels.toShort())
+                putInt(sampleRate)
+                putInt(sampleRate * frameBytes)
+                putShort(frameBytes.toShort())
+                putShort(bits.toShort())
+                put("data".toByteArray(Charsets.US_ASCII))
+                putInt(payloadBytes)
+            }
+            .array()
     }
 
     private fun pixel6ColorMatrix1(): JSONArray = JSONArray().apply {
