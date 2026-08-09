@@ -649,6 +649,12 @@ class CameraChromeView(context: Context) : View(context) {
         invalidate()
     }
 
+    fun hideFocusReticle() {
+        if (focusReticle == null) return
+        repeatHandler.removeCallbacks(hideFocusReticleRunnable)
+        hideFocusReticleRunnable.run()
+    }
+
     private fun toggleChromeTools() {
         chromeToolsVisible = !chromeToolsVisible
         val target = if (chromeToolsVisible) 1f else 0f

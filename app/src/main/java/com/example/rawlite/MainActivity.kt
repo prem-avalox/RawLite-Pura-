@@ -392,6 +392,7 @@ class MainActivity : Activity() {
     private var previewMeteringRegion: MeteringRectangle? = null
     private var previewMeteringLocked = false
     private var previewMeteringAfPending = false
+    private var previewFocusConfirmationPending = false
     private var isoValue = 100
     private var exposureNs = 16_666_667L
     private var evSteps = 0
@@ -1311,22 +1312,21 @@ class MainActivity : Activity() {
         ) return
         val characteristics = currentCharacteristics() ?: return
         val maxAfRegions = characteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0
-        val maxAeRegions = characteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE) ?: 0
-        if (maxAfRegions <= 0 && maxAeRegions <= 0) {
-            cameraChrome.showStatusPopup("SIN AF/AE")
+        val canFocus = (characteristics
+            .get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f) > 0f
+        if (maxAfRegions <= 0 || !canFocus) {
+            cameraChrome.showStatusPopup("SIN AF")
             return
         }
         val region = previewMeteringRectangle(x, y, characteristics) ?: return
         previewMeteringRegion = region
         previewMeteringLocked = locked
-        previewMeteringAfPending = maxAfRegions > 0
-        val canFocus = (characteristics
-            .get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f) > 0f
-        if (canFocus) manualFocus = false
-        beginPreviewCadenceMetering()
+        previewMeteringAfPending = true
+        previewFocusConfirmationPending = true
+        manualFocus = false
         updateControlModes()
         updateChromeValues()
-        cameraChrome.showStatusPopup(if (locked) "AF/AE FIJO" else "AF/AE")
+        cameraChrome.showStatusPopup(if (locked) "AF FIJO" else "AF")
         cameraHandler.post { submitPreviewFocusTrigger() }
     }
 
@@ -1334,6 +1334,7 @@ class MainActivity : Activity() {
         previewMeteringRegion = null
         previewMeteringLocked = false
         previewMeteringAfPending = false
+        previewFocusConfirmationPending = false
         if (::cameraChrome.isInitialized) cameraChrome.clearFocusReticle()
         if (updateCamera) restartRepeating()
     }
@@ -1389,9 +1390,6 @@ class MainActivity : Activity() {
                         result: TotalCaptureResult
                     ) {
                         storeCaptureResult(result)
-                        runOnUiThread {
-                            if (::cameraChrome.isInitialized) cameraChrome.showFocusConfirmed()
-                        }
                         cameraHandler.post {
                             if (!recording && captureSession === session) startRepeating(includeRaw = false)
                         }
@@ -2586,6 +2584,7 @@ class MainActivity : Activity() {
             ?.let { result.physicalCameraResults[it] }
             ?: result
         latestResult = effective
+        updatePreviewFocusConfirmation(effective)
         effective.get(CaptureResult.SENSOR_TIMESTAMP)?.let { timestamp ->
             val pendingImage = pendingRawImages.remove(timestamp)
             if (pendingImage != null) {
@@ -2594,6 +2593,29 @@ class MainActivity : Activity() {
                 resultsByTimestamp[timestamp] = effective
             }
             if (resultsByTimestamp.size > 64) resultsByTimestamp.clear()
+        }
+    }
+
+    private fun updatePreviewFocusConfirmation(result: CaptureResult) {
+        if (!previewFocusConfirmationPending) return
+        val state = result.get(CaptureResult.CONTROL_AF_STATE) ?: return
+        when (state) {
+            CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED,
+            CaptureResult.CONTROL_AF_STATE_PASSIVE_FOCUSED -> {
+                previewFocusConfirmationPending = false
+                runOnUiThread {
+                    if (::cameraChrome.isInitialized) cameraChrome.showFocusConfirmed()
+                }
+            }
+            CaptureResult.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED,
+            CaptureResult.CONTROL_AF_STATE_PASSIVE_UNFOCUSED -> {
+                previewFocusConfirmationPending = false
+                if (!previewMeteringLocked) {
+                    runOnUiThread {
+                        if (::cameraChrome.isInitialized) cameraChrome.hideFocusReticle()
+                    }
+                }
+            }
         }
     }
 
@@ -2643,16 +2665,6 @@ class MainActivity : Activity() {
             put(builder, CaptureRequest.CONTROL_AE_LOCK, false)
             put(builder, CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, evSteps)
         }
-        val meteringRegion = previewMeteringRegion
-        val canApplyAeRegion = meteringRegion != null &&
-            !manualExposure &&
-            !lockedExposure &&
-            !cadenceExposure &&
-            (option.characteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE) ?: 0) > 0
-        if (canApplyAeRegion) {
-            put(builder, CaptureRequest.CONTROL_AE_REGIONS, arrayOf(meteringRegion))
-        }
-
         val lockedWb = includeRaw && lockWhiteBalance && snapshot?.gains != null
         if (manualWb) {
             put(builder, CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF)
@@ -2679,6 +2691,7 @@ class MainActivity : Activity() {
         val maxFocus = option.characteristics
             .get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
         val lockedFocus = includeRaw && lockFocus && snapshot?.focusDiopters != null
+        val meteringRegion = previewMeteringRegion
         val canApplyAfRegion = meteringRegion != null &&
             (option.characteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0) > 0
         when {
