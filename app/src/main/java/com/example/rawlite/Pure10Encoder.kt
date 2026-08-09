@@ -44,7 +44,7 @@ internal class Pure10Encoder(
     private val rotationDegrees: Int,
     private val characteristics: CameraCharacteristics,
     private val codecName: String = CODEC_NAME,
-    cameraRgbToRec2020: FloatArray = Pixel6MainDngColorProfile.CAMERA_RGB_TO_REC2020_D65
+    cameraRgbToRec2020: FloatArray = Pixel6MainDngColorProfile.pure10CameraRgbToRec2020()
 ) {
     private val cameraRgbToRec2020 = cameraRgbToRec2020.copyOf()
     private val outputExecutor = Executors.newSingleThreadExecutor()

@@ -66,7 +66,11 @@ internal object CaptureMetadataFactory {
         Pixel6MainDngColorProfile.apply(this)
     }
 
-    fun pure10(context: CaptureMetadataContext, postRawGain: Int): JSONObject =
+    fun pure10(
+        context: CaptureMetadataContext,
+        postRawGain: Int,
+        colorTemperatureKelvin: Int
+    ): JSONObject =
         common(context).apply {
             put("format", "rawlite-pure10")
             put("version", 1)
@@ -83,8 +87,19 @@ internal object CaptureMetadataFactory {
             put("transfer", "Rec.2100 HLG (ARIB STD-B67)")
             put("gamma", "Rec.2100 HLG")
             put("range", "limited")
-            put("color_pipeline", "Camera RGB D65 -> linear Rec.2020 -> Rec.2100 HLG")
-            put("camera_rgb_to_rec2020_d65", Pixel6MainDngColorProfile.cameraRgbToRec2020D65Json())
+            put("color_temperature_kelvin", colorTemperatureKelvin)
+            put(
+                "color_pipeline",
+                "Camera RGB D65 -> Rec.2020 neutral corrected -> Rec.2100 HLG"
+            )
+            put(
+                "camera_rgb_to_rec2020",
+                Pixel6MainDngColorProfile.pure10CameraRgbToRec2020Json()
+            )
+            put(
+                "pure10_rec2020_neutral_correction",
+                Pixel6MainDngColorProfile.pure10NeutralCorrectionJson()
+            )
             put("scene_linear_gain", Pure10Encoder.HLG_MIDTONE_GAIN * postRawGain / 100f)
             put("bit_rate", Pure10Encoder.BIT_RATE)
             put("source", "Camera2 RAW10")

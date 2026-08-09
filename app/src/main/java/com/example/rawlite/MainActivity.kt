@@ -83,6 +83,7 @@ import com.example.rawlite.core.model.CaptureFormatPolicy
 import com.example.rawlite.core.model.CaptureMode
 import com.example.rawlite.core.model.CaptureOutput
 import com.example.rawlite.core.state.CaptureOperationState
+import com.example.rawlite.gallery.Pixel6MainDngColorProfile
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -3034,7 +3035,8 @@ class MainActivity : Activity() {
                 fps = selectedFps,
                 bitRate = Pure10Encoder.BIT_RATE,
                 rotationDegrees = captureRotationDegrees(option.characteristics),
-                characteristics = option.characteristics
+                characteristics = option.characteristics,
+                cameraRgbToRec2020 = Pixel6MainDngColorProfile.pure10CameraRgbToRec2020()
             )
             encoder.start()
             pure10Encoder = encoder
@@ -3308,7 +3310,11 @@ class MainActivity : Activity() {
     }
 
     private fun buildPure10Description(sourceSize: Size, outputSize: Size): JSONObject {
-        return CaptureMetadataFactory.pure10(captureMetadataContext(outputSize), postRawGain)
+        return CaptureMetadataFactory.pure10(
+            captureMetadataContext(outputSize),
+            postRawGain,
+            kelvin
+        )
             .put("raw_source_width", sourceSize.width)
             .put("raw_source_height", sourceSize.height)
             .put("pure10_crop_x", ((sourceSize.width - outputSize.width) / 2) and -2)

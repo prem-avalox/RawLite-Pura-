@@ -205,6 +205,18 @@ class Raw10CinemaDngConverterTest {
         assertEquals(1.0f, blue, 0.0001f)
     }
 
+    @Test
+    fun `Pixel 6 camera to Rec2020 matrix interpolates for daylight white balance`() {
+        val d65 = Pixel6MainDngColorProfile.cameraRgbToRec2020(6500)
+        val daylight = Pixel6MainDngColorProfile.cameraRgbToRec2020(5250)
+
+        assertEquals(0.8134, Pixel6MainDngColorProfile.d65InterpolationWeight(5250), 0.0001)
+        assertEquals(1.0f, daylight[0] + daylight[1] + daylight[2], 0.0001f)
+        assertEquals(1.0f, daylight[3] + daylight[4] + daylight[5], 0.0001f)
+        assertEquals(1.0f, daylight[6] + daylight[7] + daylight[8], 0.0001f)
+        assertTrue(kotlin.math.abs(daylight[1] - d65[1]) > 0.02f)
+    }
+
     private fun identityMatrix(): JSONArray = JSONArray().apply {
         listOf(
             1 to 1, 0 to 1, 0 to 1,
