@@ -58,6 +58,29 @@ class RawLiteToDngAudioTest(unittest.TestCase):
                 self.assertEqual(1, page.tags[278].value)
                 np.testing.assert_array_equal(mosaic, page.asarray())
 
+    def test_pixel_6_main_profile_uses_official_dng_color_matrix(self) -> None:
+        metadata = {
+            "camera": "Principal · 6.8 mm",
+            "camera_id": "2",
+            "width": 2032,
+            "height": 1536,
+            "cfa": "GBRG",
+            "color_matrix_1": [],
+            "color_matrix_2": [],
+            "calibration_matrix_1": [[1, 1]] * 9,
+            "forward_matrix_1": [[1, 1]] * 9,
+        }
+
+        applied = rawlite_to_dng.apply_pixel_6_main_dng_profile(metadata)
+
+        self.assertTrue(applied)
+        self.assertEqual("Google Pixel 6 main DNG", metadata["color_profile"])
+        self.assertEqual("Google Pixel 6", metadata["unique_camera_model"])
+        self.assertEqual([12453, 10000], metadata["color_matrix_1"][0])
+        self.assertEqual([10537, 10000], metadata["color_matrix_2"][0])
+        self.assertNotIn("calibration_matrix_1", metadata)
+        self.assertNotIn("forward_matrix_1", metadata)
+
     def test_audio_alignment_does_not_modify_source_take(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -24,28 +24,18 @@ CFA_PATTERNS = {
 }
 
 
-# Pixel 6 main-camera factory matrices exposed by Camera2. Recordings created
-# before RawLite 0.8 did not preserve these four matrices in clip.json.
-PIXEL_6_MAIN_FACTORY_PROFILE = {
-    "calibration_matrix_1": [
-        [6611, 6709], [0, 1], [0, 1],
-        [0, 1], [1, 1], [0, 1],
-        [0, 1], [0, 1], [4131, 4131],
+# Pixel 6 main-camera DNG profile extracted from
+# PXL_20260805_192832722.RAW-02.ORIGINAL.dng.
+PIXEL_6_MAIN_DNG_PROFILE = {
+    "color_matrix_1": [
+        [12453, 10000], [-6954, 10000], [134, 10000],
+        [-2949, 10000], [11718, 10000], [1364, 10000],
+        [71, 10000], [1626, 10000], [6290, 10000],
     ],
-    "calibration_matrix_2": [
-        [4629, 4736], [0, 1], [0, 1],
-        [0, 1], [1, 1], [0, 1],
-        [0, 1], [0, 1], [7217, 7246],
-    ],
-    "forward_matrix_1": [
-        [4362, 10000], [3850, 10000], [1431, 10000],
-        [2226, 10000], [7168, 10000], [606, 10000],
-        [139, 10000], [971, 10000], [7141, 10000],
-    ],
-    "forward_matrix_2": [
-        [4361, 10000], [3851, 10000], [1431, 10000],
-        [2225, 10000], [7169, 10000], [606, 10000],
-        [139, 10000], [971, 10000], [7141, 10000],
+    "color_matrix_2": [
+        [10537, 10000], [-4544, 10000], [-906, 10000],
+        [-3178, 10000], [11784, 10000], [1552, 10000],
+        [-109, 10000], [1865, 10000], [5324, 10000],
     ],
 }
 
@@ -93,21 +83,30 @@ def matrix_tag(values: list[list[int]]) -> list[tuple[int, int]]:
     return [(int(pair[0]), int(pair[1])) for pair in values]
 
 
-def add_legacy_factory_profile(metadata: dict) -> bool:
-    """Add Pixel 6 factory matrices to recordings made before RawLite 0.8."""
-    required = tuple(PIXEL_6_MAIN_FACTORY_PROFILE)
-    if all(len(metadata.get(key, [])) == 9 for key in required):
-        return False
+def apply_pixel_6_main_dng_profile(metadata: dict) -> bool:
+    """Apply the Pixel 6 main-camera color profile extracted from an official DNG."""
     is_pixel_6_main = (
-        str(metadata.get("camera_id")) == "2"
+        str(metadata.get("camera_id")) in {"0", "2"}
         and str(metadata.get("camera", "")).startswith("Principal")
         and metadata.get("cfa") == "GBRG"
-        and int(metadata.get("width", 0)) in (2032, 4080)
+        and int(metadata.get("width", 0)) in {2032, 4080}
     )
     if not is_pixel_6_main:
         return False
-    for key, value in PIXEL_6_MAIN_FACTORY_PROFILE.items():
-        metadata.setdefault(key, value)
+    metadata.update(PIXEL_6_MAIN_DNG_PROFILE)
+    metadata["reference_illuminant_1"] = 17
+    metadata["reference_illuminant_2"] = 21
+    metadata["baseline_exposure"] = 0.59
+    metadata["unique_camera_model"] = "Google Pixel 6"
+    metadata["color_profile"] = "Google Pixel 6 main DNG"
+    metadata["color_profile_source"] = "PXL_20260805_192832722.RAW-02.ORIGINAL.dng"
+    for key in (
+        "calibration_matrix_1",
+        "calibration_matrix_2",
+        "forward_matrix_1",
+        "forward_matrix_2",
+    ):
+        metadata.pop(key, None)
     return True
 
 
@@ -381,7 +380,7 @@ def dng_tags(
         (34855, "H", 1, int(row["iso"]), False),
         (50706, "B", 4, (1, 4, 0, 0), False),
         (50707, "B", 4, (1, 1, 0, 0), False),
-        (50708, "s", 0, f"RawLite {camera_name}", False),
+        (50708, "s", 0, metadata.get("unique_camera_model", f"RawLite {camera_name}"), False),
         (50710, "B", 3, (0, 1, 2), False),
         (50711, "H", 1, 1, False),
         (50713, "H", 2, (2, 2), False),
@@ -415,6 +414,8 @@ def dng_tags(
         ("forward_matrix_1", 50964),
         ("forward_matrix_2", 50965),
     )
+    if "baseline_exposure" in metadata:
+        tags.append((50730, "2i", 1, rational(float(metadata["baseline_exposure"])), False))
     for key, tag in optional_matrices:
         values = metadata.get(key, [])
         if len(values) == 9:
@@ -450,8 +451,8 @@ def main() -> None:
         metadata = json.load(stream)
     if metadata.get("format") != "rawlite-raw10":
         raise SystemExit("clip.json is not a RawLite RAW10 recording")
-    if add_legacy_factory_profile(metadata):
-        print("Using Pixel 6 main-camera factory calibration for legacy recording")
+    if apply_pixel_6_main_dng_profile(metadata):
+        print("Using Pixel 6 main-camera DNG color profile")
 
     rows = read_rows(recording / "frames.csv")
     state = read_state(recording / "clip.state")

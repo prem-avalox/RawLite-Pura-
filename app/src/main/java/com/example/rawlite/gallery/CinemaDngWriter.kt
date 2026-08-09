@@ -62,7 +62,10 @@ internal object CinemaDngWriter {
         output += entry(TAG_ISO_SPEED, TYPE_SHORT, shorts(frame.iso.coerceAtLeast(0)))
         output += entry(TAG_DNG_VERSION, TYPE_BYTE, bytes(1, 4, 0, 0))
         output += entry(TAG_DNG_BACKWARD_VERSION, TYPE_BYTE, bytes(1, 1, 0, 0))
-        output += ascii(TAG_UNIQUE_CAMERA_MODEL, "RawLite $cameraName")
+        output += ascii(
+            TAG_UNIQUE_CAMERA_MODEL,
+            metadata.optString("unique_camera_model", "RawLite $cameraName")
+        )
         output += entry(TAG_CFA_PLANE_COLOR, TYPE_BYTE, bytes(0, 1, 2))
         output += entry(TAG_CFA_LAYOUT, TYPE_SHORT, shorts(1))
         output += entry(TAG_BLACK_LEVEL_REPEAT_DIM, TYPE_SHORT, shorts(2, 2))
@@ -78,6 +81,13 @@ internal object CinemaDngWriter {
         output += matrixEntry(metadata, "color_matrix_1", TAG_COLOR_MATRIX_1)
         output += matrixEntry(metadata, "color_matrix_2", TAG_COLOR_MATRIX_2)
         output += entry(TAG_AS_SHOT_NEUTRAL, TYPE_RATIONAL, rationals(*neutral))
+        if (metadata.has("baseline_exposure")) {
+            output += entry(
+                TAG_BASELINE_EXPOSURE,
+                TYPE_SRATIONAL,
+                signedRationals(rational(metadata.optDouble("baseline_exposure", 0.0)))
+            )
+        }
         output += entry(
             TAG_CALIBRATION_ILLUMINANT_1,
             TYPE_SHORT,
@@ -331,6 +341,7 @@ internal object CinemaDngWriter {
     private const val TAG_CAMERA_CALIBRATION_1 = 50723
     private const val TAG_CAMERA_CALIBRATION_2 = 50724
     private const val TAG_AS_SHOT_NEUTRAL = 50728
+    private const val TAG_BASELINE_EXPOSURE = 50730
     private const val TAG_CALIBRATION_ILLUMINANT_1 = 50778
     private const val TAG_CALIBRATION_ILLUMINANT_2 = 50779
     private const val TAG_ACTIVE_AREA = 50829

@@ -5,6 +5,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -120,6 +121,66 @@ class Raw10CinemaDngConverterTest {
         assertEquals("RAW10_20260808_120000", clip.getString("source_directory"))
     }
 
+    @Test
+    fun `DNG writer preserves Pixel 6 DNG color profile tags`() {
+        val directory = createTempDirectory().toFile()
+        val destination = File(directory, "frame_000000.dng")
+        val metadata = raw10Metadata(width = 4, height = 2).apply {
+            put("unique_camera_model", "Google Pixel 6")
+            put("baseline_exposure", 0.59)
+            put("color_matrix_1", pixel6ColorMatrix1())
+            put("color_matrix_2", pixel6ColorMatrix2())
+        }
+        val mosaic = ByteArray(4 * 2 * 2) { index -> index.toByte() }
+
+        CinemaDngWriter.write(
+            destination = destination,
+            mosaicLittleEndian16 = mosaic,
+            metadata = metadata,
+            frame = RawFrameInfo(
+                frame = 0,
+                timestampNs = 1,
+                iso = 100,
+                exposureNs = 10_000_000,
+                frameDurationNs = 66_666_666,
+                focusDiopters = 0f,
+                wbRed = 2f,
+                wbGreenEven = 1f,
+                wbGreenOdd = 1f,
+                wbBlue = 1.5f
+            )
+        )
+
+        val tags = readTiffTags(destination)
+        assertEquals("Google Pixel 6", tags.getValue(50708).ascii())
+        assertEquals(0.59, tags.getValue(50730).firstSignedRational(), 0.0001)
+        assertEquals(
+            listOf(12453 to 10000, -6954 to 10000, 134 to 10000),
+            tags.getValue(50721).signedRationals().take(3)
+        )
+        assertFalse(tags.containsKey(50723))
+        assertFalse(tags.containsKey(50724))
+        assertFalse(tags.containsKey(50964))
+        assertFalse(tags.containsKey(50965))
+    }
+
+    @Test
+    fun `Pixel 6 main DNG profile replaces incomplete camera color metadata`() {
+        val metadata = raw10Metadata(width = 2032, height = 1536).apply {
+            put("calibration_matrix_1", identityMatrix())
+            put("forward_matrix_1", identityMatrix())
+        }
+
+        Pixel6MainDngColorProfile.apply(metadata)
+
+        assertEquals("Google Pixel 6 main DNG", metadata.getString("color_profile"))
+        assertEquals("Google Pixel 6", metadata.getString("unique_camera_model"))
+        assertEquals(0.59, metadata.getDouble("baseline_exposure"), 0.0001)
+        assertEquals(12453, metadata.getJSONArray("color_matrix_1").getJSONArray(0).getInt(0))
+        assertFalse(metadata.has("calibration_matrix_1"))
+        assertFalse(metadata.has("forward_matrix_1"))
+    }
+
     private fun identityMatrix(): JSONArray = JSONArray().apply {
         listOf(
             1 to 1, 0 to 1, 0 to 1,
@@ -147,6 +208,26 @@ class Raw10CinemaDngConverterTest {
         put("reference_illuminant_2", 21)
     }
 
+    private fun pixel6ColorMatrix1(): JSONArray = JSONArray().apply {
+        listOf(
+            12453 to 10000, -6954 to 10000, 134 to 10000,
+            -2949 to 10000, 11718 to 10000, 1364 to 10000,
+            71 to 10000, 1626 to 10000, 6290 to 10000
+        ).forEach { (numerator, denominator) ->
+            put(JSONArray().put(numerator).put(denominator))
+        }
+    }
+
+    private fun pixel6ColorMatrix2(): JSONArray = JSONArray().apply {
+        listOf(
+            10537 to 10000, -4544 to 10000, -906 to 10000,
+            -3178 to 10000, 11784 to 10000, 1552 to 10000,
+            -109 to 10000, 1865 to 10000, 5324 to 10000
+        ).forEach { (numerator, denominator) ->
+            put(JSONArray().put(numerator).put(denominator))
+        }
+    }
+
     private data class TiffTag(val type: Int, val count: Int, val raw: ByteArray, val file: ByteArray) {
         fun firstShort(): Int = ByteBuffer.wrap(valueBytes(2)).order(ByteOrder.LITTLE_ENDIAN)
             .short.toInt() and 0xffff
@@ -157,6 +238,19 @@ class Raw10CinemaDngConverterTest {
         fun ascii(): String = valueBytes(1).toString(Charsets.US_ASCII).trimEnd('\u0000')
 
         fun bytes(): ByteArray = valueBytes(1)
+
+        fun firstSignedRational(): Double = signedRationals().first().let { (numerator, denominator) ->
+            numerator.toDouble() / denominator.toDouble()
+        }
+
+        fun signedRationals(): List<Pair<Int, Int>> {
+            val bytes = valueBytes(8)
+            return (0 until count).map { index ->
+                val offset = index * 8
+                val buffer = ByteBuffer.wrap(bytes, offset, 8).order(ByteOrder.LITTLE_ENDIAN)
+                buffer.int to buffer.int
+            }
+        }
 
         private fun valueBytes(typeSize: Int): ByteArray {
             val size = count * typeSize

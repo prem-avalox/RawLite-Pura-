@@ -54,7 +54,7 @@ internal object Raw10CinemaDngConverter {
         require(metadata.optString("format") == "rawlite-raw10") {
             "La toma no es RAW10"
         }
-        addLegacyFactoryProfile(metadata)
+        Pixel6MainDngColorProfile.apply(metadata)
         val width = metadata.getInt("width")
         val height = metadata.getInt("height")
         val rowBytes = metadata.getInt("row_bytes")
@@ -434,54 +434,5 @@ internal object Raw10CinemaDngConverter {
         }.toMap()
     }
 
-    private fun addLegacyFactoryProfile(metadata: JSONObject) {
-        val required = listOf(
-            "calibration_matrix_1",
-            "calibration_matrix_2",
-            "forward_matrix_1",
-            "forward_matrix_2"
-        )
-        if (required.all { (metadata.optJSONArray(it)?.length() ?: 0) == 9 }) return
-        val isPixel6Main = metadata.optString("camera_id") == "2" &&
-            metadata.optString("camera").startsWith("Principal") &&
-            metadata.optString("cfa") == "GBRG" &&
-            metadata.optInt("width") in setOf(2032, 4080)
-        if (!isPixel6Main) return
-        PIXEL_6_MAIN_FACTORY_PROFILE.forEach { (key, values) ->
-            if ((metadata.optJSONArray(key)?.length() ?: 0) != 9) {
-                metadata.put(key, values)
-            }
-        }
-    }
-
-    private fun matrix(vararg values: Pair<Int, Int>) = org.json.JSONArray().apply {
-        values.forEach { (numerator, denominator) ->
-            put(org.json.JSONArray().put(numerator).put(denominator))
-        }
-    }
-
     private const val WAVE_HEADER_BYTES = 44L
-
-    private val PIXEL_6_MAIN_FACTORY_PROFILE = mapOf(
-        "calibration_matrix_1" to matrix(
-            6611 to 6709, 0 to 1, 0 to 1,
-            0 to 1, 1 to 1, 0 to 1,
-            0 to 1, 0 to 1, 4131 to 4131
-        ),
-        "calibration_matrix_2" to matrix(
-            4629 to 4736, 0 to 1, 0 to 1,
-            0 to 1, 1 to 1, 0 to 1,
-            0 to 1, 0 to 1, 7217 to 7246
-        ),
-        "forward_matrix_1" to matrix(
-            4362 to 10000, 3850 to 10000, 1431 to 10000,
-            2226 to 10000, 7168 to 10000, 606 to 10000,
-            139 to 10000, 971 to 10000, 7141 to 10000
-        ),
-        "forward_matrix_2" to matrix(
-            4361 to 10000, 3851 to 10000, 1431 to 10000,
-            2225 to 10000, 7169 to 10000, 606 to 10000,
-            139 to 10000, 971 to 10000, 7141 to 10000
-        )
-    )
 }
