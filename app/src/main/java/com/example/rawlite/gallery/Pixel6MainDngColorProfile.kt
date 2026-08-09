@@ -8,6 +8,17 @@ import org.json.JSONObject
  * PXL_20260805_192832722.RAW-02.ORIGINAL.dng.
  */
 internal object Pixel6MainDngColorProfile {
+    /**
+     * D65 camera RGB to linear Rec.2020 derived from ColorMatrix2 in the Pixel 6
+     * reference DNG. Rows are normalized so a white-balanced camera neutral maps
+     * to neutral Rec.2020 before the transfer function is applied.
+     */
+    val CAMERA_RGB_TO_REC2020_D65: FloatArray = floatArrayOf(
+        0.9352855f, 0.22501442f, -0.16029993f,
+        -0.32346301f, 1.8871065f, -0.56364349f,
+        -0.05047278f, -0.25077162f, 1.3012444f
+    )
+
     fun matches(metadata: JSONObject): Boolean {
         val cfa = metadata.optString("cfa", "")
         return metadata.optString("camera_id") in setOf("0", "2") &&
@@ -42,6 +53,10 @@ internal object Pixel6MainDngColorProfile {
         metadata.remove("calibration_matrix_2")
         metadata.remove("forward_matrix_1")
         metadata.remove("forward_matrix_2")
+    }
+
+    fun cameraRgbToRec2020D65Json(): JSONArray = JSONArray().apply {
+        CAMERA_RGB_TO_REC2020_D65.forEach { put(it.toDouble()) }
     }
 
     private fun matrix(vararg values: Pair<Int, Int>) = JSONArray().apply {

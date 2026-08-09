@@ -59,7 +59,12 @@ class NativeTenBitConverterTest {
             whiteLevel = 1023,
             redGain = 2.0f,
             blueGain = 1.8f,
-            exposureGain = 1.0f
+            exposureGain = 1.0f,
+            cameraRgbToRec2020 = floatArrayOf(
+                1f, 0f, 0f,
+                0f, 1f, 0f,
+                0f, 0f, 1f
+            )
         )
     }
 }

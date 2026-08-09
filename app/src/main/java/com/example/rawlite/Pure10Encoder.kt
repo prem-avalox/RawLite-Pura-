@@ -10,6 +10,7 @@ import android.media.MediaMuxer
 import android.util.Log
 import android.util.Size
 import com.example.rawlite.core.config.Pixel6ReferenceProfile
+import com.example.rawlite.gallery.Pixel6MainDngColorProfile
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -42,8 +43,10 @@ internal class Pure10Encoder(
     private val bitRate: Int,
     private val rotationDegrees: Int,
     private val characteristics: CameraCharacteristics,
-    private val codecName: String = CODEC_NAME
+    private val codecName: String = CODEC_NAME,
+    cameraRgbToRec2020: FloatArray = Pixel6MainDngColorProfile.CAMERA_RGB_TO_REC2020_D65
 ) {
+    private val cameraRgbToRec2020 = cameraRgbToRec2020.copyOf()
     private val outputExecutor = Executors.newSingleThreadExecutor()
     private val outputFinished = CountDownLatch(1)
     private val submittedFrames = AtomicInteger()
@@ -193,7 +196,8 @@ internal class Pure10Encoder(
                 whiteLevel = whiteLevel,
                 redGain = redGain.coerceIn(0.25f, 8f),
                 blueGain = blueGain.coerceIn(0.25f, 8f),
-                exposureGain = exposureGain.coerceIn(0.25f, 8f)
+                exposureGain = exposureGain.coerceIn(0.25f, 8f),
+                cameraRgbToRec2020 = cameraRgbToRec2020
             )
             if (conversionNs < 0L) {
                 localCodec.queueInputBuffer(inputIndex, 0, 0, 0L, 0)
@@ -349,7 +353,7 @@ internal class Pure10Encoder(
         private val PROFILE = Pixel6ReferenceProfile.capture
         const val VIDEO_FILE = "pure10.mp4"
         val BIT_RATE = PROFILE.pure10BitRate
-        val HLG_MIDTONE_GAIN = PROFILE.pure10HlgMidtoneGain
+        const val HLG_MIDTONE_GAIN = 1.0f
         val CODEC_NAME = PROFILE.preferredHevcMain10Encoder
         private const val TAG = "RawLitePure10"
         private const val INPUT_TIMEOUT_US = 5_000L

@@ -33,6 +33,7 @@ import android.view.Surface
 import android.view.WindowManager
 import android.widget.TextView
 import com.example.rawlite.core.config.Pixel6ReferenceProfile
+import com.example.rawlite.gallery.Pixel6MainDngColorProfile
 import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.Executor
@@ -268,7 +269,8 @@ class TenBitCameraProbeActivity : Activity() {
                 white,
                 2.0f,
                 1.6f,
-                1.0f
+                1.0f,
+                Pixel6MainDngColorProfile.CAMERA_RGB_TO_REC2020_D65
             )
             if (conversionNs < 0) {
                 droppedEncoderFrames.incrementAndGet()

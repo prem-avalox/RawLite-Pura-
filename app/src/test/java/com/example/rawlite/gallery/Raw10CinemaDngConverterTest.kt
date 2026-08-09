@@ -192,6 +192,19 @@ class Raw10CinemaDngConverterTest {
         assertEquals(10537, metadata.getJSONArray("color_matrix_2").getJSONArray(0).getInt(0))
     }
 
+    @Test
+    fun `Pixel 6 camera to Rec2020 matrix keeps white-balanced neutral gray neutral`() {
+        val matrix = Pixel6MainDngColorProfile.CAMERA_RGB_TO_REC2020_D65
+
+        val red = matrix[0] + matrix[1] + matrix[2]
+        val green = matrix[3] + matrix[4] + matrix[5]
+        val blue = matrix[6] + matrix[7] + matrix[8]
+
+        assertEquals(1.0f, red, 0.0001f)
+        assertEquals(1.0f, green, 0.0001f)
+        assertEquals(1.0f, blue, 0.0001f)
+    }
+
     private fun identityMatrix(): JSONArray = JSONArray().apply {
         listOf(
             1 to 1, 0 to 1, 0 to 1,

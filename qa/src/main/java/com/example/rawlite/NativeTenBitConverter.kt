@@ -26,6 +26,7 @@ internal object NativeTenBitConverter {
         whiteLevel: Int,
         redGain: Float,
         blueGain: Float,
-        exposureGain: Float
+        exposureGain: Float,
+        cameraRgbToRec2020: FloatArray
     ): Long
 }
