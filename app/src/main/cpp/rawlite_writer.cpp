@@ -721,31 +721,48 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
         env->GetFloatArrayRegion(camera_to_rec2020_array, 0, 9, camera_to_rec2020.data());
     }
 
-    std::array<float, 1024> red_linear_lut{};
-    std::array<float, 1024> green_linear_lut{};
-    std::array<float, 1024> blue_linear_lut{};
+    constexpr int kLinearScale = 4096;
+    constexpr int kMatrixScale = 16384;
+    std::array<int, 9> camera_to_rec2020_q{};
+    for (size_t i = 0; i < camera_to_rec2020.size(); ++i) {
+        camera_to_rec2020_q[i] = static_cast<int>(
+            std::lround(camera_to_rec2020[i] * kMatrixScale)
+        );
+    }
+
+    std::array<int, 1024> red_linear_lut{};
+    std::array<int, 1024> green_linear_lut{};
+    std::array<int, 1024> blue_linear_lut{};
     const float safe_exposure_gain = std::clamp(exposure_gain, 0.25f, 8.0f);
     const auto normalized_linear = [black_level, white_level](
         int value,
         float channel_gain
-    ) -> float {
-        return std::clamp(
+    ) -> int {
+        const float linear = std::clamp(
             (value - black_level) * channel_gain /
                 static_cast<float>(white_level - black_level),
             0.0f,
             1.0f
         );
+        return static_cast<int>(std::lround(linear * kLinearScale));
     };
-    const auto hlg_code = [safe_exposure_gain](float value) -> uint16_t {
-        const float linear = std::clamp(safe_exposure_gain * value, 0.0f, 1.0f);
+    std::array<uint16_t, kLinearScale + 1> hlg_lut{};
+    for (int value = 0; value <= kLinearScale; ++value) {
+        const float linear = std::clamp(
+            safe_exposure_gain * static_cast<float>(value) / kLinearScale,
+            0.0f,
+            1.0f
+        );
         constexpr float a = 0.17883277f;
         constexpr float b = 0.28466892f;
         constexpr float c = 0.55991073f;
         const float encoded = linear <= (1.0f / 12.0f)
             ? std::sqrt(3.0f * linear)
             : a * std::log(12.0f * linear - b) + c;
-        return static_cast<uint16_t>(std::clamp(64.0f + encoded * 876.0f, 64.0f, 940.0f));
-    };
+        hlg_lut[value] = static_cast<uint16_t>(
+            std::clamp(64.0f + encoded * 876.0f, 64.0f, 940.0f)
+        );
+    }
     for (int value = 0; value < 1024; ++value) {
         red_linear_lut[value] = normalized_linear(value, red_gain);
         green_linear_lut[value] = normalized_linear(value, 1.0f);
@@ -811,38 +828,36 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
                     break;
             }
 
-            const float rf = red_linear_lut[std::clamp(r, 0, 1023)];
-            const float bf = blue_linear_lut[std::clamp(b_value, 0, 1023)];
-            const float gf0 = green_linear_lut[std::clamp(g0, 0, 1023)];
-            const float gf1 = green_linear_lut[std::clamp(g1, 0, 1023)];
-            const float gf = (gf0 + gf1) * 0.5f;
-            const auto rec2020_hlg = [&camera_to_rec2020, &hlg_code](
-                float camera_r,
-                float camera_g,
-                float camera_b
+            const int rf = red_linear_lut[std::clamp(r, 0, 1023)];
+            const int bf = blue_linear_lut[std::clamp(b_value, 0, 1023)];
+            const int gf0 = green_linear_lut[std::clamp(g0, 0, 1023)];
+            const int gf1 = green_linear_lut[std::clamp(g1, 0, 1023)];
+            const int gf = (gf0 + gf1) >> 1;
+            const auto rec2020_hlg = [
+                &camera_to_rec2020_q,
+                &hlg_lut,
+                kLinearScale
+            ](
+                int camera_r,
+                int camera_g,
+                int camera_b
             ) -> std::array<uint16_t, 3> {
-                const float rec_r = std::clamp(
-                    camera_to_rec2020[0] * camera_r +
-                        camera_to_rec2020[1] * camera_g +
-                        camera_to_rec2020[2] * camera_b,
-                    0.0f,
-                    1.0f
-                );
-                const float rec_g = std::clamp(
-                    camera_to_rec2020[3] * camera_r +
-                        camera_to_rec2020[4] * camera_g +
-                        camera_to_rec2020[5] * camera_b,
-                    0.0f,
-                    1.0f
-                );
-                const float rec_b = std::clamp(
-                    camera_to_rec2020[6] * camera_r +
-                        camera_to_rec2020[7] * camera_g +
-                        camera_to_rec2020[8] * camera_b,
-                    0.0f,
-                    1.0f
-                );
-                return { hlg_code(rec_r), hlg_code(rec_g), hlg_code(rec_b) };
+                const auto channel = [&](int row) -> int {
+                    const int64_t value =
+                        static_cast<int64_t>(camera_to_rec2020_q[row]) * camera_r +
+                        static_cast<int64_t>(camera_to_rec2020_q[row + 1]) * camera_g +
+                        static_cast<int64_t>(camera_to_rec2020_q[row + 2]) * camera_b;
+                    return std::clamp(
+                        static_cast<int>((value + (kMatrixScale >> 1)) / kMatrixScale),
+                        0,
+                        kLinearScale
+                    );
+                };
+                return {
+                    hlg_lut[channel(0)],
+                    hlg_lut[channel(3)],
+                    hlg_lut[channel(6)]
+                };
             };
             const auto rgb0 = rec2020_hlg(rf, gf, bf);
             const auto rgb1 = rec2020_hlg(rf, gf0, bf);
