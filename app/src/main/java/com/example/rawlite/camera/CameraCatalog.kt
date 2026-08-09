@@ -112,3 +112,16 @@ internal object RawSizeSelector {
         return listOfNotNull(full, reduced).distinct()
     }
 }
+
+/** Selects the smallest RAW10 stream that fully contains the encoded PURE 10 frame. */
+internal object Pure10SourceSelector {
+    fun select(raw10Sizes: List<Size>, outputSize: Size, fallback: Size): Size {
+        return raw10Sizes
+            .asSequence()
+            .filter { it.width >= outputSize.width && it.height >= outputSize.height }
+            .minWithOrNull(
+                compareBy<Size> { it.width.toLong() * it.height }
+                    .thenBy { kotlin.math.abs(it.width.toDouble() / it.height - 16.0 / 9.0) }
+            ) ?: fallback
+    }
+}

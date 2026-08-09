@@ -1,7 +1,6 @@
 package com.example.rawlite.core.model
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -17,9 +16,9 @@ class CaptureFormatPolicyTest {
     }
 
     @Test
-    fun `pure10 remains reduced-only`() {
+    fun `pure10 accepts full or reduced source`() {
         assertEquals(CaptureOutput.PURE10, CaptureFormatPolicy.output(CaptureMode.PURE10, 1))
-        assertFalse(CaptureFormatPolicy.selectionIsValid(CaptureMode.PURE10, 0))
+        assertTrue(CaptureFormatPolicy.selectionIsValid(CaptureMode.PURE10, 0))
         assertTrue(CaptureFormatPolicy.selectionIsValid(CaptureMode.PURE10, 1))
     }
 }

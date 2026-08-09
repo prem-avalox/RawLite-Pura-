@@ -71,6 +71,7 @@ import android.widget.Switch
 import android.widget.TextView
 import com.example.rawlite.camera.CameraCatalog
 import com.example.rawlite.camera.CameraOption
+import com.example.rawlite.camera.Pure10SourceSelector
 import com.example.rawlite.capture.audio.AvSyncContext
 import com.example.rawlite.capture.audio.AvSyncMetadataFactory
 import com.example.rawlite.capture.metadata.CaptureMetadataContext
@@ -324,6 +325,7 @@ class MainActivity : Activity() {
     private var previewTimingValues: LockSnapshot? = null
     private var previewMeteringFramesRemaining = 0
     private val pendingWrites = AtomicInteger(0)
+    private val peakPendingWrites = AtomicInteger(0)
     private var sessionDir: File? = null
     private var nativeWriterHandle = 0L
     private var pure10Encoder: Pure10Encoder? = null
@@ -1183,12 +1185,7 @@ class MainActivity : Activity() {
             }
             CameraParameter.RESOLUTION -> {
                 val count = currentOption()?.rawSizes?.size ?: 0
-                val requested = discreteIndex(progress, count)
-                val index = if (captureMode == CaptureMode.PURE10 && requested == 0 && count > 1) {
-                    1
-                } else {
-                    requested
-                }
+                val index = discreteIndex(progress, count)
                 if (index != selectedRawIndex) {
                     selectedRawIndex = index
                     scheduleUserPreferencesSave()
@@ -1412,13 +1409,6 @@ class MainActivity : Activity() {
             finalizingAudio || pure10MuxInProgress()
         ) return
         captureMode = if (captureMode == CaptureMode.RAW) CaptureMode.PURE10 else CaptureMode.RAW
-        if (captureMode == CaptureMode.PURE10 && selectedRawIndex == 0) {
-            val reducedIndex = currentOption()?.rawSizes?.indices?.firstOrNull { it > 0 } ?: 0
-            selectedRawIndex = reducedIndex
-            suppressSpinnerEvents = true
-            resolutionSpinner.setSelection(selectedRawIndex)
-            suppressSpinnerEvents = false
-        }
         updateFormatHint()
         updateChromeValues()
         syncWheelToSelectedParameter()
@@ -1614,13 +1604,6 @@ class MainActivity : Activity() {
         resolutionSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                 if (suppressSpinnerEvents || position == selectedRawIndex) return
-                if (captureMode == CaptureMode.PURE10 && position == 0) {
-                    suppressSpinnerEvents = true
-                    resolutionSpinner.setSelection(selectedRawIndex.coerceAtLeast(1))
-                    suppressSpinnerEvents = false
-                    setStatusText("PURE 10 usa RAW10 reducido; el sensor completo excede el encoder")
-                    return
-                }
                 selectedRawIndex = position
                 scheduleUserPreferencesSave()
                 updateFormatHint()
@@ -1787,9 +1770,6 @@ class MainActivity : Activity() {
             "$mode ${size.width}×${size.height}"
         })
         selectedRawIndex = selectedRawIndex.coerceIn(option.rawSizes.indices)
-        if (captureMode == CaptureMode.PURE10 && selectedRawIndex == 0 && option.rawSizes.size > 1) {
-            selectedRawIndex = 1
-        }
         resolutionSpinner.setSelection(selectedRawIndex)
         suppressSpinnerEvents = false
         updateFormatHint()
@@ -1985,7 +1965,7 @@ class MainActivity : Activity() {
         // otherwise switches sensor geometry when RAW is added at REC time,
         // which changes the visible framing and makes the preview appear stretched.
         if (rawVideoSupportedForCurrentCamera()) {
-            val size = currentRawSize() ?: return
+            val size = currentCaptureRawSize() ?: return
             rawReader = createRawReader(size)
             val rawOutput = OutputConfiguration(rawReader!!.surface)
             option.physicalId?.let { rawOutput.setPhysicalCameraId(it) }
@@ -2217,7 +2197,8 @@ class MainActivity : Activity() {
             firstSensorTimestampNs = metadata.timestampNs
         }
         if (metadata.timestampNs > 0L) lastSensorTimestampNs = metadata.timestampNs
-        pendingWrites.incrementAndGet()
+        val pendingCount = pendingWrites.incrementAndGet()
+        peakPendingWrites.updateAndGet { previous -> max(previous, pendingCount) }
         val currentFrame = timelineFrameForTimestamp(metadata.timestampNs)
         if (pure10Recording) {
             val encoder = pure10Encoder
@@ -2229,6 +2210,7 @@ class MainActivity : Activity() {
                 updateStatus()
                 return
             }
+            val queuedAtNs = System.nanoTime()
             ioExecutor.execute {
                 try {
                     maybeUpdateRawHistogram(image, currentFrame)
@@ -2239,7 +2221,8 @@ class MainActivity : Activity() {
                         timestampNs = metadata.timestampNs,
                         redGain = metadata.wbRed / green,
                         blueGain = metadata.wbBlue / green,
-                        exposureGain = Pure10Encoder.HLG_MIDTONE_GAIN * postRawGain / 100f
+                        exposureGain = Pure10Encoder.HLG_MIDTONE_GAIN * postRawGain / 100f,
+                        queuedAtNs = queuedAtNs
                     )
                     if (accepted) {
                         savedFrames++
@@ -2365,6 +2348,7 @@ class MainActivity : Activity() {
     }
 
     private fun maybeUpdateRawHistogram(image: android.media.Image, frame: Int) {
+        if (pure10Recording && isPure10UhdSelected()) return
         if (technicalMode != TechnicalOverlayMode.HISTOGRAM) return
         val interval = max(1, selectedFps / 4)
         if (frame % interval != 0) return
@@ -2411,7 +2395,9 @@ class MainActivity : Activity() {
         val previewTarget = previewSurface ?: return
         val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
             addTarget(previewTarget)
-            analysisReader?.surface?.let { addTarget(it) }
+            if (!includeRaw || !isPure10UhdSelected()) {
+                analysisReader?.surface?.let { addTarget(it) }
+            }
             if (includeRaw) rawReader?.surface?.let { addTarget(it) }
         }
         applyControls(builder, includeRaw)
@@ -2636,6 +2622,7 @@ class MainActivity : Activity() {
         lastSensorTimestampNs = 0L
         technicalOverlay.clearRawHistogram()
         droppedFrames = 0
+        peakPendingWrites.set(0)
         noMetadataDrops = 0
         writerBusyDrops = 0
         writeErrorDrops = 0
@@ -2648,7 +2635,7 @@ class MainActivity : Activity() {
         packedRawRecording = output == CaptureOutput.RAW10
         dngRecording = output == CaptureOutput.CINEMA_DNG
         if (!CaptureFormatPolicy.selectionIsValid(activeCaptureMode, selectedRawIndex)) {
-            setStatusText("PURE 10 requiere RAW10 reducido")
+            setStatusText("Formato de captura no disponible")
             pure10Recording = false
             return
         }
@@ -2872,13 +2859,16 @@ class MainActivity : Activity() {
 
     private fun openPure10Outputs(): Boolean {
         val dir = sessionDir ?: return false
-        val size = currentRawSize() ?: return false
+        val selectedSize = currentRawSize() ?: return false
+        val outputSize = pure10OutputSize(selectedSize)
+        val sourceSize = pure10SourceSize(outputSize, selectedSize)
         val option = currentOption() ?: return false
         var encoder: Pure10Encoder? = null
         return try {
             encoder = Pure10Encoder(
                 outputFile = File(dir, Pure10Encoder.VIDEO_FILE),
-                size = size,
+                sourceSize = sourceSize,
+                outputSize = outputSize,
                 fps = selectedFps,
                 bitRate = Pure10Encoder.BIT_RATE,
                 rotationDegrees = captureRotationDegrees(option.characteristics),
@@ -2886,7 +2876,9 @@ class MainActivity : Activity() {
             )
             encoder.start()
             pure10Encoder = encoder
-            File(dir, "clip.json").writeText(buildPure10Description(size).toString(2))
+            File(dir, "clip.json").writeText(
+                buildPure10Description(sourceSize, outputSize).toString(2)
+            )
             true
         } catch (error: Throwable) {
             Log.e(TAG, "Could not create PURE 10 outputs", error)
@@ -3153,8 +3145,13 @@ class MainActivity : Activity() {
             .onFailure { Log.e(TAG, "Could not update CinemaDNG metadata", it) }
     }
 
-    private fun buildPure10Description(size: Size): JSONObject {
-        return CaptureMetadataFactory.pure10(captureMetadataContext(size), postRawGain)
+    private fun buildPure10Description(sourceSize: Size, outputSize: Size): JSONObject {
+        return CaptureMetadataFactory.pure10(captureMetadataContext(outputSize), postRawGain)
+            .put("raw_source_width", sourceSize.width)
+            .put("raw_source_height", sourceSize.height)
+            .put("pure10_crop_x", ((sourceSize.width - outputSize.width) / 2) and -2)
+            .put("pure10_crop_y", ((sourceSize.height - outputSize.height) / 2) and -2)
+            .put("pure10_experimental_4k", sourceSize != outputSize)
     }
 
     private fun captureMetadataContext(size: Size): CaptureMetadataContext {
@@ -3183,12 +3180,20 @@ class MainActivity : Activity() {
         description.put("saved_frames", savedFrames)
         description.put("dropped_frames", droppedFrames)
         description.put("cadence_gaps", cadenceGaps)
+        description.put("peak_pending_writes", peakPendingWrites.get())
+        description.put("no_metadata_drops", noMetadataDrops)
+        description.put("writer_busy_drops", writerBusyDrops)
+        description.put("write_error_drops", writeErrorDrops)
         if (summary != null) {
             description.put("submitted_frames", summary.submittedFrames)
             description.put("encoded_frames", summary.encodedFrames)
             description.put("encoder_drops", summary.encoderDrops)
+            description.put("queue_average_ms", summary.queueAverageMs)
+            description.put("queue_max_ms", summary.queueMaxMs)
             description.put("conversion_average_ms", summary.conversionAverageMs)
             description.put("conversion_max_ms", summary.conversionMaxMs)
+            description.put("processing_average_ms", summary.processingAverageMs)
+            description.put("processing_max_ms", summary.processingMaxMs)
             description.put("encoder_first_timestamp_ns", summary.firstTimestampNs)
             description.put("encoder_last_timestamp_ns", summary.lastTimestampNs)
             description.put("capture_failure_drops", captureFailureDrops)
@@ -3814,6 +3819,38 @@ class MainActivity : Activity() {
     }
 
     private fun currentRawSize(): Size? = currentOption()?.rawSizes?.getOrNull(selectedRawIndex)
+    private fun currentCaptureRawSize(): Size? {
+        val selectedSize = currentRawSize() ?: return null
+        if (captureMode != CaptureMode.PURE10) return selectedSize
+        val outputSize = pure10OutputSize(selectedSize)
+        return pure10SourceSize(outputSize, selectedSize)
+    }
+
+    private fun pure10SourceSize(outputSize: Size, fallback: Size): Size {
+        val raw10Sizes = currentCharacteristics()
+            ?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            ?.getOutputSizes(ImageFormat.RAW10)
+            ?.toList()
+            .orEmpty()
+        return Pure10SourceSelector.select(raw10Sizes, outputSize, fallback)
+    }
+
+    private fun isPure10UhdSelected(): Boolean {
+        if (captureMode != CaptureMode.PURE10) return false
+        val selectedSize = currentRawSize() ?: return false
+        return pure10OutputSize(selectedSize) == PURE10_UHD_SIZE
+    }
+
+    private fun pure10OutputSize(sourceSize: Size): Size {
+        return if (sourceSize.width >= PURE10_UHD_SIZE.width &&
+            sourceSize.height >= PURE10_UHD_SIZE.height
+        ) {
+            PURE10_UHD_SIZE
+        } else {
+            sourceSize
+        }
+    }
+
     private fun currentPreviewSize(): Size {
         return PREVIEW_SIZES.getOrElse(selectedPreviewIndex) { PREVIEW_SIZES.last() }
     }
@@ -4428,6 +4465,7 @@ class MainActivity : Activity() {
         // capability guesses and must remain stable until a different device profile is selected.
         private val PURE10_MAX_IMAGES = CAPTURE_PROFILE.pure10ImageReaderCapacity
         private val PURE10_MAX_PENDING_WRITES = CAPTURE_PROFILE.pure10MaximumPendingWrites
+        private val PURE10_UHD_SIZE = Size(3840, 2160)
         private val MIN_FREE_BYTES = CAPTURE_PROFILE.minimumFreeBytes
         private val BACKGROUND_DRAIN_TIMEOUT_MS = CAPTURE_PROFILE.backgroundDrainTimeoutMs
         private const val FASTEST_VIDEO_EXPOSURE_NS = 125_000L

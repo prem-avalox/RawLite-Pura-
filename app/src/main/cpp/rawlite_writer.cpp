@@ -14,7 +14,9 @@
 #include <mutex>
 #include <numeric>
 #include <string>
+#include <system_error>
 #include <sys/uio.h>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -661,8 +663,12 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
     jint raw_limit,
     jint raw_row_stride,
     jobject output_buffer,
-    jint width,
-    jint height,
+    jint source_width,
+    jint source_height,
+    jint crop_x,
+    jint crop_y,
+    jint output_width,
+    jint output_height,
     jint output_row_stride_bytes,
     jint output_slice_height,
     jint cfa,
@@ -677,21 +683,28 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
     auto* output_base = static_cast<uint8_t*>(env->GetDirectBufferAddress(output_buffer));
     const jlong raw_capacity = env->GetDirectBufferCapacity(raw_buffer);
     const jlong output_capacity = env->GetDirectBufferCapacity(output_buffer);
-    if (raw_base == nullptr || output_base == nullptr || width <= 0 || height <= 0 ||
-        (width & 1) != 0 || (height & 1) != 0) {
+    if (raw_base == nullptr || output_base == nullptr ||
+        source_width <= 0 || source_height <= 0 ||
+        crop_x < 0 || crop_y < 0 ||
+        output_width <= 0 || output_height <= 0 ||
+        (source_width & 1) != 0 || (source_height & 1) != 0 ||
+        (crop_x & 1) != 0 || (crop_y & 1) != 0 ||
+        (output_width & 1) != 0 || (output_height & 1) != 0 ||
+        crop_x + output_width > source_width ||
+        crop_y + output_height > source_height) {
         return -EINVAL;
     }
 
-    const int packed_row_bytes = (width * 10 + 7) / 8;
+    const int packed_row_bytes = (source_width * 10 + 7) / 8;
     const int64_t required_raw = static_cast<int64_t>(raw_offset) +
-        static_cast<int64_t>(height - 1) * raw_row_stride + packed_row_bytes;
+        static_cast<int64_t>(source_height - 1) * raw_row_stride + packed_row_bytes;
     const int64_t required_output =
         static_cast<int64_t>(output_row_stride_bytes) * output_slice_height +
-        static_cast<int64_t>(output_row_stride_bytes) * (height / 2 - 1) +
-        static_cast<int64_t>(width) * 2;
+        static_cast<int64_t>(output_row_stride_bytes) * (output_height / 2 - 1) +
+        static_cast<int64_t>(output_width) * 2;
     if (raw_offset < 0 || raw_limit > raw_capacity || raw_row_stride < packed_row_bytes ||
-        required_raw > raw_limit || output_row_stride_bytes < width * 2 ||
-        output_slice_height < height || (output_row_stride_bytes & 1) != 0 ||
+        required_raw > raw_limit || output_row_stride_bytes < output_width * 2 ||
+        output_slice_height < output_height || (output_row_stride_bytes & 1) != 0 ||
         required_output > output_capacity ||
         white_level <= black_level) {
         return -EINVAL;
@@ -732,10 +745,18 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
         blue_lut[value] = hlg_code(value, blue_gain);
     }
 
-    const auto raw10_at = [raw_base, raw_offset, raw_row_stride](int x, int y) -> int {
-        const uint8_t* row = raw_base + raw_offset + static_cast<size_t>(y) * raw_row_stride;
-        const int group = x >> 2;
-        const int lane = x & 3;
+    const auto raw10_at = [
+        raw_base,
+        raw_offset,
+        raw_row_stride,
+        crop_x,
+        crop_y
+    ](int x, int y) -> int {
+        const int source_x = crop_x + x;
+        const int source_y = crop_y + y;
+        const uint8_t* row = raw_base + raw_offset + static_cast<size_t>(source_y) * raw_row_stride;
+        const int group = source_x >> 2;
+        const int lane = source_x & 3;
         const uint8_t* packed = row + group * 5;
         return (static_cast<int>(packed[lane]) << 2) |
             ((packed[4] >> (lane * 2)) & 0x03);
@@ -756,8 +777,9 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
         return static_cast<uint16_t>(std::clamp(512 + value, 64, 960));
     };
 
-    for (int y = 0; y < height; y += 2) {
-        for (int x = 0; x < width; x += 2) {
+    const auto convert_rows = [&](int first_y, int end_y) {
+        for (int y = first_y; y < end_y; y += 2) {
+            for (int x = 0; x < output_width; x += 2) {
             const int p00 = raw10_at(x, y);
             const int p01 = raw10_at(x + 1, y);
             const int p10 = raw10_at(x, y + 1);
@@ -811,7 +833,23 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
             const size_t uv = static_cast<size_t>(y / 2) * output_stride_pixels + x;
             uv_plane[uv] = static_cast<uint16_t>(cb << 6);
             uv_plane[uv + 1] = static_cast<uint16_t>(cr << 6);
+            }
         }
+    };
+
+    // UHD is just inside the 24 FPS budget on one Tensor core. Split disjoint row
+    // ranges between one worker and the calling thread; smaller frames stay single-threaded.
+    if (static_cast<int64_t>(output_width) * output_height >= 3840LL * 2160LL) {
+        const int split_y = (output_height / 2) & ~1;
+        try {
+            std::thread upper_half([&] { convert_rows(0, split_y); });
+            convert_rows(split_y, output_height);
+            upper_half.join();
+        } catch (const std::system_error&) {
+            convert_rows(0, output_height);
+        }
+    } else {
+        convert_rows(0, output_height);
     }
 
     // Codec2 exposes 4096-byte P010 rows for 2032 pixels on the Pixel 6, while
@@ -819,28 +857,28 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
     // Initialize every padding sample that is actually allocated.
     constexpr uint16_t limited_black = 64u << 6;
     constexpr uint16_t neutral_chroma = 512u << 6;
-    for (int y = 0; y < height; ++y) {
-        const size_t start = static_cast<size_t>(y) * output_stride_pixels + width;
+    for (int y = 0; y < output_height; ++y) {
+        const size_t start = static_cast<size_t>(y) * output_stride_pixels + output_width;
         const size_t end = std::min(
             static_cast<size_t>(y + 1) * output_stride_pixels,
             y_capacity_pixels
         );
         if (start < end) std::fill(y_plane + start, y_plane + end, limited_black);
     }
-    for (int y = height; y < output_slice_height; ++y) {
+    for (int y = output_height; y < output_slice_height; ++y) {
         const size_t start = static_cast<size_t>(y) * output_stride_pixels;
         const size_t end = std::min(start + output_stride_pixels, y_capacity_pixels);
         if (start < end) std::fill(y_plane + start, y_plane + end, limited_black);
     }
-    for (int y = 0; y < height / 2; ++y) {
-        const size_t start = static_cast<size_t>(y) * output_stride_pixels + width;
+    for (int y = 0; y < output_height / 2; ++y) {
+        const size_t start = static_cast<size_t>(y) * output_stride_pixels + output_width;
         const size_t end = std::min(
             static_cast<size_t>(y + 1) * output_stride_pixels,
             uv_capacity_pixels
         );
         if (start < end) std::fill(uv_plane + start, uv_plane + end, neutral_chroma);
     }
-    for (int y = height / 2; ; ++y) {
+    for (int y = output_height / 2; ; ++y) {
         const size_t start = static_cast<size_t>(y) * output_stride_pixels;
         if (start >= uv_capacity_pixels) break;
         const size_t end = std::min(start + output_stride_pixels, uv_capacity_pixels);

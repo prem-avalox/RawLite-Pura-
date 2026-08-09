@@ -17,5 +17,5 @@ internal object CaptureFormatPolicy {
     }
 
     fun selectionIsValid(mode: CaptureMode, selectedRawIndex: Int): Boolean =
-        mode != CaptureMode.PURE10 || selectedRawIndex > 0
+        mode != CaptureMode.PURE10 || selectedRawIndex >= 0
 }

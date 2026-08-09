@@ -22,8 +22,12 @@ internal data class Pure10Summary(
     val submittedFrames: Int,
     val encodedFrames: Int,
     val encoderDrops: Int,
+    val queueAverageMs: Double,
+    val queueMaxMs: Double,
     val conversionAverageMs: Double,
     val conversionMaxMs: Double,
+    val processingAverageMs: Double,
+    val processingMaxMs: Double,
     val firstTimestampNs: Long,
     val lastTimestampNs: Long,
     val finalized: Boolean,
@@ -32,7 +36,8 @@ internal data class Pure10Summary(
 
 internal class Pure10Encoder(
     private val outputFile: File,
-    private val size: Size,
+    private val sourceSize: Size,
+    private val outputSize: Size,
     private val fps: Int,
     private val bitRate: Int,
     private val rotationDegrees: Int,
@@ -44,8 +49,12 @@ internal class Pure10Encoder(
     private val submittedFrames = AtomicInteger()
     private val encodedFrames = AtomicInteger()
     private val encoderDrops = AtomicInteger()
+    private val queueTotalNs = AtomicLong()
+    private val queueMaxNs = AtomicLong()
     private val conversionTotalNs = AtomicLong()
     private val conversionMaxNs = AtomicLong()
+    private val processingTotalNs = AtomicLong()
+    private val processingMaxNs = AtomicLong()
     private val firstTimestampNs = AtomicLong()
     private val lastTimestampNs = AtomicLong()
 
@@ -58,18 +67,40 @@ internal class Pure10Encoder(
     private var inputRowStrideBytes = 0
     private var inputSliceHeight = 0
     private var minimumInputBufferBytes = 0
+    private var cropX = 0
+    private var cropY = 0
+    private val blackLevel = characteristics
+        .get(CameraCharacteristics.SENSOR_BLACK_LEVEL_PATTERN)
+        ?.let { pattern ->
+            (
+                pattern.getOffsetForIndex(0, 0) +
+                    pattern.getOffsetForIndex(1, 0) +
+                    pattern.getOffsetForIndex(0, 1) +
+                    pattern.getOffsetForIndex(1, 1)
+                ) / 4
+        } ?: 64
+    private val whiteLevel = characteristics
+        .get(CameraCharacteristics.SENSOR_INFO_WHITE_LEVEL) ?: 1023
+    private val colorFilterArrangement = characteristics.get(
+        CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT
+    ) ?: CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT_RGGB
 
     fun start() {
-        require(size.width <= PROFILE.pure10MaximumWidth &&
-            size.height <= PROFILE.pure10MaximumHeight
+        require(outputSize.width <= PROFILE.pure10MaximumWidth &&
+            outputSize.height <= PROFILE.pure10MaximumHeight
         ) {
             "PURE 10 requiere la resolución RAW10 reducida"
         }
+        require(outputSize.width <= sourceSize.width && outputSize.height <= sourceSize.height) {
+            "La salida HEVC no puede exceder la fuente RAW10"
+        }
+        cropX = ((sourceSize.width - outputSize.width) / 2) and -2
+        cropY = ((sourceSize.height - outputSize.height) / 2) and -2
         val localCodec = MediaCodec.createByCodecName(codecName)
         val format = MediaFormat.createVideoFormat(
             MediaFormat.MIMETYPE_VIDEO_HEVC,
-            size.width,
-            size.height
+            outputSize.width,
+            outputSize.height
         ).apply {
             setInteger(
                 MediaFormat.KEY_COLOR_FORMAT,
@@ -93,20 +124,20 @@ internal class Pure10Encoder(
         inputRowStrideBytes = if (inputFormat.containsKey(MediaFormat.KEY_STRIDE)) {
             inputFormat.getInteger(MediaFormat.KEY_STRIDE)
         } else {
-            size.width * 2
+            outputSize.width * 2
         }
         inputSliceHeight = if (inputFormat.containsKey(MediaFormat.KEY_SLICE_HEIGHT)) {
             inputFormat.getInteger(MediaFormat.KEY_SLICE_HEIGHT)
         } else {
-            size.height
+            outputSize.height
         }
-        require(inputRowStrideBytes >= size.width * 2 && inputSliceHeight >= size.height) {
+        require(inputRowStrideBytes >= outputSize.width * 2 && inputSliceHeight >= outputSize.height) {
             "Geometría P010 inválida del encoder"
         }
         minimumInputBufferBytes = (
             inputRowStrideBytes.toLong() * inputSliceHeight +
-                inputRowStrideBytes.toLong() * (size.height / 2 - 1) +
-                size.width.toLong() * 2
+                inputRowStrideBytes.toLong() * (outputSize.height / 2 - 1) +
+                outputSize.width.toLong() * 2
             ).toInt()
         codec = localCodec
         muxer = MediaMuxer(
@@ -121,9 +152,12 @@ internal class Pure10Encoder(
         timestampNs: Long,
         redGain: Float,
         blueGain: Float,
-        exposureGain: Float
+        exposureGain: Float,
+        queuedAtNs: Long
     ): Boolean {
         if (finishing || image.format != ImageFormat.RAW10) return false
+        val processingStartedNs = System.nanoTime()
+        val queueNs = (processingStartedNs - queuedAtNs).coerceAtLeast(0L)
         val localCodec = codec ?: return false
         val inputIndex = localCodec.dequeueInputBuffer(INPUT_TIMEOUT_US)
         if (inputIndex < 0) {
@@ -140,34 +174,23 @@ internal class Pure10Encoder(
             val plane = image.planes[0]
             val raw = plane.buffer
             output.clear()
-            val blackPattern = characteristics.get(CameraCharacteristics.SENSOR_BLACK_LEVEL_PATTERN)
-            val black = if (blackPattern == null) {
-                64
-            } else {
-                (
-                    blackPattern.getOffsetForIndex(0, 0) +
-                        blackPattern.getOffsetForIndex(1, 0) +
-                        blackPattern.getOffsetForIndex(0, 1) +
-                        blackPattern.getOffsetForIndex(1, 1)
-                    ) / 4
-            }
-            val white = characteristics.get(CameraCharacteristics.SENSOR_INFO_WHITE_LEVEL) ?: 1023
-            val cfa = characteristics.get(
-                CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT
-            ) ?: CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT_RGGB
             val conversionNs = NativeTenBitConverter.raw10ToP010Hlg(
                 raw = raw,
                 rawOffset = raw.position(),
                 rawLimit = raw.limit(),
                 rawRowStride = plane.rowStride,
                 output = output,
-                width = size.width,
-                height = size.height,
+                sourceWidth = sourceSize.width,
+                sourceHeight = sourceSize.height,
+                cropX = cropX,
+                cropY = cropY,
+                outputWidth = outputSize.width,
+                outputHeight = outputSize.height,
                 outputRowStrideBytes = inputRowStrideBytes,
                 outputSliceHeight = inputSliceHeight,
-                colorFilterArrangement = cfa,
-                blackLevel = black,
-                whiteLevel = white,
+                colorFilterArrangement = colorFilterArrangement,
+                blackLevel = blackLevel,
+                whiteLevel = whiteLevel,
                 redGain = redGain.coerceIn(0.25f, 8f),
                 blueGain = blueGain.coerceIn(0.25f, 8f),
                 exposureGain = exposureGain.coerceIn(0.25f, 8f)
@@ -190,6 +213,11 @@ internal class Pure10Encoder(
                     presentationUs,
                     0
                 )
+                val processingNs = System.nanoTime() - processingStartedNs
+                queueTotalNs.addAndGet(queueNs)
+                queueMaxNs.updateAndGet { previous -> max(previous, queueNs) }
+                processingTotalNs.addAndGet(processingNs)
+                processingMaxNs.updateAndGet { previous -> max(previous, processingNs) }
                 submittedFrames.incrementAndGet()
                 true
             }
@@ -217,12 +245,24 @@ internal class Pure10Encoder(
             submittedFrames = submitted,
             encodedFrames = encodedFrames.get(),
             encoderDrops = encoderDrops.get(),
+            queueAverageMs = if (submitted > 0) {
+                queueTotalNs.get() / submitted / 1_000_000.0
+            } else {
+                0.0
+            },
+            queueMaxMs = queueMaxNs.get() / 1_000_000.0,
             conversionAverageMs = if (submitted > 0) {
                 conversionTotalNs.get() / submitted / 1_000_000.0
             } else {
                 0.0
             },
             conversionMaxMs = conversionMaxNs.get() / 1_000_000.0,
+            processingAverageMs = if (submitted > 0) {
+                processingTotalNs.get() / submitted / 1_000_000.0
+            } else {
+                0.0
+            },
+            processingMaxMs = processingMaxNs.get() / 1_000_000.0,
             firstTimestampNs = firstTimestampNs.get(),
             lastTimestampNs = lastTimestampNs.get(),
             finalized = outputCompleted && containerClosed && outputError == null &&
