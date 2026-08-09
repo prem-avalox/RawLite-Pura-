@@ -94,7 +94,6 @@ import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.exp
@@ -258,6 +257,7 @@ class MainActivity : Activity() {
     private val ioExecutor = Executors.newSingleThreadExecutor()
     private val telemetryExecutor = Executors.newSingleThreadExecutor()
     private val audioExecutor = Executors.newSingleThreadExecutor()
+    private val postProcessExecutor = Executors.newSingleThreadExecutor()
     private val telemetryHandler = Handler(Looper.getMainLooper())
     private val chromeHandler = Handler(Looper.getMainLooper())
     private lateinit var contentOrientationListener: OrientationEventListener
@@ -356,7 +356,7 @@ class MainActivity : Activity() {
     private var finalizingAudio = false
     @Volatile
     private var finalizingPure10Mux = false
-    private val pure10MuxQueued = AtomicBoolean(false)
+    private val pure10MuxQueuedDirectories = ConcurrentHashMap.newKeySet<String>()
     @Volatile
     private var firstSensorTimestampNs = 0L
     @Volatile
@@ -2014,7 +2014,7 @@ class MainActivity : Activity() {
                     runOnUiThread {
                         applyLatestAutomaticRotation()
                         recordButton.isEnabled = rawVideoSupportedForCurrentCamera() &&
-                            !finalizingOutput && !finalizingAudio && !finalizingPure10Mux
+                            !finalizingOutput && !finalizingAudio
                         updateControlModes()
                         updateRecordingChrome()
                         preview.post {
@@ -2615,7 +2615,7 @@ class MainActivity : Activity() {
 
     private fun startRecording() {
         if (cameraDevice == null || captureSession == null || switchingSession ||
-            finalizingOutput || finalizingAudio || finalizingPure10Mux
+            finalizingOutput || finalizingAudio
         ) {
             return
         }
@@ -2706,7 +2706,7 @@ class MainActivity : Activity() {
                     packedRawRecording = false
                     dngRecording = false
                     recordButton.isEnabled = cameraDevice != null &&
-                        !finalizingOutput && !finalizingAudio && !finalizingPure10Mux &&
+                        !finalizingOutput && !finalizingAudio &&
                         rawVideoSupportedForCurrentCamera()
                     updateControlModes()
                     updateRecordingChrome()
@@ -2801,7 +2801,7 @@ class MainActivity : Activity() {
             runOnUiThread {
                 updateMicrophoneUi()
                 recordButton.isEnabled = cameraDevice != null && !switchingSession &&
-                    !recording && !finalizingOutput && !finalizingPure10Mux &&
+                    !recording && !finalizingOutput &&
                     rawVideoSupportedForCurrentCamera()
                 updateControlModes()
                 updateStatus(force = true)
@@ -2888,7 +2888,6 @@ class MainActivity : Activity() {
             )
             encoder.start()
             pure10Encoder = encoder
-            pure10MuxQueued.set(false)
             File(dir, "clip.json").writeText(buildPure10Description(size).toString(2))
             true
         } catch (error: Throwable) {
@@ -2930,7 +2929,7 @@ class MainActivity : Activity() {
                 finalizingOutput = false
                 runOnUiThread {
                     recordButton.isEnabled = cameraDevice != null && !switchingSession &&
-                        !recording && !finalizingAudio && !finalizingPure10Mux &&
+                        !recording && !finalizingAudio &&
                         rawVideoSupportedForCurrentCamera()
                     updateControlModes()
                     updateStatus(force = true)
@@ -2953,7 +2952,7 @@ class MainActivity : Activity() {
                 finalizingOutput = false
                 runOnUiThread {
                     recordButton.isEnabled = cameraDevice != null && !switchingSession &&
-                        !recording && !finalizingAudio && !finalizingPure10Mux &&
+                        !recording && !finalizingAudio &&
                         rawVideoSupportedForCurrentCamera()
                     updateControlModes()
                     updateStatus(force = true)
@@ -2986,7 +2985,7 @@ class MainActivity : Activity() {
             finalizingOutput = false
             runOnUiThread {
                 recordButton.isEnabled = cameraDevice != null && !switchingSession && !recording &&
-                    !finalizingAudio && !finalizingPure10Mux && rawVideoSupportedForCurrentCamera()
+                    !finalizingAudio && rawVideoSupportedForCurrentCamera()
                 updateControlModes()
                 updateStatus(force = true)
             }
@@ -3203,14 +3202,16 @@ class MainActivity : Activity() {
 
     private fun schedulePure10AudioMuxIfReady(directory: File) {
         if (!isPure10AudioMuxReady(directory)) return
-        if (!pure10MuxQueued.compareAndSet(false, true)) return
+        val directoryKey = directory.absolutePath
+        if (!pure10MuxQueuedDirectories.add(directoryKey)) return
         finalizingPure10Mux = true
         logStopMeasurement("PURE10_AUDIO_MUX_START")
         runOnUiThread {
             updateControlModes()
+            updateRecordingChrome()
             updateStatus(force = true)
         }
-        ioExecutor.execute {
+        postProcessExecutor.execute {
             val result = Pure10AudioMuxer.mux(directory)
             logStopMeasurement(
                 "PURE10_AUDIO_MUX_DONE",
@@ -3219,12 +3220,14 @@ class MainActivity : Activity() {
             if (!result.finalized) {
                 Log.e(TAG, "PURE 10 audio mux failed: ${result.error}")
             }
+            pure10MuxQueuedDirectories.remove(directoryKey)
             finalizingPure10Mux = false
             runOnUiThread {
                 recordButton.isEnabled = cameraDevice != null && !switchingSession &&
-                    !recording && !finalizingOutput && !finalizingAudio && !finalizingPure10Mux &&
+                    !recording && !finalizingOutput && !finalizingAudio &&
                     rawVideoSupportedForCurrentCamera()
                 updateControlModes()
+                updateRecordingChrome()
                 updateStatus(force = true)
             }
         }
@@ -3432,8 +3435,8 @@ class MainActivity : Activity() {
         previewSpinner.isEnabled = sessionControlsEnabled
         fpsSpinner.isEnabled = sessionControlsEnabled
         fpsSpinner.alpha = if (sessionControlsEnabled) 1f else 0.45f
-        reviewButton.isEnabled = sessionControlsEnabled
-        reviewButton.alpha = if (sessionControlsEnabled) 1f else 0.45f
+        reviewButton.isEnabled = sessionControlsEnabled && !finalizingPure10Mux
+        reviewButton.alpha = if (reviewButton.isEnabled) 1f else 0.45f
         technicalButton.isEnabled = sessionControlsEnabled
         technicalButton.alpha = if (sessionControlsEnabled) 1f else 0.45f
         microphoneButton.isEnabled = sessionControlsEnabled
@@ -3614,13 +3617,13 @@ class MainActivity : Activity() {
     private fun currentOperationState(): CaptureOperationState = CaptureOperationState(
         recording = recording,
         switchingSession = switchingSession,
-        finalizingOutput = finalizingOutput || finalizingPure10Mux,
+        finalizingOutput = finalizingOutput,
         finalizingAudio = finalizingAudio
     )
 
     private fun currentCaptureUiState(): CaptureUiState = when {
         recording -> CaptureUiState.RECORDING
-        captureStopPending || finalizingOutput || finalizingAudio || finalizingPure10Mux -> {
+        captureStopPending || finalizingOutput || finalizingAudio -> {
             CaptureUiState.SAVING
         }
         switchingSession -> CaptureUiState.PREPARING
@@ -3900,7 +3903,7 @@ class MainActivity : Activity() {
         }
         val readyForNextCapture = recordButton.isEnabled &&
             !recording && !switchingSession && !finalizingOutput &&
-            !finalizingAudio && !finalizingPure10Mux
+            !finalizingAudio
         if (readyForNextCapture) captureStopPending = false
         val uiState = currentCaptureUiState()
         recordButton.background = recordButtonBackground(recording)
@@ -3911,7 +3914,7 @@ class MainActivity : Activity() {
             CaptureUiState.READY -> "Grabar"
         }
         recordButton.alpha = if (!recordButton.isEnabled || switchingSession ||
-            finalizingOutput || finalizingAudio || finalizingPure10Mux
+            finalizingOutput || finalizingAudio
         ) 0.55f else 1f
         recordIndicator.visibility = if (recording) View.VISIBLE else View.GONE
         if (!recording) recordTimerText = "00:00"
@@ -3921,7 +3924,7 @@ class MainActivity : Activity() {
             cameraChrome.rotationLocked = rotationLockedByUser || recording || switchingSession
             cameraChrome.rotationControlEnabled = !recording && !switchingSession
             cameraChrome.recordEnabled = recordButton.isEnabled &&
-                !finalizingOutput && !finalizingAudio && !finalizingPure10Mux
+                !finalizingOutput && !finalizingAudio
             cameraChrome.selectedValueEnabled = selectedParameterCanChangeNow()
             cameraChrome.pushAutoEnabled = pushAutoCanRunNow()
             cameraChrome.timerText = if (recording) recordTimerText else "00:00"
