@@ -267,11 +267,13 @@ class TenBitCameraProbeActivity : Activity() {
                 cfa,
                 black,
                 white,
-                2.0f,
-                1.6f,
                 1.0f,
-                Pixel6MainDngColorProfile.CAMERA_RGB_TO_REC2020_D65,
-                1.0f
+                Pixel6MainDngColorProfile.cameraRgbToRec2020(
+                    redGain = 2.0f,
+                    greenEvenGain = 1.0f,
+                    greenOddGain = 1.0f,
+                    blueGain = 1.6f
+                )
             )
             if (conversionNs < 0) {
                 droppedEncoderFrames.incrementAndGet()

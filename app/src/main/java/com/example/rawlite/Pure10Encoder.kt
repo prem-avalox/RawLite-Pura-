@@ -17,6 +17,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.abs
 import kotlin.math.max
 
 internal data class Pure10Summary(
@@ -43,11 +44,13 @@ internal class Pure10Encoder(
     private val bitRate: Int,
     private val rotationDegrees: Int,
     private val characteristics: CameraCharacteristics,
-    private val codecName: String = CODEC_NAME,
-    cameraRgbToRec2020: FloatArray = Pixel6MainDngColorProfile.pure10CameraRgbToRec2020(),
-    private val rec2020Saturation: Float = Pixel6MainDngColorProfile.PURE10_REC2020_SATURATION
+    private val codecName: String = CODEC_NAME
 ) {
-    private val cameraRgbToRec2020 = cameraRgbToRec2020.copyOf()
+    private var cameraRgbToRec2020 = Pixel6MainDngColorProfile.CAMERA_RGB_TO_REC2020_D65.copyOf()
+    private var matrixRedGain = Float.NaN
+    private var matrixGreenEvenGain = Float.NaN
+    private var matrixGreenOddGain = Float.NaN
+    private var matrixBlueGain = Float.NaN
     private val outputExecutor = Executors.newSingleThreadExecutor()
     private val outputFinished = CountDownLatch(1)
     private val submittedFrames = AtomicInteger()
@@ -155,6 +158,8 @@ internal class Pure10Encoder(
         image: Image,
         timestampNs: Long,
         redGain: Float,
+        greenEvenGain: Float,
+        greenOddGain: Float,
         blueGain: Float,
         exposureGain: Float,
         queuedAtNs: Long
@@ -177,6 +182,7 @@ internal class Pure10Encoder(
             }
             val plane = image.planes[0]
             val raw = plane.buffer
+            updateColorTransform(redGain, greenEvenGain, greenOddGain, blueGain)
             output.clear()
             val conversionNs = NativeTenBitConverter.raw10ToP010Hlg(
                 raw = raw,
@@ -195,11 +201,8 @@ internal class Pure10Encoder(
                 colorFilterArrangement = colorFilterArrangement,
                 blackLevel = blackLevel,
                 whiteLevel = whiteLevel,
-                redGain = redGain.coerceIn(0.25f, 8f),
-                blueGain = blueGain.coerceIn(0.25f, 8f),
                 exposureGain = exposureGain.coerceIn(0.25f, 8f),
-                cameraRgbToRec2020 = cameraRgbToRec2020,
-                rec2020Saturation = rec2020Saturation
+                cameraRgbToRec2020 = cameraRgbToRec2020
             )
             if (conversionNs < 0L) {
                 localCodec.queueInputBuffer(inputIndex, 0, 0, 0L, 0)
@@ -235,6 +238,32 @@ internal class Pure10Encoder(
             false
         }
     }
+
+    private fun updateColorTransform(
+        redGain: Float,
+        greenEvenGain: Float,
+        greenOddGain: Float,
+        blueGain: Float
+    ) {
+        if (!gainChanged(redGain, matrixRedGain) &&
+            !gainChanged(greenEvenGain, matrixGreenEvenGain) &&
+            !gainChanged(greenOddGain, matrixGreenOddGain) &&
+            !gainChanged(blueGain, matrixBlueGain)
+        ) return
+        cameraRgbToRec2020 = Pixel6MainDngColorProfile.cameraRgbToRec2020(
+            redGain,
+            greenEvenGain,
+            greenOddGain,
+            blueGain
+        )
+        matrixRedGain = redGain
+        matrixGreenEvenGain = greenEvenGain
+        matrixGreenOddGain = greenOddGain
+        matrixBlueGain = blueGain
+    }
+
+    private fun gainChanged(current: Float, previous: Float): Boolean =
+        !previous.isFinite() || abs(current - previous) >= COLOR_GAIN_UPDATE_THRESHOLD
 
     fun finish(): Pure10Summary {
         if (!finishing) {
@@ -355,10 +384,10 @@ internal class Pure10Encoder(
         private val PROFILE = Pixel6ReferenceProfile.capture
         const val VIDEO_FILE = "pure10.mp4"
         val BIT_RATE = PROFILE.pure10BitRate
-        const val HLG_MIDTONE_GAIN = 1.0f
         val CODEC_NAME = PROFILE.preferredHevcMain10Encoder
         private const val TAG = "RawLitePure10"
         private const val INPUT_TIMEOUT_US = 5_000L
         private const val FINISH_TIMEOUT_SECONDS = 15L
+        private const val COLOR_GAIN_UPDATE_THRESHOLD = 0.0005f
     }
 }

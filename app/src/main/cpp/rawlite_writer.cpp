@@ -674,11 +674,8 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
     jint cfa,
     jint black_level,
     jint white_level,
-    jfloat red_gain,
-    jfloat blue_gain,
     jfloat exposure_gain,
-    jfloatArray camera_to_rec2020_array,
-    jfloat rec2020_saturation
+    jfloatArray camera_to_rec2020_array
 ) {
     const auto started = std::chrono::steady_clock::now();
     auto* raw_base = static_cast<uint8_t*>(env->GetDirectBufferAddress(raw_buffer));
@@ -724,9 +721,6 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
 
     constexpr int kLinearScale = 4096;
     constexpr int kMatrixScale = 16384;
-    const int saturation_q = static_cast<int>(
-        std::lround(std::clamp(rec2020_saturation, 0.5f, 2.0f) * 1024.0f)
-    );
     std::array<int, 9> camera_to_rec2020_q{};
     for (size_t i = 0; i < camera_to_rec2020.size(); ++i) {
         camera_to_rec2020_q[i] = static_cast<int>(
@@ -734,16 +728,13 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
         );
     }
 
-    std::array<int, 1024> red_linear_lut{};
-    std::array<int, 1024> green_linear_lut{};
-    std::array<int, 1024> blue_linear_lut{};
+    std::array<int, 1024> linear_lut{};
     const float safe_exposure_gain = std::clamp(exposure_gain, 0.25f, 8.0f);
     const auto normalized_linear = [black_level, white_level](
-        int value,
-        float channel_gain
+        int value
     ) -> int {
         const float linear = std::clamp(
-            (value - black_level) * channel_gain /
+            (value - black_level) /
                 static_cast<float>(white_level - black_level),
             0.0f,
             1.0f
@@ -768,9 +759,7 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
         );
     }
     for (int value = 0; value < 1024; ++value) {
-        red_linear_lut[value] = normalized_linear(value, red_gain);
-        green_linear_lut[value] = normalized_linear(value, 1.0f);
-        blue_linear_lut[value] = normalized_linear(value, blue_gain);
+        linear_lut[value] = normalized_linear(value);
     }
 
     const auto raw10_at = [
@@ -832,10 +821,10 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
                     break;
             }
 
-            const int rf = red_linear_lut[std::clamp(r, 0, 1023)];
-            const int bf = blue_linear_lut[std::clamp(b_value, 0, 1023)];
-            const int gf0 = green_linear_lut[std::clamp(g0, 0, 1023)];
-            const int gf1 = green_linear_lut[std::clamp(g1, 0, 1023)];
+            const int rf = linear_lut[std::clamp(r, 0, 1023)];
+            const int bf = linear_lut[std::clamp(b_value, 0, 1023)];
+            const int gf0 = linear_lut[std::clamp(g0, 0, 1023)];
+            const int gf1 = linear_lut[std::clamp(g1, 0, 1023)];
             const int gf = (gf0 + gf1) >> 1;
             const auto rec2020_hlg = [
                 &camera_to_rec2020_q,
@@ -901,10 +890,10 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
                     static_cast<int>(rgb3[0]) + 2
                 ) >> 2;
             const uint16_t cb = limited_chroma(
-                ((((b_average - y_average) * 557) >> 10) * saturation_q) >> 10
+                ((b_average - y_average) * 557) >> 10
             );
             const uint16_t cr = limited_chroma(
-                ((((r_average - y_average) * 711) >> 10) * saturation_q) >> 10
+                ((r_average - y_average) * 711) >> 10
             );
             const size_t uv = static_cast<size_t>(y / 2) * output_stride_pixels + x;
             uv_plane[uv] = static_cast<uint16_t>(cb << 6);

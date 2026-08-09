@@ -90,18 +90,20 @@ internal object CaptureMetadataFactory {
             put("color_temperature_kelvin", colorTemperatureKelvin)
             put(
                 "color_pipeline",
-                "Camera RGB D65 -> Rec.2020 neutral corrected -> Rec.2100 HLG"
+                "DNG AsShotNeutral -> dual-illuminant ColorMatrix -> Bradford D50/D65 -> " +
+                    "linear Rec.2020 -> Rec.2100 HLG"
             )
+            put("color_transform_strategy", "per-frame DNG white point")
             put(
-                "camera_rgb_to_rec2020",
-                Pixel6MainDngColorProfile.pure10CameraRgbToRec2020Json()
+                "camera_rgb_to_rec2020_reference",
+                Pixel6MainDngColorProfile.cameraRgbToRec2020Json(colorTemperatureKelvin)
             )
+            put("color_adjustment", "none")
             put(
-                "pure10_rec2020_neutral_correction",
-                Pixel6MainDngColorProfile.pure10NeutralCorrectionJson()
+                "scene_linear_gain",
+                Pixel6MainDngColorProfile.DEFAULT_RENDER_GAIN * postRawGain / 100f
             )
-            put("pure10_rec2020_saturation", Pixel6MainDngColorProfile.PURE10_REC2020_SATURATION)
-            put("scene_linear_gain", Pure10Encoder.HLG_MIDTONE_GAIN * postRawGain / 100f)
+            put("baseline_exposure", Pixel6MainDngColorProfile.BASELINE_EXPOSURE_EV)
             put("bit_rate", Pure10Encoder.BIT_RATE)
             put("source", "Camera2 RAW10")
             put("demosaic", "native 2x2")

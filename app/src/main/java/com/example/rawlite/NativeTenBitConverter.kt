@@ -25,11 +25,8 @@ internal object NativeTenBitConverter {
         colorFilterArrangement: Int,
         blackLevel: Int,
         whiteLevel: Int,
-        redGain: Float,
-        blueGain: Float,
         exposureGain: Float,
-        cameraRgbToRec2020: FloatArray,
-        rec2020Saturation: Float
+        cameraRgbToRec2020: FloatArray
     ): Long
 
     external fun raw10ToArgbPreview(

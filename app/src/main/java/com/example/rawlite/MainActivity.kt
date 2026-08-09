@@ -2343,14 +2343,15 @@ class MainActivity : Activity() {
             ioExecutor.execute {
                 try {
                     maybeUpdateRawHistogram(image, currentFrame)
-                    val green = ((metadata.wbGreenEven + metadata.wbGreenOdd) * 0.5f)
-                        .coerceAtLeast(0.01f)
                     val accepted = encoder.submit(
                         image = image,
                         timestampNs = metadata.timestampNs,
-                        redGain = metadata.wbRed / green,
-                        blueGain = metadata.wbBlue / green,
-                        exposureGain = Pure10Encoder.HLG_MIDTONE_GAIN * postRawGain / 100f,
+                        redGain = metadata.wbRed,
+                        greenEvenGain = metadata.wbGreenEven,
+                        greenOddGain = metadata.wbGreenOdd,
+                        blueGain = metadata.wbBlue,
+                        exposureGain = Pixel6MainDngColorProfile.DEFAULT_RENDER_GAIN *
+                            postRawGain / 100f,
                         queuedAtNs = queuedAtNs
                     )
                     if (accepted) {
@@ -3035,8 +3036,7 @@ class MainActivity : Activity() {
                 fps = selectedFps,
                 bitRate = Pure10Encoder.BIT_RATE,
                 rotationDegrees = PURE10_CONTAINER_ROTATION_DEGREES,
-                characteristics = option.characteristics,
-                cameraRgbToRec2020 = Pixel6MainDngColorProfile.pure10CameraRgbToRec2020()
+                characteristics = option.characteristics
             )
             encoder.start()
             pure10Encoder = encoder
