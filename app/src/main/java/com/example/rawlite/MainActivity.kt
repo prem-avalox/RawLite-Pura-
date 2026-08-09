@@ -391,7 +391,6 @@ class MainActivity : Activity() {
     private var manualWbTransform: ColorSpaceTransform? = null
     private var previewMeteringRegion: MeteringRectangle? = null
     private var previewMeteringLocked = false
-    private var previewMeteringAfPending = false
     private var previewFocusConfirmationPending = false
     private var isoValue = 100
     private var exposureNs = 16_666_667L
@@ -1321,19 +1320,17 @@ class MainActivity : Activity() {
         val region = previewMeteringRectangle(x, y, characteristics) ?: return
         previewMeteringRegion = region
         previewMeteringLocked = locked
-        previewMeteringAfPending = true
-        previewFocusConfirmationPending = true
+        previewFocusConfirmationPending = !locked
         manualFocus = false
         updateControlModes()
         updateChromeValues()
         cameraChrome.showStatusPopup(if (locked) "AF FIJO" else "AF")
-        cameraHandler.post { submitPreviewFocusTrigger() }
+        cameraHandler.post { submitPreviewFocusRegion() }
     }
 
     private fun clearPreviewFocusMetering(updateCamera: Boolean = true) {
         previewMeteringRegion = null
         previewMeteringLocked = false
-        previewMeteringAfPending = false
         previewFocusConfirmationPending = false
         if (::cameraChrome.isInitialized) cameraChrome.clearFocusReticle()
         if (updateCamera) restartRepeating()
@@ -1359,9 +1356,9 @@ class MainActivity : Activity() {
         return MeteringRectangle(rect, MeteringRectangle.METERING_WEIGHT_MAX)
     }
 
-    private fun submitPreviewFocusTrigger() {
+    private fun submitPreviewFocusRegion() {
         if (Looper.myLooper() != cameraHandler.looper) {
-            cameraHandler.post { submitPreviewFocusTrigger() }
+            cameraHandler.post { submitPreviewFocusRegion() }
             return
         }
         val camera = cameraDevice ?: return
@@ -1376,10 +1373,7 @@ class MainActivity : Activity() {
             return
         }
         applyControls(builder, includeRaw = false)
-        if (previewMeteringAfPending) {
-            put(builder, CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_START)
-        }
-        previewMeteringAfPending = false
+        put(builder, CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_CANCEL)
         try {
             session.capture(
                 builder.build(),
@@ -2710,7 +2704,11 @@ class MainActivity : Activity() {
             }
             canApplyAfRegion -> {
                 put(builder, CaptureRequest.CONTROL_AF_REGIONS, arrayOf(meteringRegion))
-                put(builder, CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
+                put(
+                    builder,
+                    CaptureRequest.CONTROL_AF_MODE,
+                    CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+                )
             }
             else -> {
                 put(
