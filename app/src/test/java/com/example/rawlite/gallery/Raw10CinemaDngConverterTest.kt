@@ -181,6 +181,17 @@ class Raw10CinemaDngConverterTest {
         assertFalse(metadata.has("forward_matrix_1"))
     }
 
+    @Test
+    fun `Pixel 6 main DNG profile covers UHD derived metadata`() {
+        val metadata = raw10Metadata(width = 3840, height = 2160)
+
+        Pixel6MainDngColorProfile.apply(metadata)
+
+        assertEquals("Google Pixel 6 main DNG", metadata.getString("color_profile"))
+        assertEquals("Google Pixel 6", metadata.getString("unique_camera_model"))
+        assertEquals(10537, metadata.getJSONArray("color_matrix_2").getJSONArray(0).getInt(0))
+    }
+
     private fun identityMatrix(): JSONArray = JSONArray().apply {
         listOf(
             1 to 1, 0 to 1, 0 to 1,

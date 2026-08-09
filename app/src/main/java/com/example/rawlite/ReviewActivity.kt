@@ -1046,7 +1046,11 @@ class ReviewActivity : Activity() {
     private fun decodeSequenceFrame(index: Int): Bitmap {
         return when (playbackKind) {
             PlaybackKind.RAW10 -> requireNotNull(activeRawClip).decodeFrame(index)
-            PlaybackKind.DNG -> requireNotNull(activeDngClip).decodeFrame(index)
+            PlaybackKind.DNG -> requireNotNull(activeDngClip).decodeFrame(
+                index,
+                DNG_PREVIEW_MAX_WIDTH,
+                DNG_PREVIEW_MAX_HEIGHT
+            )
             else -> error("No hay secuencia activa")
         }
     }
@@ -1711,6 +1715,8 @@ class ReviewActivity : Activity() {
 
     companion object {
         private const val FRAME_CACHE_SIZE = 6
+        private const val DNG_PREVIEW_MAX_WIDTH = 960
+        private const val DNG_PREVIEW_MAX_HEIGHT = 540
         private const val PROGRESS_INTERVAL_MS = 33L
         private const val AUDIO_DRIFT_LOG_INTERVAL_MS = 1_000L
         private const val AUDIO_END_TOLERANCE_MS = 5

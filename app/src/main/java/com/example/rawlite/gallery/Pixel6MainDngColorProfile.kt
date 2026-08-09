@@ -9,10 +9,12 @@ import org.json.JSONObject
  */
 internal object Pixel6MainDngColorProfile {
     fun matches(metadata: JSONObject): Boolean {
+        val cfa = metadata.optString("cfa", "")
         return metadata.optString("camera_id") in setOf("0", "2") &&
             metadata.optString("camera").startsWith("Principal") &&
-            metadata.optString("cfa") == "GBRG" &&
-            metadata.optInt("width") in setOf(2032, 4080)
+            (cfa.isBlank() || cfa == "GBRG") &&
+            metadata.optInt("width") in 1900..4080 &&
+            metadata.optInt("height") in 1000..3072
     }
 
     fun apply(metadata: JSONObject) {

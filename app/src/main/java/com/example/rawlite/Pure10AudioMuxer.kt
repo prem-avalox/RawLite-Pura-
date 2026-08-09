@@ -304,12 +304,21 @@ internal object Pure10AudioMuxer {
             for (index in 0 until extractor.trackCount) {
                 val format = extractor.getTrackFormat(index)
                 val mime = format.getString(MediaFormat.KEY_MIME) ?: continue
-                if (mime.startsWith("video/")) return VideoTrackInfo(index, format)
+                if (mime.startsWith("video/")) return VideoTrackInfo(
+                    index,
+                    format.applyPure10ColorMetadata()
+                )
             }
             error("MP4 PURE 10 sin pista de video")
         } finally {
             extractor.release()
         }
+    }
+
+    private fun MediaFormat.applyPure10ColorMetadata(): MediaFormat = apply {
+        setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT2020)
+        setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_HLG)
+        setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED)
     }
 
     private fun readSync(directory: File): Long {

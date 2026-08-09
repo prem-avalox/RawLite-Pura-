@@ -6,6 +6,7 @@ import android.util.Size
 import com.example.rawlite.DngSequenceClip
 import com.example.rawlite.PcmAudioRecorder
 import com.example.rawlite.Pure10Encoder
+import com.example.rawlite.gallery.Pixel6MainDngColorProfile
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -31,13 +32,6 @@ internal object CaptureMetadataFactory {
         checkpointFrames: Int
     ): JSONObject {
         val chars = context.characteristics
-        val black = chars.get(CameraCharacteristics.SENSOR_BLACK_LEVEL_PATTERN)
-        val blackLevels = JSONArray()
-        for (row in 0..1) {
-            for (column in 0..1) {
-                blackLevels.put(black?.getOffsetForIndex(column, row) ?: 0)
-            }
-        }
         return common(context).apply {
             put("format", "rawlite-raw10")
             put("version", 3)
@@ -56,9 +50,74 @@ internal object CaptureMetadataFactory {
             put("cfa", cfaName(chars.get(
                 CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT
             )))
-            put("black_level", blackLevels)
-            put("white_level", chars.get(CameraCharacteristics.SENSOR_INFO_WHITE_LEVEL) ?: 1023)
             put("binning", JSONArray().put(2).put(2))
+            Pixel6MainDngColorProfile.apply(this)
+        }
+    }
+
+    fun cinemaDng(context: CaptureMetadataContext): JSONObject = common(context).apply {
+        put("format", "rawlite-dng")
+        put("version", 1)
+        put("mode", "RAW")
+        put("container", "CinemaDNG sequence")
+        put("dng_directory", DngSequenceClip.DNG_DIRECTORY)
+        put("bits_per_sample", 16)
+        put("finalized", false)
+        Pixel6MainDngColorProfile.apply(this)
+    }
+
+    fun pure10(context: CaptureMetadataContext, postRawGain: Int): JSONObject =
+        common(context).apply {
+            put("format", "rawlite-pure10")
+            put("version", 1)
+            put("mode", "PURE 10")
+            put("container", "MP4")
+            put("video_file", Pure10Encoder.VIDEO_FILE)
+            put("codec", "HEVC")
+            put("codec_profile", "Main10")
+            put("encoder", Pure10Encoder.CODEC_NAME)
+            put("bits_per_sample", 10)
+            put("pixel_format", "P010")
+            put("color_primaries", "BT.2020")
+            put("transfer", "HLG (ARIB STD-B67)")
+            put("range", "limited")
+            put("hlg_midtone_gain", Pure10Encoder.HLG_MIDTONE_GAIN * postRawGain / 100f)
+            put("bit_rate", Pure10Encoder.BIT_RATE)
+            put("source", "Camera2 RAW10")
+            put("demosaic", "native 2x2")
+            put("finalized", false)
+            Pixel6MainDngColorProfile.apply(this)
+        }
+
+    private fun common(context: CaptureMetadataContext): JSONObject {
+        val chars = context.characteristics
+        val sensorDegrees = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
+        val frontFacing = chars.get(CameraCharacteristics.LENS_FACING) ==
+            CameraCharacteristics.LENS_FACING_FRONT
+        return JSONObject().apply {
+            put("camera", context.cameraLabel)
+            put("camera_id", context.cameraId)
+            put("width", context.captureSize.width)
+            put("height", context.captureSize.height)
+            put("frame_rate", context.frameRate)
+            put("telemetry_file", "telemetry.csv")
+            put("audio_enabled", context.audioEnabled)
+            put("audio_file", PcmAudioRecorder.AUDIO_FILE)
+            put("audio_metadata_file", PcmAudioRecorder.AUDIO_METADATA_FILE)
+            put("sync_file", "sync.json")
+            put("sensor_orientation", sensorDegrees)
+            put("display_rotation_degrees", context.displayRotationDegrees)
+            put("detected_device_orientation_degrees", context.detectedDeviceOrientationDegrees)
+            put("ui_content_rotation_degrees", context.uiContentRotationDegrees)
+            put("front_facing", frontFacing)
+            put("rotation_degrees", context.captureRotationDegrees)
+            put("preview_width", context.previewSize.width)
+            put("preview_height", context.previewSize.height)
+            put("cfa", cfaName(chars.get(
+                CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT
+            )))
+            put("black_level", blackLevelJson(chars))
+            put("white_level", chars.get(CameraCharacteristics.SENSOR_INFO_WHITE_LEVEL) ?: 1023)
             put("color_matrix_1", colorTransformJson(chars.get(
                 CameraCharacteristics.SENSOR_COLOR_TRANSFORM1
             )))
@@ -86,62 +145,14 @@ internal object CaptureMetadataFactory {
         }
     }
 
-    fun cinemaDng(context: CaptureMetadataContext): JSONObject = common(context).apply {
-        put("format", "rawlite-dng")
-        put("version", 1)
-        put("mode", "RAW")
-        put("container", "CinemaDNG sequence")
-        put("dng_directory", DngSequenceClip.DNG_DIRECTORY)
-        put("bits_per_sample", 16)
-        put("finalized", false)
-    }
-
-    fun pure10(context: CaptureMetadataContext, postRawGain: Int): JSONObject =
-        common(context).apply {
-            put("format", "rawlite-pure10")
-            put("version", 1)
-            put("mode", "PURE 10")
-            put("container", "MP4")
-            put("video_file", Pure10Encoder.VIDEO_FILE)
-            put("codec", "HEVC")
-            put("codec_profile", "Main10")
-            put("encoder", Pure10Encoder.CODEC_NAME)
-            put("bits_per_sample", 10)
-            put("pixel_format", "P010")
-            put("color_primaries", "BT.2020")
-            put("transfer", "HLG (ARIB STD-B67)")
-            put("range", "limited")
-            put("hlg_midtone_gain", Pure10Encoder.HLG_MIDTONE_GAIN * postRawGain / 100f)
-            put("bit_rate", Pure10Encoder.BIT_RATE)
-            put("source", "Camera2 RAW10")
-            put("demosaic", "native 2x2")
-            put("finalized", false)
-        }
-
-    private fun common(context: CaptureMetadataContext): JSONObject {
-        val chars = context.characteristics
-        val sensorDegrees = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
-        val frontFacing = chars.get(CameraCharacteristics.LENS_FACING) ==
-            CameraCharacteristics.LENS_FACING_FRONT
-        return JSONObject().apply {
-            put("camera", context.cameraLabel)
-            put("camera_id", context.cameraId)
-            put("width", context.captureSize.width)
-            put("height", context.captureSize.height)
-            put("frame_rate", context.frameRate)
-            put("telemetry_file", "telemetry.csv")
-            put("audio_enabled", context.audioEnabled)
-            put("audio_file", PcmAudioRecorder.AUDIO_FILE)
-            put("audio_metadata_file", PcmAudioRecorder.AUDIO_METADATA_FILE)
-            put("sync_file", "sync.json")
-            put("sensor_orientation", sensorDegrees)
-            put("display_rotation_degrees", context.displayRotationDegrees)
-            put("detected_device_orientation_degrees", context.detectedDeviceOrientationDegrees)
-            put("ui_content_rotation_degrees", context.uiContentRotationDegrees)
-            put("front_facing", frontFacing)
-            put("rotation_degrees", context.captureRotationDegrees)
-            put("preview_width", context.previewSize.width)
-            put("preview_height", context.previewSize.height)
+    private fun blackLevelJson(chars: CameraCharacteristics): JSONArray {
+        val black = chars.get(CameraCharacteristics.SENSOR_BLACK_LEVEL_PATTERN)
+        return JSONArray().apply {
+            for (row in 0..1) {
+                for (column in 0..1) {
+                    put(black?.getOffsetForIndex(column, row) ?: 0)
+                }
+            }
         }
     }
 
