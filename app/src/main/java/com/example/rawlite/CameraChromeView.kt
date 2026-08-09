@@ -33,6 +33,7 @@ class CameraChromeView(context: Context) : View(context) {
     var onRawPressed: (() -> Unit)? = null
     var onAutoPressed: (() -> Unit)? = null
     var onAutoLongPressed: (() -> Unit)? = null
+    var onPreviewFocus: ((Float, Float, Boolean) -> Unit)? = null
     var onPushAutoChanged: ((Boolean) -> Unit)? = null
     var onWheelChanged: ((Int) -> Unit)? = null
     var onStep: ((Int) -> Unit)? = null
@@ -44,6 +45,13 @@ class CameraChromeView(context: Context) : View(context) {
     var onLockChanged: ((LockGroup, Boolean) -> Unit)? = null
 
     enum class LockGroup { EXPOSURE, WHITE_BALANCE, FOCUS }
+
+    private enum class FocusReticleState { SEARCHING, CONFIRMED, LOCKED }
+
+    private data class FocusReticle(
+        val point: PointF,
+        val state: FocusReticleState
+    )
 
     private data class DPadAction(
         val physicalDirection: Int,
@@ -114,6 +122,7 @@ class CameraChromeView(context: Context) : View(context) {
             if (value) {
                 stabilizerWasStable = false
                 displayedStabilizerRollDegrees = stabilizerRollDegrees
+                clearFocusReticle()
             }
             updateRecordRingAnimation()
             updateGalleryRecordingAnimation()
@@ -263,6 +272,13 @@ class CameraChromeView(context: Context) : View(context) {
     private var dPadDragAccumulator = 0f
     private var dPadIntensity = 0f
     private var autoLongPressTriggered = false
+    private var previewLongPressTriggered = false
+    private val previewTouchOrigin = PointF()
+    private var focusReticle: FocusReticle? = null
+    private var focusReticleVisibility = 0f
+    private var focusReticleScale = 1f
+    private var focusReticleAnimator: ValueAnimator? = null
+    private var focusReticleVisibilityAnimator: ValueAnimator? = null
     private val repeatHandler = Handler(Looper.getMainLooper())
     private var chromeToolsVisible = true
     private var chromeReveal = 1f
@@ -323,6 +339,17 @@ class CameraChromeView(context: Context) : View(context) {
             STATUS_POPUP_HIDE_MS
         ) {
             statusPopupVisibility = it
+        }
+    }
+    private val hideFocusReticleRunnable = Runnable {
+        focusReticleVisibilityAnimator?.cancel()
+        focusReticleVisibilityAnimator = animateFloat(
+            focusReticleVisibility,
+            0f,
+            FOCUS_RETICLE_HIDE_MS
+        ) {
+            focusReticleVisibility = it
+            if (it <= 0.001f) focusReticle = null
         }
     }
     private val bezierInterpolator = PathInterpolator(0.4f, 0f, 0.2f, 1f)
@@ -599,6 +626,29 @@ class CameraChromeView(context: Context) : View(context) {
         repeatHandler.postDelayed(hideStatusPopupRunnable, STATUS_POPUP_HOLD_MS)
     }
 
+    fun showFocusConfirmed() {
+        if (focusReticle?.state != FocusReticleState.SEARCHING) return
+        val current = focusReticle ?: return
+        focusReticle = current.copy(state = FocusReticleState.CONFIRMED)
+        focusReticleVisibilityAnimator?.cancel()
+        focusReticleVisibility = 1f
+        repeatHandler.removeCallbacks(hideFocusReticleRunnable)
+        repeatHandler.postDelayed(hideFocusReticleRunnable, FOCUS_RETICLE_CONFIRMED_HOLD_MS)
+        invalidate()
+    }
+
+    fun clearFocusReticle() {
+        repeatHandler.removeCallbacks(hideFocusReticleRunnable)
+        repeatHandler.removeCallbacks(previewLongPressRunnable)
+        focusReticleAnimator?.cancel()
+        focusReticleVisibilityAnimator?.cancel()
+        focusReticle = null
+        focusReticleVisibility = 0f
+        focusReticleScale = 1f
+        previewLongPressTriggered = false
+        invalidate()
+    }
+
     private fun toggleChromeTools() {
         chromeToolsVisible = !chromeToolsVisible
         val target = if (chromeToolsVisible) 1f else 0f
@@ -652,6 +702,7 @@ class CameraChromeView(context: Context) : View(context) {
         }
         drawParameterName(canvas, landscape = true)
         drawStabilizerGuide(canvas, landscape = true)
+        drawFocusReticle(canvas)
         drawCaptureControls(canvas, landscape = true)
         drawBezelButtons(canvas, landscape = true)
         if (lockMenuProgress > 0.001f) drawLockMenu(canvas, landscape = true)
@@ -672,6 +723,7 @@ class CameraChromeView(context: Context) : View(context) {
         }
         drawParameterName(canvas, landscape = false)
         drawStabilizerGuide(canvas, landscape = false)
+        drawFocusReticle(canvas)
         drawCaptureControls(canvas, landscape = false)
         drawBezelButtons(canvas, landscape = false)
         if (lockMenuProgress > 0.001f) drawLockMenu(canvas, landscape = false)
@@ -1001,6 +1053,51 @@ class CameraChromeView(context: Context) : View(context) {
         canvas.drawLine(center.x - outer, center.y, center.x - inner, center.y, paint)
         canvas.drawLine(center.x + inner, center.y, center.x + outer, center.y, paint)
         canvas.drawLine(center.x, center.y - tickHalf, center.x, center.y + tickHalf, paint)
+    }
+
+    private fun drawFocusReticle(canvas: Canvas) {
+        val reticle = focusReticle ?: return
+        if (recording || saving || centerLabelVisibility > 0.001f) return
+        val visibility = focusReticleVisibility.coerceIn(0f, 1f)
+        if (visibility <= 0.001f) return
+        val color = when (reticle.state) {
+            FocusReticleState.SEARCHING -> Color.WHITE
+            FocusReticleState.CONFIRMED -> AUTO
+            FocusReticleState.LOCKED -> ACCENT
+        }
+        val alpha = if (reticle.state == FocusReticleState.LOCKED) {
+            0.96f
+        } else {
+            visibility
+        }
+        withContentRotation(canvas, reticle.point.x, reticle.point.y) {
+            canvas.save()
+            val scale = focusReticleScale.coerceIn(0.88f, 1.16f)
+            canvas.scale(scale, scale, reticle.point.x, reticle.point.y)
+            val previousCap = paint.strokeCap
+            paint.strokeCap = Paint.Cap.ROUND
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 3.2f
+            paint.color = scaledAlpha(color, alpha)
+            val cx = reticle.point.x
+            val cy = reticle.point.y
+            val half = 92f
+            val corner = 34f
+            canvas.drawLine(cx - half, cy - half, cx - half + corner, cy - half, paint)
+            canvas.drawLine(cx - half, cy - half, cx - half, cy - half + corner, paint)
+            canvas.drawLine(cx + half - corner, cy - half, cx + half, cy - half, paint)
+            canvas.drawLine(cx + half, cy - half, cx + half, cy - half + corner, paint)
+            canvas.drawLine(cx - half, cy + half - corner, cx - half, cy + half, paint)
+            canvas.drawLine(cx - half, cy + half, cx - half + corner, cy + half, paint)
+            canvas.drawLine(cx + half - corner, cy + half, cx + half, cy + half, paint)
+            canvas.drawLine(cx + half, cy + half - corner, cx + half, cy + half, paint)
+            paint.style = Paint.Style.FILL
+            paint.color = scaledAlpha(color, alpha)
+            canvas.drawCircle(cx, cy, if (reticle.state == FocusReticleState.LOCKED) 5.5f else 4.5f, paint)
+            paint.strokeCap = previousCap
+            paint.alpha = 255
+            canvas.restore()
+        }
     }
 
     private fun drawCaptureControls(canvas: Canvas, landscape: Boolean) {
@@ -1448,6 +1545,15 @@ class CameraChromeView(context: Context) : View(context) {
             parent?.requestDisallowInterceptTouchEvent(true)
             return true
         }
+        if (!recording && !saving && controlsEnabled &&
+            previewHitRect(layoutLandscape).contains(point.x, point.y)
+        ) {
+            touchTarget = TARGET_PREVIEW_FOCUS
+            previewLongPressTriggered = false
+            previewTouchOrigin.set(point.x, point.y)
+            repeatHandler.postDelayed(previewLongPressRunnable, PREVIEW_FOCUS_LONG_PRESS_MS)
+            return true
+        }
         touchTarget = TARGET_NONE
         return true
     }
@@ -1463,6 +1569,16 @@ class CameraChromeView(context: Context) : View(context) {
                 }
             } else {
                 handleDPadDrag(point, precisionRect(layoutLandscape))
+            }
+            return true
+        }
+        if (touchTarget == TARGET_PREVIEW_FOCUS) {
+            val dx = point.x - previewTouchOrigin.x
+            val dy = point.y - previewTouchOrigin.y
+            if (hypot(dx, dy) > PREVIEW_FOCUS_TAP_SLOP ||
+                !previewHitRect(layoutLandscape).contains(point.x, point.y)
+            ) {
+                repeatHandler.removeCallbacks(previewLongPressRunnable)
             }
             return true
         }
@@ -1498,6 +1614,7 @@ class CameraChromeView(context: Context) : View(context) {
         val target = touchTarget
         touchTarget = TARGET_NONE
         if (target == TARGET_AUTO) repeatHandler.removeCallbacks(autoLongPressRunnable)
+        if (target == TARGET_PREVIEW_FOCUS) repeatHandler.removeCallbacks(previewLongPressRunnable)
         if (target == TARGET_RECORD) animateRecordPress(false)
         if (target == TARGET_REVIEW) invalidate()
         if (target == TARGET_PRECISION) {
@@ -1510,6 +1627,17 @@ class CameraChromeView(context: Context) : View(context) {
         if (target == TARGET_PUSH_AUTO) {
             pushAutoActive = false
             onPushAutoChanged?.invoke(false)
+            return true
+        }
+        if (target == TARGET_PREVIEW_FOCUS) {
+            if (!cancelled && !previewLongPressTriggered &&
+                previewHitRect(layoutLandscape).contains(point.x, point.y)
+            ) {
+                showFocusReticle(point, locked = false)
+                previewFocusCoordinates(point)?.let { (x, y) ->
+                    onPreviewFocus?.invoke(x, y, false)
+                }
+            }
             return true
         }
         if (target == TARGET_WHEEL) {
@@ -1570,6 +1698,35 @@ class CameraChromeView(context: Context) : View(context) {
         autoLongPressTriggered = true
         pulseHaptic()
         onAutoLongPressed?.invoke()
+    }
+
+    private val previewLongPressRunnable = Runnable {
+        if (touchTarget != TARGET_PREVIEW_FOCUS || !controlsEnabled || recording || saving) return@Runnable
+        previewLongPressTriggered = true
+        showFocusReticle(previewTouchOrigin, locked = true)
+        pulseHaptic()
+        previewFocusCoordinates(previewTouchOrigin)?.let { (x, y) ->
+            onPreviewFocus?.invoke(x, y, true)
+        }
+    }
+
+    private fun showFocusReticle(point: PointF, locked: Boolean) {
+        repeatHandler.removeCallbacks(hideFocusReticleRunnable)
+        focusReticleVisibilityAnimator?.cancel()
+        focusReticleAnimator?.cancel()
+        focusReticle = FocusReticle(
+            PointF(point.x, point.y),
+            if (locked) FocusReticleState.LOCKED else FocusReticleState.SEARCHING
+        )
+        focusReticleVisibility = 1f
+        focusReticleScale = if (locked) 0.98f else 1.12f
+        focusReticleAnimator = animateFloat(
+            focusReticleScale,
+            1f,
+            FOCUS_RETICLE_SETTLE_MS
+        ) { focusReticleScale = it }
+        if (!locked) pulseHaptic()
+        invalidate()
     }
 
     override fun performClick(): Boolean {
@@ -1971,6 +2128,28 @@ class CameraChromeView(context: Context) : View(context) {
         return RectF(normal).apply { offset(dx, dy) }
     }
 
+    private fun previewTouchRect(landscape: Boolean): RectF =
+        if (landscape) {
+            RectF(279f, 0f, 1851f, LANDSCAPE_HEIGHT)
+        } else {
+            RectF(0f, 279f, PORTRAIT_WIDTH, 1851f)
+        }
+
+    private fun previewHitRect(landscape: Boolean): RectF {
+        val normal = previewTouchRect(landscape)
+        if (!leftHanded) return normal
+        val width = canonicalWidth()
+        return RectF(width - normal.right, normal.top, width - normal.left, normal.bottom)
+    }
+
+    private fun previewFocusCoordinates(point: PointF): Pair<Float, Float>? {
+        val rect = previewTouchRect(layoutLandscape)
+        val sceneX = if (leftHanded) canonicalWidth() - point.x else point.x
+        if (!rect.contains(sceneX, point.y)) return null
+        return ((sceneX - rect.left) / rect.width()).coerceIn(0f, 1f) to
+            ((point.y - rect.top) / rect.height()).coerceIn(0f, 1f)
+    }
+
     private fun contentIsVertical(): Boolean {
         val quarterTurns = ((contentRotation / 90f).roundToInt() % 4 + 4) % 4
         return quarterTurns % 2 == 0
@@ -2104,6 +2283,9 @@ class CameraChromeView(context: Context) : View(context) {
         private const val STATUS_POPUP_SHOW_MS = 160L
         private const val STATUS_POPUP_HOLD_MS = 900L
         private const val STATUS_POPUP_HIDE_MS = 240L
+        private const val FOCUS_RETICLE_SETTLE_MS = 180L
+        private const val FOCUS_RETICLE_CONFIRMED_HOLD_MS = 720L
+        private const val FOCUS_RETICLE_HIDE_MS = 260L
         private const val RECORD_RING_HALF_CYCLE_MS = 720L
         private const val GALLERY_HIDE_MS = 240L
         private const val GALLERY_SHOW_MS = 280L
@@ -2118,6 +2300,7 @@ class CameraChromeView(context: Context) : View(context) {
         private const val LEVEL_HAPTIC_COOLDOWN_MS = 420L
         private const val LEVEL_HAPTIC_DURATION_MS = 18L
         private const val AUTO_LONG_PRESS_MS = 550L
+        private const val PREVIEW_FOCUS_LONG_PRESS_MS = 520L
         private const val HAPTIC_AMPLITUDE = 110
         private const val LEVEL_HAPTIC_AMPLITUDE = 150
         private const val STABILIZER_MAX_ROLL_DEGREES = 85f
@@ -2127,6 +2310,7 @@ class CameraChromeView(context: Context) : View(context) {
         private const val DPAD_ARROW_OFFSET = 96f
         private const val DPAD_CENTER_DEAD_ZONE = 30f
         private const val DPAD_AXIS_LOCK_THRESHOLD = 18f
+        private const val PREVIEW_FOCUS_TAP_SLOP = 22f
         private const val DPAD_PARAMETER_DRAG_STEP_DISTANCE = 70f
         private const val DPAD_VALUE_DRAG_STEP_DISTANCE = 26f
         private const val DPAD_DRAG_FULL_SPEED = 1.35f
@@ -2150,6 +2334,7 @@ class CameraChromeView(context: Context) : View(context) {
         private const val TARGET_PUSH_AUTO = 207
         private const val TARGET_VISIBILITY = 208
         private const val TARGET_ROTATION = 209
+        private const val TARGET_PREVIEW_FOCUS = 210
         private const val TARGET_LOCK_ITEM_BASE = 300
 
         private const val ACCENT = RawLiteDesign.ACCENT

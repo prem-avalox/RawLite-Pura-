@@ -33,6 +33,7 @@ import android.hardware.camera2.DngCreator
 import android.hardware.camera2.TotalCaptureResult
 import android.hardware.camera2.params.ColorSpaceTransform
 import android.hardware.camera2.params.DynamicRangeProfiles
+import android.hardware.camera2.params.MeteringRectangle
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.RggbChannelVector
 import android.hardware.camera2.params.SessionConfiguration
@@ -388,6 +389,9 @@ class MainActivity : Activity() {
     private var pushAutoCapturesFocus = false
     private var manualWbGains: RggbChannelVector? = null
     private var manualWbTransform: ColorSpaceTransform? = null
+    private var previewMeteringRegion: MeteringRectangle? = null
+    private var previewMeteringLocked = false
+    private var previewMeteringAfPending = false
     private var isoValue = 100
     private var exposureNs = 16_666_667L
     private var evSteps = 0
@@ -764,6 +768,9 @@ class MainActivity : Activity() {
             }
             onAutoPressed = { toggleSelectedParameterAuto() }
             onAutoLongPressed = { setAllAdjustableParametersAuto() }
+            onPreviewFocus = { x, y, locked ->
+                applyPreviewFocusMetering(x, y, locked)
+            }
             onPushAutoChanged = { pressed ->
                 if (pressed) beginPushAuto() else endPushAuto()
             }
@@ -1276,6 +1283,8 @@ class MainActivity : Activity() {
             changed = changed || manualFocus
             manualFocus = false
         }
+        changed = changed || previewMeteringRegion != null || previewMeteringLocked
+        clearPreviewFocusMetering(updateCamera = false)
         if (!changed) return
         beginPreviewCadenceMetering()
         updateControlModes()
@@ -1293,6 +1302,116 @@ class MainActivity : Activity() {
             CameraParameter.WHITE_BALANCE -> !lockWhiteBalance
             CameraParameter.FOCUS -> !lockFocus
             CameraParameter.LENS, CameraParameter.FPS, CameraParameter.RESOLUTION -> false
+        }
+    }
+
+    private fun applyPreviewFocusMetering(x: Float, y: Float, locked: Boolean) {
+        if (recording || switchingSession || finalizingOutput || finalizingAudio ||
+            pure10MuxInProgress()
+        ) return
+        val characteristics = currentCharacteristics() ?: return
+        val maxAfRegions = characteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0
+        val maxAeRegions = characteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE) ?: 0
+        if (maxAfRegions <= 0 && maxAeRegions <= 0) {
+            cameraChrome.showStatusPopup("SIN AF/AE")
+            return
+        }
+        val region = previewMeteringRectangle(x, y, characteristics) ?: return
+        previewMeteringRegion = region
+        previewMeteringLocked = locked
+        previewMeteringAfPending = maxAfRegions > 0
+        val canFocus = (characteristics
+            .get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f) > 0f
+        if (canFocus) manualFocus = false
+        beginPreviewCadenceMetering()
+        updateControlModes()
+        updateChromeValues()
+        cameraChrome.showStatusPopup(if (locked) "AF/AE FIJO" else "AF/AE")
+        cameraHandler.post { submitPreviewFocusTrigger() }
+    }
+
+    private fun clearPreviewFocusMetering(updateCamera: Boolean = true) {
+        previewMeteringRegion = null
+        previewMeteringLocked = false
+        previewMeteringAfPending = false
+        if (::cameraChrome.isInitialized) cameraChrome.clearFocusReticle()
+        if (updateCamera) restartRepeating()
+    }
+
+    private fun previewMeteringRectangle(
+        x: Float,
+        y: Float,
+        characteristics: CameraCharacteristics
+    ): MeteringRectangle? {
+        val crop = previewCropRegion()
+            ?: characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+            ?: return null
+        val centerX = crop.left + crop.width() * x.coerceIn(0f, 1f)
+        val centerY = crop.top + crop.height() * y.coerceIn(0f, 1f)
+        val side = (min(crop.width(), crop.height()) * PREVIEW_METERING_REGION_FRACTION)
+            .roundToInt()
+            .coerceAtLeast(PREVIEW_METERING_REGION_MIN_PX)
+        val half = side / 2
+        val left = (centerX.roundToInt() - half).coerceIn(crop.left, crop.right - side)
+        val top = (centerY.roundToInt() - half).coerceIn(crop.top, crop.bottom - side)
+        val rect = Rect(left, top, left + side, top + side)
+        return MeteringRectangle(rect, MeteringRectangle.METERING_WEIGHT_MAX)
+    }
+
+    private fun submitPreviewFocusTrigger() {
+        if (Looper.myLooper() != cameraHandler.looper) {
+            cameraHandler.post { submitPreviewFocusTrigger() }
+            return
+        }
+        val camera = cameraDevice ?: return
+        val session = captureSession ?: return
+        val previewTarget = previewSurface ?: return
+        val builder = try {
+            camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                addTarget(previewTarget)
+            }
+        } catch (error: Exception) {
+            Log.w(TAG, "Could not create focus request", error)
+            return
+        }
+        applyControls(builder, includeRaw = false)
+        if (previewMeteringAfPending) {
+            put(builder, CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_START)
+        }
+        previewMeteringAfPending = false
+        try {
+            session.capture(
+                builder.build(),
+                object : CameraCaptureSession.CaptureCallback() {
+                    override fun onCaptureCompleted(
+                        session: CameraCaptureSession,
+                        request: CaptureRequest,
+                        result: TotalCaptureResult
+                    ) {
+                        storeCaptureResult(result)
+                        runOnUiThread {
+                            if (::cameraChrome.isInitialized) cameraChrome.showFocusConfirmed()
+                        }
+                        cameraHandler.post {
+                            if (!recording && captureSession === session) startRepeating(includeRaw = false)
+                        }
+                    }
+
+                    override fun onCaptureFailed(
+                        session: CameraCaptureSession,
+                        request: CaptureRequest,
+                        failure: CaptureFailure
+                    ) {
+                        cameraHandler.post {
+                            if (!recording && captureSession === session) startRepeating(includeRaw = false)
+                        }
+                    }
+                },
+                cameraHandler
+            )
+        } catch (error: Exception) {
+            Log.w(TAG, "Could not submit focus request", error)
+            if (!recording && captureSession === session) startRepeating(includeRaw = false)
         }
     }
 
@@ -2524,6 +2643,15 @@ class MainActivity : Activity() {
             put(builder, CaptureRequest.CONTROL_AE_LOCK, false)
             put(builder, CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, evSteps)
         }
+        val meteringRegion = previewMeteringRegion
+        val canApplyAeRegion = meteringRegion != null &&
+            !manualExposure &&
+            !lockedExposure &&
+            !cadenceExposure &&
+            (option.characteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE) ?: 0) > 0
+        if (canApplyAeRegion) {
+            put(builder, CaptureRequest.CONTROL_AE_REGIONS, arrayOf(meteringRegion))
+        }
 
         val lockedWb = includeRaw && lockWhiteBalance && snapshot?.gains != null
         if (manualWb) {
@@ -2551,6 +2679,8 @@ class MainActivity : Activity() {
         val maxFocus = option.characteristics
             .get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
         val lockedFocus = includeRaw && lockFocus && snapshot?.focusDiopters != null
+        val canApplyAfRegion = meteringRegion != null &&
+            (option.characteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0) > 0
         when {
             maxFocus <= 0f -> {
                 put(builder, CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
@@ -2564,6 +2694,10 @@ class MainActivity : Activity() {
                     (if (lockedFocus) snapshot?.focusDiopters else focusDiopters)
                         ?.coerceIn(0f, maxFocus) ?: focusDiopters.coerceIn(0f, maxFocus)
                 )
+            }
+            canApplyAfRegion -> {
+                put(builder, CaptureRequest.CONTROL_AF_REGIONS, arrayOf(meteringRegion))
+                put(builder, CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
             }
             else -> {
                 put(
@@ -4458,6 +4592,8 @@ class MainActivity : Activity() {
         private const val TELEMETRY_INTERVAL_MS = 2_000L
         private const val STABILIZER_MIN_PROJECTED_GRAVITY = 1.8f
         private const val STABILIZER_LEVEL_TOLERANCE_DEGREES = 1.8f
+        private const val PREVIEW_METERING_REGION_FRACTION = 0.13f
+        private const val PREVIEW_METERING_REGION_MIN_PX = 160
         private val CAPTURE_PROFILE = Pixel6ReferenceProfile.capture
         private val CHECKPOINT_SECONDS = CAPTURE_PROFILE.checkpointSeconds
         private val MAX_PENDING_METADATA_IMAGES = CAPTURE_PROFILE.maximumPendingMetadataImages
