@@ -44,7 +44,8 @@ internal class Pure10Encoder(
     private val rotationDegrees: Int,
     private val characteristics: CameraCharacteristics,
     private val codecName: String = CODEC_NAME,
-    cameraRgbToRec2020: FloatArray = Pixel6MainDngColorProfile.pure10CameraRgbToRec2020()
+    cameraRgbToRec2020: FloatArray = Pixel6MainDngColorProfile.pure10CameraRgbToRec2020(),
+    private val rec2020Saturation: Float = Pixel6MainDngColorProfile.PURE10_REC2020_SATURATION
 ) {
     private val cameraRgbToRec2020 = cameraRgbToRec2020.copyOf()
     private val outputExecutor = Executors.newSingleThreadExecutor()
@@ -197,7 +198,8 @@ internal class Pure10Encoder(
                 redGain = redGain.coerceIn(0.25f, 8f),
                 blueGain = blueGain.coerceIn(0.25f, 8f),
                 exposureGain = exposureGain.coerceIn(0.25f, 8f),
-                cameraRgbToRec2020 = cameraRgbToRec2020
+                cameraRgbToRec2020 = cameraRgbToRec2020,
+                rec2020Saturation = rec2020Saturation
             )
             if (conversionNs < 0L) {
                 localCodec.queueInputBuffer(inputIndex, 0, 0, 0L, 0)

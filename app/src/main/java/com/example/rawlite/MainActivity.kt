@@ -3034,7 +3034,7 @@ class MainActivity : Activity() {
                 outputSize = outputSize,
                 fps = selectedFps,
                 bitRate = Pure10Encoder.BIT_RATE,
-                rotationDegrees = captureRotationDegrees(option.characteristics),
+                rotationDegrees = PURE10_CONTAINER_ROTATION_DEGREES,
                 characteristics = option.characteristics,
                 cameraRgbToRec2020 = Pixel6MainDngColorProfile.pure10CameraRgbToRec2020()
             )
@@ -3320,6 +3320,8 @@ class MainActivity : Activity() {
             .put("pure10_crop_x", ((sourceSize.width - outputSize.width) / 2) and -2)
             .put("pure10_crop_y", ((sourceSize.height - outputSize.height) / 2) and -2)
             .put("pure10_experimental_4k", sourceSize != outputSize)
+            .put("sensor_capture_rotation_degrees", captureRotationDegrees(currentOption()!!.characteristics))
+            .put("rotation_degrees", PURE10_CONTAINER_ROTATION_DEGREES)
     }
 
     private fun captureMetadataContext(size: Size): CaptureMetadataContext {
@@ -4637,6 +4639,7 @@ class MainActivity : Activity() {
         private val PURE10_MAX_IMAGES = CAPTURE_PROFILE.pure10ImageReaderCapacity
         private val PURE10_MAX_PENDING_WRITES = CAPTURE_PROFILE.pure10MaximumPendingWrites
         private val PURE10_UHD_SIZE = Size(3840, 2160)
+        private const val PURE10_CONTAINER_ROTATION_DEGREES = 0
         private val MIN_FREE_BYTES = CAPTURE_PROFILE.minimumFreeBytes
         private val BACKGROUND_DRAIN_TIMEOUT_MS = CAPTURE_PROFILE.backgroundDrainTimeoutMs
         private const val FASTEST_VIDEO_EXPOSURE_NS = 125_000L

@@ -35,6 +35,7 @@ internal object Pixel6MainDngColorProfile {
         0.985f,
         1.035f
     )
+    const val PURE10_REC2020_SATURATION = 1.15f
 
     fun matches(metadata: JSONObject): Boolean {
         val cfa = metadata.optString("cfa", "")

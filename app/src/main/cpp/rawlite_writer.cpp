@@ -677,7 +677,8 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
     jfloat red_gain,
     jfloat blue_gain,
     jfloat exposure_gain,
-    jfloatArray camera_to_rec2020_array
+    jfloatArray camera_to_rec2020_array,
+    jfloat rec2020_saturation
 ) {
     const auto started = std::chrono::steady_clock::now();
     auto* raw_base = static_cast<uint8_t*>(env->GetDirectBufferAddress(raw_buffer));
@@ -723,6 +724,9 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
 
     constexpr int kLinearScale = 4096;
     constexpr int kMatrixScale = 16384;
+    const int saturation_q = static_cast<int>(
+        std::lround(std::clamp(rec2020_saturation, 0.5f, 2.0f) * 1024.0f)
+    );
     std::array<int, 9> camera_to_rec2020_q{};
     for (size_t i = 0; i < camera_to_rec2020.size(); ++i) {
         camera_to_rec2020_q[i] = static_cast<int>(
@@ -896,8 +900,12 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
                     static_cast<int>(rgb2[0]) +
                     static_cast<int>(rgb3[0]) + 2
                 ) >> 2;
-            const uint16_t cb = limited_chroma(((b_average - y_average) * 544) >> 10);
-            const uint16_t cr = limited_chroma(((r_average - y_average) * 694) >> 10);
+            const uint16_t cb = limited_chroma(
+                ((((b_average - y_average) * 557) >> 10) * saturation_q) >> 10
+            );
+            const uint16_t cr = limited_chroma(
+                ((((r_average - y_average) * 711) >> 10) * saturation_q) >> 10
+            );
             const size_t uv = static_cast<size_t>(y / 2) * output_stride_pixels + x;
             uv_plane[uv] = static_cast<uint16_t>(cb << 6);
             uv_plane[uv + 1] = static_cast<uint16_t>(cr << 6);

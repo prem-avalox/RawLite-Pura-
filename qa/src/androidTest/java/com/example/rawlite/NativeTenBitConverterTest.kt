@@ -64,7 +64,8 @@ class NativeTenBitConverterTest {
                 1f, 0f, 0f,
                 0f, 1f, 0f,
                 0f, 0f, 1f
-            )
+            ),
+            rec2020Saturation = 1.0f
         )
     }
 }

@@ -100,6 +100,7 @@ internal object CaptureMetadataFactory {
                 "pure10_rec2020_neutral_correction",
                 Pixel6MainDngColorProfile.pure10NeutralCorrectionJson()
             )
+            put("pure10_rec2020_saturation", Pixel6MainDngColorProfile.PURE10_REC2020_SATURATION)
             put("scene_linear_gain", Pure10Encoder.HLG_MIDTONE_GAIN * postRawGain / 100f)
             put("bit_rate", Pure10Encoder.BIT_RATE)
             put("source", "Camera2 RAW10")
