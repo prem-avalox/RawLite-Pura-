@@ -123,12 +123,7 @@ internal class PcmWavPlayer private constructor(
             input.seek(offset)
             input.read(preload)
         }.coerceAtLeast(0)
-        var written = 0
-        while (written < count) {
-            val result = track.write(preload, written, count - written, AudioTrack.WRITE_NON_BLOCKING)
-            if (result <= 0) break
-            written += result
-        }
+        val written = writeAlignedPcm(preload, 0, count)
         nextFileOffset = offset + written
     }
 
@@ -145,12 +140,7 @@ internal class PcmWavPlayer private constructor(
                 if (count <= 0) break
                 var offset = 0
                 while (!released && playing && generation.get() == activeGeneration && offset < count) {
-                    val written = track.write(
-                        buffer,
-                        offset,
-                        count - offset,
-                        AudioTrack.WRITE_NON_BLOCKING
-                    )
+                    val written = writeAlignedPcm(buffer, offset, count - offset)
                     if (written > 0) {
                         offset += written
                         writtenFileOffset += written
@@ -158,16 +148,34 @@ internal class PcmWavPlayer private constructor(
                             nextFileOffset = writtenFileOffset
                         }
                     } else {
-                        Thread.sleep(STREAM_RETRY_MS)
+                        break
                     }
                 }
             }
         }
     }
 
+    private fun writeAlignedPcm(buffer: ByteArray, offset: Int, byteCount: Int): Int {
+        val frameBytes = info.bytesPerFrame.coerceAtLeast(1)
+        val alignedCount = byteCount - (byteCount % frameBytes)
+        var written = 0
+        while (!released && written < alignedCount) {
+            val request = alignedCount - written
+            val result = track.write(
+                buffer,
+                offset + written,
+                request,
+                AudioTrack.WRITE_BLOCKING
+            )
+            if (result <= 0) break
+            if (result % frameBytes != 0) break
+            written += result
+        }
+        return written
+    }
+
     companion object {
         private const val UINT32_MASK = 0xffff_ffffL
-        private const val STREAM_RETRY_MS = 3L
 
         fun create(file: File): PcmWavPlayer? = runCatching {
             val info = inspect(file) ?: return null
@@ -193,7 +201,9 @@ internal class PcmWavPlayer private constructor(
                 .build()
             val minimum = AudioTrack.getMinBufferSize(info.sampleRate, channelMask, encoding)
             require(minimum > 0) { "AudioTrack buffer inválido: $minimum" }
-            val bufferBytes = max(minimum * 2, info.sampleRate * info.bytesPerFrame / 4)
+            val requestedBufferBytes = max(minimum * 2, info.sampleRate * info.bytesPerFrame / 4)
+            val bufferBytes = alignDown(requestedBufferBytes, info.bytesPerFrame)
+                .coerceAtLeast(info.bytesPerFrame)
             val track = AudioTrack.Builder()
                 .setAudioAttributes(
                     AudioAttributes.Builder()
@@ -245,9 +255,22 @@ internal class PcmWavPlayer private constructor(
                 if (sampleRate <= 0 || channels !in 1..2 || bits !in setOf(16, 24) ||
                     dataOffset <= 0L || dataBytes <= 0L
                 ) return null
-                WavPcmInfo(sampleRate, channels, bits, dataOffset, dataBytes)
+                val bytesPerFrame = channels * bits / 8
+                val alignedDataBytes = alignDown(dataBytes, bytesPerFrame)
+                if (bytesPerFrame <= 0 || alignedDataBytes <= 0L) return null
+                WavPcmInfo(sampleRate, channels, bits, dataOffset, alignedDataBytes)
             }
         }.getOrNull()
+
+        private fun alignDown(value: Int, quantum: Int): Int {
+            if (quantum <= 0) return value
+            return value - value % quantum
+        }
+
+        private fun alignDown(value: Long, quantum: Int): Long {
+            if (quantum <= 0) return value
+            return value - value % quantum
+        }
 
         private fun RandomAccessFile.readFourCc(): String {
             val bytes = ByteArray(4)
