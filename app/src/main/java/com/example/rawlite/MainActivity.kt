@@ -74,6 +74,7 @@ import com.example.rawlite.camera.CameraCatalog
 import com.example.rawlite.camera.CameraOption
 import com.example.rawlite.camera.Pure10SourceSelector
 import com.example.rawlite.capture.CaptureCadencePolicy
+import com.example.rawlite.capture.IsoStepPolicy
 import com.example.rawlite.capture.audio.AvSyncContext
 import com.example.rawlite.capture.audio.AvSyncMetadataFactory
 import com.example.rawlite.capture.metadata.CaptureMetadataContext
@@ -1056,6 +1057,7 @@ class MainActivity : Activity() {
             CameraParameter.LENS -> discreteStep(cameraOptions.size)
             CameraParameter.FPS -> discreteStep(FPS_OPTIONS.size)
             CameraParameter.SHUTTER -> discreteStep(shutterValuesNs().size)
+            CameraParameter.ISO -> isoProgressStep()
             CameraParameter.RESOLUTION -> discreteStep(currentOption()?.rawSizes?.size ?: 0)
             else -> 100
         }
@@ -1087,14 +1089,9 @@ class MainActivity : Activity() {
                 }
             )
             CameraParameter.ISO -> if (manualExposure) {
-                isoControls.seek.progress
+                isoProgressFor(isoValue)
             } else {
-                val range = isoRange()
-                logToProgress(
-                    (latestResult?.get(CaptureResult.SENSOR_SENSITIVITY) ?: isoValue).toDouble(),
-                    range.lower.toDouble(),
-                    range.upper.toDouble()
-                )
+                isoProgressFor(latestResult?.get(CaptureResult.SENSOR_SENSITIVITY) ?: isoValue)
             }
             CameraParameter.WHITE_BALANCE -> wbControls.seek.progress
             CameraParameter.FOCUS -> focusControls.seek.progress
@@ -1117,9 +1114,7 @@ class MainActivity : Activity() {
                 formatExposure(shutterValueForProgress(progress))
             }
             CameraParameter.ISO -> {
-                val range = isoRange()
-                progressToLog(progress, range.lower.toDouble(), range.upper.toDouble())
-                    .roundToInt().coerceIn(range.lower, range.upper).toString()
+                isoValueForProgress(progress).toString()
             }
             CameraParameter.WHITE_BALANCE -> {
                 val raw = progressToLinear(progress, MIN_KELVIN.toDouble(), MAX_KELVIN.toDouble())
@@ -1181,8 +1176,10 @@ class MainActivity : Activity() {
             CameraParameter.ISO -> {
                 manualExposure = true
                 scheduleUserPreferencesSave()
-                isoControls.seek.progress = progress
-                updateIsoFromProgress(progress)
+                val snappedProgress = isoProgressFor(isoValueForProgress(progress))
+                wheelView.setProgressSilently(snappedProgress)
+                isoControls.seek.progress = snappedProgress
+                updateIsoFromProgress(snappedProgress)
                 scheduleControlApply()
             }
             CameraParameter.WHITE_BALANCE -> {
@@ -1239,7 +1236,8 @@ class MainActivity : Activity() {
             CameraParameter.FPS -> discreteStep(FPS_OPTIONS.size)
             CameraParameter.RESOLUTION -> discreteStep(currentOption()?.rawSizes?.size ?: 0)
             CameraParameter.WHITE_BALANCE -> 6
-            CameraParameter.SHUTTER, CameraParameter.ISO, CameraParameter.FOCUS -> 4
+            CameraParameter.ISO -> isoProgressStep()
+            CameraParameter.SHUTTER, CameraParameter.FOCUS -> 4
         }
         wheelView.step(direction * step)
     }
@@ -1339,7 +1337,7 @@ class MainActivity : Activity() {
         val region = previewMeteringRectangle(x, y, characteristics) ?: return
         previewMeteringRegion = region
         previewMeteringLocked = locked
-        previewFocusConfirmationPending = !locked
+        previewFocusConfirmationPending = true
         chromeHandler.removeCallbacks(clearTemporaryPreviewFocusRunnable)
         if (!locked) {
             chromeHandler.postDelayed(
@@ -1400,7 +1398,7 @@ class MainActivity : Activity() {
             return
         }
         applyControls(builder, includeRaw = false)
-        put(builder, CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_CANCEL)
+        put(builder, CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_START)
         try {
             session.capture(
                 builder.build(),
@@ -1471,13 +1469,11 @@ class MainActivity : Activity() {
         if (!pushAutoRunning) return
         val measured = snapshotCurrentValues()
         if (pushAutoCapturesExposure) {
-            measured.iso?.let { isoValue = it }
+            measured.iso?.let {
+                isoValue = IsoStepPolicy.nearest(it, isoRange().lower, isoRange().upper)
+            }
             measured.exposureNs?.let { exposureNs = nearestShutterValue(it) }
-            isoControls.seek.progress = logToProgress(
-                isoValue.toDouble(),
-                isoRange().lower.toDouble(),
-                isoRange().upper.toDouble()
-            )
+            isoControls.seek.progress = isoProgressFor(isoValue)
             exposureControls.seek.progress = shutterProgressFor(exposureNs)
             manualExposure = true
         } else {
@@ -1614,6 +1610,7 @@ class MainActivity : Activity() {
                 CameraParameter.LENS -> discreteStep(cameraOptions.size)
                 CameraParameter.FPS -> discreteStep(FPS_OPTIONS.size)
                 CameraParameter.SHUTTER -> discreteStep(shutterValuesNs().size)
+                CameraParameter.ISO -> isoProgressStep()
                 CameraParameter.RESOLUTION -> discreteStep(currentOption()?.rawSizes?.size ?: 0)
                 else -> 100
             }
@@ -1806,7 +1803,7 @@ class MainActivity : Activity() {
         }
 
         bindSeek(exposureControls, { updateExposureFromProgress(it) }, { -1 }, { 1 })
-        bindSeek(isoControls, { updateIsoFromProgress(it) }, { -1 }, { 1 })
+        bindSeek(isoControls, { updateIsoFromProgress(it) }, { -isoProgressStep() }, { isoProgressStep() })
         bindSeek(
             evControls,
             {
@@ -1917,12 +1914,8 @@ class MainActivity : Activity() {
         apertureValue.text = apertures?.joinToString(" / ") { "f/${formatOne(it)}" } ?: "No disponible"
 
         val isoRange = isoRange()
-        isoValue = isoValue.coerceIn(isoRange.lower, isoRange.upper)
-        isoControls.seek.progress = logToProgress(
-            isoValue.toDouble(),
-            isoRange.lower.toDouble(),
-            isoRange.upper.toDouble()
-        )
+        isoValue = IsoStepPolicy.nearest(isoValue, isoRange.lower, isoRange.upper)
+        isoControls.seek.progress = isoProgressFor(isoValue)
 
         constrainExposureToVideoRange()
 
@@ -2653,19 +2646,54 @@ class MainActivity : Activity() {
             CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED,
             CaptureResult.CONTROL_AF_STATE_PASSIVE_FOCUSED -> {
                 previewFocusConfirmationPending = false
-                runOnUiThread {
-                    if (::cameraChrome.isInitialized) cameraChrome.showFocusConfirmed()
+                if (previewMeteringLocked) {
+                    lockFocusAtResultDistance(result)
+                } else {
+                    runOnUiThread {
+                        if (::cameraChrome.isInitialized) cameraChrome.showFocusConfirmed()
+                    }
                 }
             }
             CaptureResult.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED,
             CaptureResult.CONTROL_AF_STATE_PASSIVE_UNFOCUSED -> {
                 previewFocusConfirmationPending = false
-                if (!previewMeteringLocked) {
-                    runOnUiThread {
-                        clearPreviewFocusMetering(updateCamera = true)
+                val wasLocked = previewMeteringLocked
+                runOnUiThread {
+                    clearPreviewFocusMetering(updateCamera = true)
+                    if (wasLocked && ::cameraChrome.isInitialized) {
+                        cameraChrome.showStatusPopup("AF NO FIJADO")
                     }
                 }
             }
+        }
+    }
+
+    private fun lockFocusAtResultDistance(result: CaptureResult) {
+        val maxFocus = currentCharacteristics()
+            ?.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
+        if (maxFocus <= 0f) return
+        val measuredFocus = result.get(CaptureResult.LENS_FOCUS_DISTANCE)
+            ?.coerceIn(0f, maxFocus)
+            ?: return
+        runOnUiThread {
+            focusDiopters = measuredFocus
+            manualFocus = true
+            previewMeteringRegion = null
+            previewMeteringLocked = false
+            previewFocusConfirmationPending = false
+            focusControls.seek.progress = linearToProgress(
+                focusDiopters.toDouble(),
+                0.0,
+                maxFocus.toDouble()
+            )
+            scheduleUserPreferencesSave()
+            updateControlModes()
+            updateChromeValues()
+            if (::cameraChrome.isInitialized) {
+                cameraChrome.showStatusPopup("AF-L")
+                cameraChrome.clearFocusReticle()
+            }
+            restartRepeating()
         }
     }
 
@@ -2779,7 +2807,7 @@ class MainActivity : Activity() {
                 put(
                     builder,
                     CaptureRequest.CONTROL_AF_MODE,
-                    CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+                    CaptureRequest.CONTROL_AF_MODE_AUTO
                 )
             }
             else -> {
@@ -3753,10 +3781,11 @@ class MainActivity : Activity() {
     }
 
     private fun updateIsoFromProgress(progress: Int) {
-        val range = isoRange()
-        isoValue = progressToLog(progress, range.lower.toDouble(), range.upper.toDouble())
-            .roundToInt()
-            .coerceIn(range.lower, range.upper)
+        isoValue = isoValueForProgress(progress)
+        val snappedProgress = isoProgressFor(isoValue)
+        if (::isoControls.isInitialized && isoControls.seek.progress != snappedProgress) {
+            isoControls.seek.progress = snappedProgress
+        }
         isoControls.value.text = isoValue.toString()
     }
 
@@ -4418,6 +4447,21 @@ class MainActivity : Activity() {
         return currentCharacteristics()
             ?.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
             ?: Range(50, 3200)
+    }
+
+    private fun isoValueForProgress(progress: Int): Int {
+        val range = isoRange()
+        return IsoStepPolicy.valueForProgress(progress, range.lower, range.upper)
+    }
+
+    private fun isoProgressFor(value: Int): Int {
+        val range = isoRange()
+        return IsoStepPolicy.progressFor(value, range.lower, range.upper)
+    }
+
+    private fun isoProgressStep(): Int {
+        val range = isoRange()
+        return IsoStepPolicy.stepProgress(range.lower, range.upper)
     }
 
     private fun exposureRange(): Range<Long> {

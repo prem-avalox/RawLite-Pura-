@@ -66,6 +66,16 @@ class ReviewActivity : Activity() {
     private var galleryClips: List<ClipSummary> = emptyList()
     private var selectionMode = false
     private val selectedClipPaths = linkedSetOf<String>()
+    private var galleryScrollView: ScrollView? = null
+    private var galleryScrollY = 0
+    private var selectionAnchorPath: String? = null
+    private val thumbnailCache = object : LinkedHashMap<String, Bitmap>(32, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Bitmap>?): Boolean {
+            if (size <= THUMBNAIL_CACHE_SIZE || eldest == null) return false
+            if (eldest.value !== displayedBitmap && !eldest.value.isRecycled) eldest.value.recycle()
+            return true
+        }
+    }
 
     private var playbackKind = PlaybackKind.NONE
     private var activeSummary: ClipSummary? = null
@@ -226,7 +236,6 @@ class ReviewActivity : Activity() {
 
     private fun showClipList() {
         clearPlayback()
-        recycleThumbnails()
         val currentGeneration = generation.incrementAndGet()
         selectedClipPaths.removeAll { selected ->
             galleryClips.none { it.directory.absolutePath == selected }
@@ -241,9 +250,11 @@ class ReviewActivity : Activity() {
             runOnUiThread {
                 if (generation.get() == currentGeneration && !isFinishing) {
                     galleryClips = clips
+                    pruneThumbnailCache(clips)
                     if (galleryClips.isEmpty()) {
                         selectionMode = false
                         selectedClipPaths.clear()
+                        selectionAnchorPath = null
                     }
                     renderClipList(clips)
                 }
@@ -254,10 +265,11 @@ class ReviewActivity : Activity() {
     private fun renderClipList(clips: List<ClipSummary>) {
         if (clips.isEmpty()) {
             selectButton.visibility = View.GONE
+            galleryScrollView = null
             setContent(messageView("NO HAY TOMAS"))
             return
         }
-        recycleThumbnails()
+        val restoreScrollY = galleryScrollView?.scrollY ?: galleryScrollY
         updateSelectionToolbar()
         val list = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -321,11 +333,15 @@ class ReviewActivity : Activity() {
                 }
             }
         }
-        setContent(ScrollView(this).apply {
+        val scroll = ScrollView(this).apply {
             isFillViewport = true
             overScrollMode = View.OVER_SCROLL_NEVER
             addView(list)
-        })
+        }
+        val animate = content.getChildAt(0) !is ScrollView
+        galleryScrollView = scroll
+        setContent(scroll, animate = animate)
+        scroll.post { scroll.scrollTo(0, restoreScrollY) }
     }
 
     private fun clipRow(summary: ClipSummary): View {
@@ -341,7 +357,7 @@ class ReviewActivity : Activity() {
                 if (selectionMode) toggleSelection(summary) else openClip(summary)
             }
             setOnLongClickListener {
-                enterSelectionMode(summary)
+                if (selectionMode) selectRangeTo(summary) else enterSelectionMode(summary)
                 true
             }
         }
@@ -362,9 +378,7 @@ class ReviewActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(14), 0, dp(8), 0)
         }
-        val date = SimpleDateFormat("dd MMM  HH:mm", Locale.getDefault())
-            .format(Date(summary.directory.lastModified()))
-        textColumn.addView(labelText(date, 14f, RawLiteDesign.TEXT))
+        textColumn.addView(labelText(galleryClipTitle(summary), 14f, RawLiteDesign.TEXT))
         textColumn.addView(labelText(
             "${summary.captureFormat}  ${summary.width}×${summary.height}  ${summary.fps} FPS",
             11f,
@@ -399,7 +413,7 @@ class ReviewActivity : Activity() {
                 if (selectionMode) toggleSelection(summary) else openClip(summary)
             }
             setOnLongClickListener {
-                enterSelectionMode(summary)
+                if (selectionMode) selectRangeTo(summary) else enterSelectionMode(summary)
                 true
             }
         }
@@ -459,13 +473,11 @@ class ReviewActivity : Activity() {
         }
         card.addView(imageStage, LinearLayout.LayoutParams.MATCH_PARENT, dp(188))
 
-        val date = SimpleDateFormat("dd MMM  HH:mm", Locale.getDefault())
-            .format(Date(summary.directory.lastModified()))
         val metadata = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, dp(12), 0, dp(14))
         }
-        metadata.addView(labelText(date, 15f, RawLiteDesign.TEXT))
+        metadata.addView(labelText(galleryClipTitle(summary), 15f, RawLiteDesign.TEXT))
         metadata.addView(labelText(
             "${summary.width}×${summary.height}   ${summary.fps} FPS   ${summary.camera}",
             12f,
@@ -490,6 +502,18 @@ class ReviewActivity : Activity() {
         return "${formatDuration(summary.durationSeconds)}${separator}${formatBytes(summary.byteCount)}$separator$audio"
     }
 
+    private fun galleryClipTitle(summary: ClipSummary): String {
+        val name = CaptureStorage.displayName(summary.directory.name)
+            .replace('_', ' ')
+            .trim()
+        return if (name.isBlank()) {
+            SimpleDateFormat("dd MMM  HH:mm", Locale.getDefault())
+                .format(Date(summary.directory.lastModified()))
+        } else {
+            name
+        }
+    }
+
     private fun clipStatusColor(summary: ClipSummary): Int = when {
         summary.postProcessing -> RawLiteDesign.ACCENT
         summary.finalized -> RawLiteDesign.ACCENT
@@ -498,6 +522,11 @@ class ReviewActivity : Activity() {
 
     private fun loadThumbnail(summary: ClipSummary, target: ImageView) {
         val currentGeneration = generation.get()
+        val key = summary.directory.absolutePath
+        thumbnailCache[key]?.takeIf { !it.isRecycled }?.let {
+            target.setImageBitmap(it)
+            return
+        }
         worker.execute {
             val bitmap = runCatching { decodeThumbnail(summary) }.getOrNull()
             runOnUiThread {
@@ -505,8 +534,9 @@ class ReviewActivity : Activity() {
                     bitmap?.recycle()
                     return@runOnUiThread
                 }
-                thumbnailBitmaps += bitmap
-                target.setImageBitmap(bitmap)
+                thumbnailCache[key]?.takeIf { it !== bitmap && !it.isRecycled }?.recycle()
+                thumbnailCache[key] = bitmap
+                if (target.windowToken != null) target.setImageBitmap(bitmap)
             }
         }
     }
@@ -1267,23 +1297,52 @@ class ReviewActivity : Activity() {
     }
 
     private fun enterSelectionMode(initial: ClipSummary? = null) {
+        galleryScrollY = galleryScrollView?.scrollY ?: galleryScrollY
         selectionMode = true
-        initial?.let { selectedClipPaths += it.directory.absolutePath }
+        initial?.let {
+            val key = it.directory.absolutePath
+            selectedClipPaths += key
+            selectionAnchorPath = key
+        }
         renderClipList(galleryClips)
     }
 
     private fun exitSelectionMode() {
+        galleryScrollY = galleryScrollView?.scrollY ?: galleryScrollY
         selectionMode = false
         selectedClipPaths.clear()
+        selectionAnchorPath = null
         renderClipList(galleryClips)
     }
 
     private fun toggleSelection(summary: ClipSummary) {
+        galleryScrollY = galleryScrollView?.scrollY ?: galleryScrollY
         val key = summary.directory.absolutePath
         if (!selectedClipPaths.add(key)) selectedClipPaths.remove(key)
+        selectionAnchorPath = key
         if (selectedClipPaths.isEmpty()) {
             selectionMode = false
+            selectionAnchorPath = null
         }
+        renderClipList(galleryClips)
+    }
+
+    private fun selectRangeTo(summary: ClipSummary) {
+        galleryScrollY = galleryScrollView?.scrollY ?: galleryScrollY
+        val target = summary.directory.absolutePath
+        val anchor = selectionAnchorPath ?: selectedClipPaths.lastOrNull() ?: target
+        val start = galleryClips.indexOfFirst { it.directory.absolutePath == anchor }
+        val end = galleryClips.indexOfFirst { it.directory.absolutePath == target }
+        if (start < 0 || end < 0) {
+            selectedClipPaths += target
+            selectionAnchorPath = target
+            renderClipList(galleryClips)
+            return
+        }
+        val range = if (start <= end) start..end else end..start
+        range.forEach { index -> selectedClipPaths += galleryClips[index].directory.absolutePath }
+        selectionAnchorPath = target
+        selectionMode = selectedClipPaths.isNotEmpty()
         renderClipList(galleryClips)
     }
 
@@ -1470,6 +1529,7 @@ class ReviewActivity : Activity() {
                     runOnUiThread {
                         selectionMode = false
                         selectedClipPaths.clear()
+                        selectionAnchorPath = null
                         showClipList()
                         if (deleted != clips.size) {
                             setContent(messageView("NO SE PUDIERON BORRAR TODAS LAS TOMAS"))
@@ -1543,11 +1603,12 @@ class ReviewActivity : Activity() {
         audioButton = null
     }
 
-    private fun setContent(view: View) {
+    private fun setContent(view: View, animate: Boolean = true) {
         content.removeAllViews()
-        view.alpha = 0f
-        view.translationY = dp(6).toFloat()
+        view.alpha = if (animate) 0f else 1f
+        view.translationY = if (animate) dp(6).toFloat() else 0f
         content.addView(view, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+        if (!animate) return
         view.animate()
             .alpha(1f)
             .translationY(0f)
@@ -1687,8 +1748,22 @@ class ReviewActivity : Activity() {
     }
 
     private fun recycleThumbnails() {
+        thumbnailCache.values.distinct().forEach { if (!it.isRecycled) it.recycle() }
+        thumbnailCache.clear()
         thumbnailBitmaps.distinct().forEach { if (!it.isRecycled) it.recycle() }
         thumbnailBitmaps.clear()
+    }
+
+    private fun pruneThumbnailCache(clips: List<ClipSummary>) {
+        val livePaths = clips.mapTo(mutableSetOf()) { it.directory.absolutePath }
+        val iterator = thumbnailCache.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            if (!livePaths.contains(entry.key)) {
+                if (!entry.value.isRecycled) entry.value.recycle()
+                iterator.remove()
+            }
+        }
     }
 
     private fun formatDuration(seconds: Double): String = formatTimecode((seconds * 1000).toInt())
@@ -1715,6 +1790,7 @@ class ReviewActivity : Activity() {
 
     companion object {
         private const val FRAME_CACHE_SIZE = 6
+        private const val THUMBNAIL_CACHE_SIZE = 32
         private const val DNG_PREVIEW_MAX_WIDTH = 960
         private const val DNG_PREVIEW_MAX_HEIGHT = 540
         private const val PROGRESS_INTERVAL_MS = 33L
