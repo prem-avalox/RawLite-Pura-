@@ -202,6 +202,10 @@ internal class Pure10Encoder(
                 blackLevel = blackLevel,
                 whiteLevel = whiteLevel,
                 exposureGain = exposureGain.coerceIn(0.25f, 8f),
+                redGain = redGain,
+                greenEvenGain = greenEvenGain,
+                greenOddGain = greenOddGain,
+                blueGain = blueGain,
                 cameraRgbToRec2020 = cameraRgbToRec2020
             )
             if (conversionNs < 0L) {
@@ -250,7 +254,7 @@ internal class Pure10Encoder(
             !gainChanged(greenOddGain, matrixGreenOddGain) &&
             !gainChanged(blueGain, matrixBlueGain)
         ) return
-        cameraRgbToRec2020 = Pixel6MainDngColorProfile.cameraRgbToRec2020(
+        cameraRgbToRec2020 = Pixel6MainDngColorProfile.whiteBalancedCameraRgbToRec2020(
             redGain,
             greenEvenGain,
             greenOddGain,

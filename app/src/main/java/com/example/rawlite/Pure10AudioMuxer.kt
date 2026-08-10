@@ -18,6 +18,7 @@ internal data class Pure10AudioMuxResult(
     val videoBytes: Long,
     val audioFrames: Long,
     val audioOffsetNs: Long,
+    val sourceVideoDeleted: Boolean,
     val finalized: Boolean,
     val error: String?
 )
@@ -53,11 +54,21 @@ internal object Pure10AudioMuxer {
                 throw IllegalStateException("No se pudo reemplazar MP4 final previo")
             }
             require(temporary.renameTo(output)) { "No se pudo cerrar MP4 final" }
+            val sourceDeleted = if (sourceVideo.canonicalPath == output.canonicalPath) {
+                false
+            } else {
+                sourceVideo.delete().also { deleted ->
+                    if (!deleted && sourceVideo.exists()) {
+                        Log.w(TAG, "Could not delete intermediate PURE 10 video ${sourceVideo.name}")
+                    }
+                }
+            }
             val result = Pure10AudioMuxResult(
                 outputFile = output,
                 videoBytes = output.length(),
                 audioFrames = wav.frames,
                 audioOffsetNs = sync,
+                sourceVideoDeleted = sourceDeleted,
                 finalized = true,
                 error = null
             )
@@ -70,6 +81,7 @@ internal object Pure10AudioMuxer {
                 videoBytes = output.takeIf { it.isFile }?.length() ?: 0L,
                 audioFrames = 0L,
                 audioOffsetNs = readSync(directory),
+                sourceVideoDeleted = false,
                 finalized = false,
                 error = error.message ?: error.javaClass.simpleName
             )
@@ -348,7 +360,16 @@ internal object Pure10AudioMuxer {
         description.put("audio_mux_finalized", result.finalized)
         description.put("audio_mux_offset_ns", result.audioOffsetNs)
         description.put("audio_codec", "AAC-LC")
-        result.error?.let { description.put("audio_mux_error", it) }
+        if (result.finalized) {
+            description.put("video_file", result.outputFile.name)
+            description.put("intermediate_video_file", Pure10Encoder.VIDEO_FILE)
+            description.put("intermediate_video_deleted", result.sourceVideoDeleted)
+            description.remove("audio_mux_error")
+        } else {
+            description.put("video_file", Pure10Encoder.VIDEO_FILE)
+            description.put("intermediate_video_deleted", false)
+            result.error?.let { description.put("audio_mux_error", it) }
+        }
         runCatching { descriptionFile.writeText(description.toString(2)) }
     }
 

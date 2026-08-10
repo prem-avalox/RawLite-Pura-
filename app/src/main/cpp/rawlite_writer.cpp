@@ -675,6 +675,10 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
     jint black_level,
     jint white_level,
     jfloat exposure_gain,
+    jfloat red_gain,
+    jfloat green_even_gain,
+    jfloat green_odd_gain,
+    jfloat blue_gain,
     jfloatArray camera_to_rec2020_array
 ) {
     const auto started = std::chrono::steady_clock::now();
@@ -718,6 +722,13 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
         env->GetArrayLength(camera_to_rec2020_array) >= 9) {
         env->GetFloatArrayRegion(camera_to_rec2020_array, 0, 9, camera_to_rec2020.data());
     }
+    const auto safe_gain = [](float value) -> float {
+        return std::isfinite(value) ? std::clamp(value, 0.125f, 8.0f) : 1.0f;
+    };
+    const float safe_red_gain = safe_gain(red_gain);
+    const float safe_green_even_gain = safe_gain(green_even_gain);
+    const float safe_green_odd_gain = safe_gain(green_odd_gain);
+    const float safe_blue_gain = safe_gain(blue_gain);
 
     constexpr int kLinearScale = 4096;
     constexpr int kMatrixScale = 16384;
@@ -728,10 +739,17 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
         );
     }
 
-    std::array<int, 1024> linear_lut{};
+    std::array<int, 1024> red_lut{};
+    std::array<int, 1024> green_even_lut{};
+    std::array<int, 1024> green_odd_lut{};
+    std::array<int, 1024> blue_lut{};
     const float safe_exposure_gain = std::clamp(exposure_gain, 0.25f, 8.0f);
-    const auto normalized_linear = [black_level, white_level](
-        int value
+    const auto normalized_linear = [
+        black_level,
+        white_level
+    ](
+        int value,
+        float gain
     ) -> int {
         const float linear = std::clamp(
             (value - black_level) /
@@ -739,7 +757,9 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
             0.0f,
             1.0f
         );
-        return static_cast<int>(std::lround(linear * kLinearScale));
+        return static_cast<int>(
+            std::lround(std::clamp(linear * gain, 0.0f, 1.0f) * kLinearScale)
+        );
     };
     std::array<uint16_t, kLinearScale + 1> hlg_lut{};
     for (int value = 0; value <= kLinearScale; ++value) {
@@ -759,7 +779,10 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
         );
     }
     for (int value = 0; value < 1024; ++value) {
-        linear_lut[value] = normalized_linear(value);
+        red_lut[value] = normalized_linear(value, safe_red_gain);
+        green_even_lut[value] = normalized_linear(value, safe_green_even_gain);
+        green_odd_lut[value] = normalized_linear(value, safe_green_odd_gain);
+        blue_lut[value] = normalized_linear(value, safe_blue_gain);
     }
 
     const auto raw10_at = [
@@ -821,10 +844,10 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
                     break;
             }
 
-            const int rf = linear_lut[std::clamp(r, 0, 1023)];
-            const int bf = linear_lut[std::clamp(b_value, 0, 1023)];
-            const int gf0 = linear_lut[std::clamp(g0, 0, 1023)];
-            const int gf1 = linear_lut[std::clamp(g1, 0, 1023)];
+            const int rf = red_lut[std::clamp(r, 0, 1023)];
+            const int bf = blue_lut[std::clamp(b_value, 0, 1023)];
+            const int gf0 = green_even_lut[std::clamp(g0, 0, 1023)];
+            const int gf1 = green_odd_lut[std::clamp(g1, 0, 1023)];
             const int gf = (gf0 + gf1) >> 1;
             const auto rec2020_hlg = [
                 &camera_to_rec2020_q,
@@ -902,9 +925,9 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
         }
     };
 
-    // UHD is just inside the 24 FPS budget on one Tensor core. Split disjoint row
-    // ranges between one worker and the calling thread; smaller frames stay single-threaded.
-    if (static_cast<int64_t>(output_width) * output_height >= 3840LL * 2160LL) {
+    // PURE 10 spends its frame budget in Bayer -> P010 conversion. Split 2K and larger
+    // frames between one worker and the calling thread so 30 FPS has real headroom.
+    if (static_cast<int64_t>(output_width) * output_height >= 1920LL * 1080LL) {
         const int split_y = (output_height / 2) & ~1;
         try {
             std::thread upper_half([&] { convert_rows(0, split_y); });

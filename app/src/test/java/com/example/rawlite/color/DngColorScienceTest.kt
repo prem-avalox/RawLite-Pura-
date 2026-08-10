@@ -19,6 +19,23 @@ class DngColorScienceTest {
     }
 
     @Test
+    fun `Pixel 6 white balanced transform keeps balanced white neutral`() {
+        val transform = Pixel6MainDngColorProfile.whiteBalancedCameraRgbToRec2020(
+            redGain = 1.62539077f,
+            greenEvenGain = 1f,
+            greenOddGain = 1f,
+            blueGain = 2.11910534f
+        )
+        val rec2020 = DngColorScience.applyMatrix(transform, doubleArrayOf(1.0, 1.0, 1.0))
+        val reference = rec2020.average()
+
+        assertEquals(reference, rec2020[0], 0.0005)
+        assertEquals(reference, rec2020[1], 0.0005)
+        assertEquals(reference, rec2020[2], 0.0005)
+        assertTrue(reference > 0.95 && reference < 1.05)
+    }
+
+    @Test
     fun `different as-shot neutrals produce different color transforms`() {
         val first = Pixel6MainDngColorProfile.cameraRgbToRec2020(
             1.95391953f,

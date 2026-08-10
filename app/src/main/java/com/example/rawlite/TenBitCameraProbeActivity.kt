@@ -267,8 +267,12 @@ class TenBitCameraProbeActivity : Activity() {
                 cfa,
                 black,
                 white,
-                1.0f,
-                Pixel6MainDngColorProfile.cameraRgbToRec2020(
+                exposureGain = 1.0f,
+                redGain = 2.0f,
+                greenEvenGain = 1.0f,
+                greenOddGain = 1.0f,
+                blueGain = 1.6f,
+                cameraRgbToRec2020 = Pixel6MainDngColorProfile.whiteBalancedCameraRgbToRec2020(
                     redGain = 2.0f,
                     greenEvenGain = 1.0f,
                     greenOddGain = 1.0f,

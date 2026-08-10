@@ -90,13 +90,13 @@ internal object CaptureMetadataFactory {
             put("color_temperature_kelvin", colorTemperatureKelvin)
             put(
                 "color_pipeline",
-                "DNG AsShotNeutral -> dual-illuminant ColorMatrix -> Bradford D50/D65 -> " +
-                    "linear Rec.2020 -> Rec.2100 HLG"
+                "RAW10 -> DNG AsShotNeutral gains -> dual-illuminant ColorMatrix -> " +
+                    "Bradford D50/D65 -> linear Rec.2020 -> Rec.2100 HLG"
             )
-            put("color_transform_strategy", "per-frame DNG white point")
+            put("color_transform_strategy", "white-balanced DNG camera space")
             put(
-                "camera_rgb_to_rec2020_reference",
-                Pixel6MainDngColorProfile.cameraRgbToRec2020Json(colorTemperatureKelvin)
+                "white_balanced_camera_rgb_to_rec2020_reference",
+                Pixel6MainDngColorProfile.whiteBalancedCameraRgbToRec2020Json(colorTemperatureKelvin)
             )
             put("color_adjustment", "none")
             put(

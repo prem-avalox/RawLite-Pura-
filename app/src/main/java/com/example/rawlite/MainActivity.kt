@@ -73,6 +73,7 @@ import android.widget.TextView
 import com.example.rawlite.camera.CameraCatalog
 import com.example.rawlite.camera.CameraOption
 import com.example.rawlite.camera.Pure10SourceSelector
+import com.example.rawlite.capture.CaptureCadencePolicy
 import com.example.rawlite.capture.audio.AvSyncContext
 import com.example.rawlite.capture.audio.AvSyncMetadataFactory
 import com.example.rawlite.capture.metadata.CaptureMetadataContext
@@ -338,6 +339,15 @@ class MainActivity : Activity() {
     private var dngRecording = false
     private var lastTimelineFrame = -1
     private var cadenceGaps = 0
+    private var captureIntervalCount = 0
+    private var captureIntervalTotalNs = 0L
+    private var captureIntervalMinNs = Long.MAX_VALUE
+    private var captureIntervalMaxNs = 0L
+    private var captureLongIntervals = 0
+    private var previousCaptureTimestampNs = 0L
+    private var sessionAutoCadenceLock = false
+    private var sessionExposurePolicy = "auto"
+    private var sessionRequestedFrameDurationNs = 0L
     private var droppedFrames = 0
     private var noMetadataDrops = 0
     private var writerBusyDrops = 0
@@ -417,20 +427,15 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         loadUserPreferences()
         buildUi()
-        @Suppress("DEPRECATION")
-        baseContentOrientation = when (windowManager.defaultDisplay.rotation) {
-            Surface.ROTATION_90 -> 90
-            Surface.ROTATION_180 -> 180
-            Surface.ROTATION_270 -> 270
-            else -> 0
-        }
+        baseContentOrientation = currentDisplayRotationDegrees()
         contentOrientationListener = object : OrientationEventListener(this) {
             override fun onOrientationChanged(orientation: Int) {
                 if (orientation == ORIENTATION_UNKNOWN || !::cameraChrome.isInitialized) return
                 val compensation = orientationCompensationWithHysteresis(orientation) ?: return
                 detectedDeviceOrientationDegrees = compensation
-                val base = baseContentOrientation ?: 0
-                val relative = (base - compensation + 360) % 360
+                val base = currentDisplayRotationDegrees()
+                baseContentOrientation = base
+                val relative = (base + compensation) % 360
                 lastAllowedContentRotation = relative.toFloat()
                 applyLatestAutomaticRotation()
             }
@@ -514,6 +519,10 @@ class MainActivity : Activity() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
+        baseContentOrientation = currentDisplayRotationDegrees()
+        val relative = (baseContentOrientation!! + detectedDeviceOrientationDegrees) % 360
+        lastAllowedContentRotation = relative.toFloat()
+        applyLatestAutomaticRotation()
         chromeLayer.post { updatePanelLayout(newConfig.orientation) }
         preview.post { configurePreviewTransform(preview.width, preview.height) }
     }
@@ -2322,6 +2331,7 @@ class MainActivity : Activity() {
         }
 
         val metadata = frameMetadata(result)
+        updateCaptureCadenceStats(metadata.timestampNs)
         if (firstSensorTimestampNs == 0L && metadata.timestampNs > 0L) {
             firstSensorTimestampNs = metadata.timestampNs
         }
@@ -2475,6 +2485,33 @@ class MainActivity : Activity() {
         cadenceGaps += result.cadenceGap
         lastTimelineFrame = result.frame
         return result.frame
+    }
+
+    private fun resetCaptureCadenceStats() {
+        captureIntervalCount = 0
+        captureIntervalTotalNs = 0L
+        captureIntervalMinNs = Long.MAX_VALUE
+        captureIntervalMaxNs = 0L
+        captureLongIntervals = 0
+        previousCaptureTimestampNs = 0L
+    }
+
+    private fun updateCaptureCadenceStats(timestampNs: Long) {
+        if (timestampNs <= 0L) return
+        val previous = previousCaptureTimestampNs
+        previousCaptureTimestampNs = timestampNs
+        if (previous <= 0L || timestampNs <= previous) return
+
+        val interval = timestampNs - previous
+        captureIntervalCount++
+        captureIntervalTotalNs += interval
+        captureIntervalMinNs = min(captureIntervalMinNs, interval)
+        captureIntervalMaxNs = max(captureIntervalMaxNs, interval)
+
+        val nominal = CaptureCadencePolicy.frameDurationNs(selectedFps)
+        if (interval > nominal + nominal / 2) {
+            captureLongIntervals++
+        }
     }
 
     private fun maybeUpdateRawHistogram(image: android.media.Image, frame: Int) {
@@ -2649,14 +2686,30 @@ class MainActivity : Activity() {
             snapshot?.iso != null && snapshot.exposureNs != null
         val lockedExposure = includeRaw && lockExposure &&
             snapshot?.iso != null && snapshot.exposureNs != null
-        if (manualExposure || lockedExposure) {
-            val frameDurationNs = 1_000_000_000L / selectedFps
-            val requestedExposureNs = if (lockedExposure) {
+        val autoCadenceExposure = CaptureCadencePolicy.shouldFreezeAutoExposureForRawRecording(
+            includeRaw = includeRaw,
+            fps = selectedFps,
+            manualExposure = manualExposure,
+            snapshotIso = snapshot?.iso,
+            snapshotExposureNs = snapshot?.exposureNs
+        )
+        if (manualExposure || lockedExposure || autoCadenceExposure) {
+            val frameDurationNs = CaptureCadencePolicy.frameDurationNs(selectedFps)
+            val requestedExposureNs = if (lockedExposure || autoCadenceExposure) {
                 snapshot?.exposureNs ?: exposureNs
-            } else exposureNs
-            val requestedIso = if (lockedExposure) snapshot?.iso ?: isoValue else isoValue
+            } else {
+                exposureNs
+            }
+            val requestedIso = if (lockedExposure || autoCadenceExposure) {
+                snapshot?.iso ?: isoValue
+            } else {
+                isoValue
+            }
             put(builder, CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
-            put(builder, CaptureRequest.SENSOR_SENSITIVITY, requestedIso)
+            put(builder, CaptureRequest.SENSOR_SENSITIVITY, requestedIso.coerceIn(
+                isoRange().lower,
+                isoRange().upper
+            ))
             put(
                 builder,
                 CaptureRequest.SENSOR_EXPOSURE_TIME,
@@ -2664,7 +2717,7 @@ class MainActivity : Activity() {
             )
             put(builder, CaptureRequest.SENSOR_FRAME_DURATION, frameDurationNs)
         } else if (cadenceExposure) {
-            val frameDurationNs = 1_000_000_000L / selectedFps
+            val frameDurationNs = CaptureCadencePolicy.frameDurationNs(selectedFps)
             put(builder, CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
             put(builder, CaptureRequest.SENSOR_SENSITIVITY, snapshot.iso)
             put(
@@ -2782,6 +2835,7 @@ class MainActivity : Activity() {
         }
         lastTimelineFrame = -1
         cadenceGaps = 0
+        resetCaptureCadenceStats()
         firstSensorTimestampNs = 0L
         lastSensorTimestampNs = 0L
         technicalOverlay.clearRawHistogram()
@@ -2818,6 +2872,9 @@ class MainActivity : Activity() {
         } else {
             null
         }
+        sessionAutoCadenceLock = autoCadenceLockActive()
+        sessionExposurePolicy = recordingExposurePolicyName()
+        sessionRequestedFrameDurationNs = CaptureCadencePolicy.frameDurationNs(selectedFps)
         setParametersExpanded(false)
         switchingSession = true
         recordButton.isEnabled = false
@@ -3322,6 +3379,9 @@ class MainActivity : Activity() {
             .put("pure10_experimental_4k", sourceSize != outputSize)
             .put("sensor_capture_rotation_degrees", captureRotationDegrees(currentOption()!!.characteristics))
             .put("rotation_degrees", PURE10_CONTAINER_ROTATION_DEGREES)
+            .put("requested_frame_duration_ns", sessionRequestedFrameDurationNs)
+            .put("recording_exposure_policy", sessionExposurePolicy)
+            .put("auto_cadence_lock", sessionAutoCadenceLock)
     }
 
     private fun captureMetadataContext(size: Size): CaptureMetadataContext {
@@ -3341,6 +3401,26 @@ class MainActivity : Activity() {
         )
     }
 
+    private fun autoCadenceLockActive(): Boolean {
+        val snapshot = lockedValues
+        return CaptureCadencePolicy.shouldFreezeAutoExposureForRawRecording(
+            includeRaw = true,
+            fps = selectedFps,
+            manualExposure = manualExposure,
+            snapshotIso = snapshot?.iso,
+            snapshotExposureNs = snapshot?.exposureNs
+        )
+    }
+
+    private fun recordingExposurePolicyName(): String {
+        return CaptureCadencePolicy.exposurePolicyName(
+            manualExposure = manualExposure,
+            explicitExposureLock = lockExposure && lockedValues?.iso != null &&
+                lockedValues?.exposureNs != null,
+            autoCadenceLock = autoCadenceLockActive()
+        )
+    }
+
     private fun updatePure10Description(directory: File, summary: Pure10Summary?) {
         val descriptionFile = File(directory, "clip.json")
         val description = runCatching { JSONObject(descriptionFile.readText()) }
@@ -3354,6 +3434,25 @@ class MainActivity : Activity() {
         description.put("no_metadata_drops", noMetadataDrops)
         description.put("writer_busy_drops", writerBusyDrops)
         description.put("write_error_drops", writeErrorDrops)
+        description.put("requested_frame_duration_ns", sessionRequestedFrameDurationNs)
+        description.put("recording_exposure_policy", sessionExposurePolicy)
+        description.put("auto_cadence_lock", sessionAutoCadenceLock)
+        description.put("capture_interval_count", captureIntervalCount)
+        description.put("capture_long_intervals", captureLongIntervals)
+        if (captureIntervalCount > 0) {
+            description.put("capture_interval_average_ns", captureIntervalTotalNs / captureIntervalCount)
+            description.put("capture_interval_min_ns", captureIntervalMinNs)
+            description.put("capture_interval_max_ns", captureIntervalMaxNs)
+            description.put(
+                "capture_effective_fps",
+                1_000_000_000.0 / (captureIntervalTotalNs.toDouble() / captureIntervalCount)
+            )
+        } else {
+            description.put("capture_interval_average_ns", JSONObject.NULL)
+            description.put("capture_interval_min_ns", JSONObject.NULL)
+            description.put("capture_interval_max_ns", JSONObject.NULL)
+            description.put("capture_effective_fps", JSONObject.NULL)
+        }
         if (summary != null) {
             description.put("submitted_frames", summary.submittedFrames)
             description.put("encoded_frames", summary.encodedFrames)
@@ -3871,12 +3970,22 @@ class MainActivity : Activity() {
     private fun currentOption(): CameraOption? = cameraOptions.getOrNull(selectedCameraIndex)
     private fun currentCharacteristics(): CameraCharacteristics? = currentOption()?.characteristics
 
+    private fun currentDisplayRotationDegrees(): Int {
+        @Suppress("DEPRECATION")
+        return when (preview.display?.rotation ?: windowManager.defaultDisplay.rotation) {
+            Surface.ROTATION_90 -> 90
+            Surface.ROTATION_180 -> 180
+            Surface.ROTATION_270 -> 270
+            else -> 0
+        }
+    }
+
     private fun rawVideoSupportedForCurrentCamera(): Boolean =
         currentCharacteristics()?.get(CameraCharacteristics.LENS_FACING) !=
             CameraCharacteristics.LENS_FACING_FRONT
 
     private fun visualDisplayRotationDegrees(): Int {
-        val base = baseContentOrientation ?: 0
+        val base = baseContentOrientation ?: currentDisplayRotationDegrees()
         return (base - appliedContentRotation.roundToInt() + 360) % 360
     }
 
@@ -4260,12 +4369,7 @@ class MainActivity : Activity() {
         val bufferSize = currentPreviewSize()
         @Suppress("DEPRECATION")
         val displayRotation = preview.display?.rotation ?: windowManager.defaultDisplay.rotation
-        val displayDegrees = when (displayRotation) {
-            Surface.ROTATION_90 -> 90
-            Surface.ROTATION_180 -> 180
-            Surface.ROTATION_270 -> 270
-            else -> 0
-        }
+        val displayDegrees = currentDisplayRotationDegrees()
         Log.d(
             TAG,
             "Preview transform display=${preview.display?.displayId} rotation=$displayDegrees " +
@@ -4277,52 +4381,24 @@ class MainActivity : Activity() {
             CameraCharacteristics.LENS_FACING_FRONT
         val sign = if (frontFacing) 1 else -1
         val relativeDegrees = (sensorDegrees - displayDegrees * sign + 360) % 360
-        val rotationRequired = relativeDegrees % 180 != 0
-        val scaleX: Float
-        val scaleY: Float
-        if (sensorDegrees == 0) {
-            scaleX = if (!rotationRequired) {
-                viewWidth.toFloat() / bufferSize.height
-            } else {
-                viewWidth.toFloat() / bufferSize.width
-            }
-            scaleY = if (!rotationRequired) {
-                viewHeight.toFloat() / bufferSize.width
-            } else {
-                viewHeight.toFloat() / bufferSize.height
-            }
-        } else {
-            scaleX = if (rotationRequired) {
-                viewWidth.toFloat() / bufferSize.height
-            } else {
-                viewWidth.toFloat() / bufferSize.width
-            }
-            scaleY = if (rotationRequired) {
-                viewHeight.toFloat() / bufferSize.width
-            } else {
-                viewHeight.toFloat() / bufferSize.height
-            }
-        }
-        val finalScale = max(scaleX, scaleY)
-        val halfWidth = viewWidth / 2f
-        val halfHeight = viewHeight / 2f
         val matrix = Matrix()
-        if (rotationRequired) {
-            matrix.setScale(
-                finalScale / scaleX,
-                finalScale / scaleY,
-                halfWidth,
-                halfHeight
+        val viewRect = RectF(0f, 0f, viewWidth.toFloat(), viewHeight.toFloat())
+        val halfWidth = viewRect.centerX()
+        val halfHeight = viewRect.centerY()
+        if (displayRotation == Surface.ROTATION_90 || displayRotation == Surface.ROTATION_270) {
+            val bufferRect = RectF(0f, 0f, bufferSize.height.toFloat(), bufferSize.width.toFloat())
+            bufferRect.offset(halfWidth - bufferRect.centerX(), halfHeight - bufferRect.centerY())
+            matrix.setRectToRect(viewRect, bufferRect, Matrix.ScaleToFit.FILL)
+            val scale = max(
+                viewHeight.toFloat() / bufferSize.height,
+                viewWidth.toFloat() / bufferSize.width
             )
-        } else {
-            matrix.setScale(
-                viewHeight / viewWidth.toFloat() / scaleY * finalScale,
-                viewWidth / viewHeight.toFloat() / scaleX * finalScale,
-                halfWidth,
-                halfHeight
-            )
+            matrix.postScale(scale, scale, halfWidth, halfHeight)
+            val quarterTurn = if (displayRotation == Surface.ROTATION_90) -90f else 90f
+            matrix.postRotate(quarterTurn, halfWidth, halfHeight)
+        } else if (displayRotation == Surface.ROTATION_180) {
+            matrix.postRotate(180f, halfWidth, halfHeight)
         }
-        matrix.postRotate(-displayDegrees.toFloat(), halfWidth, halfHeight)
         preview.setTransform(matrix)
         if (::technicalOverlay.isInitialized) technicalOverlay.setGeometry(relativeDegrees)
     }

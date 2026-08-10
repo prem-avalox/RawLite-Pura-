@@ -64,6 +64,38 @@ internal object DngColorScience {
         return FloatArray(MATRIX_SIZE) { cameraToRec2020[it].toFloat() }
     }
 
+    fun whiteBalancedCameraToLinearRec2020(
+        profile: DualIlluminantColorProfile,
+        asShotNeutral: DoubleArray
+    ): FloatArray {
+        require(asShotNeutral.size == 3)
+        val neutral = normalizeMaximum(asShotNeutral)
+        require(neutral.all { it.isFinite() && it > 0.0 })
+
+        val sceneWhite = neutralToXy(profile, neutral)
+        val xyzToCamera = interpolatedColorMatrix(profile, sceneWhite)
+        val cameraToXyzScene = invert3x3(xyzToCamera)
+        val cameraNeutral = multiply3x3Vector(xyzToCamera, xyToXyz(sceneWhite))
+        val neutralScale = cameraNeutral.maxOrNull()?.takeIf { it > EPSILON }
+            ?: error("Invalid DNG camera neutral")
+        val normalizedNeutral = DoubleArray(3) { cameraNeutral[it] / neutralScale }
+        val unbalanceWhitePoint = doubleArrayOf(
+            normalizedNeutral[0], 0.0, 0.0,
+            0.0, normalizedNeutral[1], 0.0,
+            0.0, 0.0, normalizedNeutral[2]
+        )
+        val balancedCameraToXyzScene = multiply3x3(cameraToXyzScene, unbalanceWhitePoint)
+        val cameraToXyzD65 = multiply3x3(
+            mapWhiteMatrix(sceneWhite, D65),
+            balancedCameraToXyzScene
+        )
+        val cameraToRec2020 = multiply3x3(XYZ_D65_TO_REC2020, cameraToXyzD65)
+        val white = multiply3x3Vector(cameraToRec2020, doubleArrayOf(1.0, 1.0, 1.0))
+        val whiteScale = white.average().takeIf { it > EPSILON }
+            ?: error("Invalid Rec.2020 white")
+        return FloatArray(MATRIX_SIZE) { (cameraToRec2020[it] / whiteScale).toFloat() }
+    }
+
     fun asShotNeutralFromGains(
         redGain: Float,
         greenEvenGain: Float,

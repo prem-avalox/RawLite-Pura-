@@ -88,8 +88,49 @@ internal object Pixel6MainDngColorProfile {
         return DngColorScience.cameraToLinearRec2020(PROFILE, neutral)
     }
 
+    fun whiteBalancedCameraRgbToRec2020(
+        redGain: Float,
+        greenEvenGain: Float,
+        greenOddGain: Float,
+        blueGain: Float
+    ): FloatArray {
+        val neutral = DngColorScience.asShotNeutralFromGains(
+            redGain,
+            greenEvenGain,
+            greenOddGain,
+            blueGain
+        )
+        return DngColorScience.whiteBalancedCameraToLinearRec2020(PROFILE, neutral)
+    }
+
     fun cameraRgbToRec2020Json(kelvin: Int): JSONArray = JSONArray().apply {
         cameraRgbToRec2020(kelvin).forEach { put(it.toDouble()) }
+    }
+
+    fun whiteBalancedCameraRgbToRec2020Json(kelvin: Int): JSONArray = JSONArray().apply {
+        val gains = gainsForKelvin(kelvin)
+        whiteBalancedCameraRgbToRec2020(
+            redGain = gains[0],
+            greenEvenGain = 1f,
+            greenOddGain = 1f,
+            blueGain = gains[1]
+        ).forEach { put(it.toDouble()) }
+    }
+
+    private fun gainsForKelvin(kelvin: Int): FloatArray {
+        val k = kelvin.coerceIn(2000, 10000).toFloat()
+        val red: Float
+        val blue: Float
+        if (k <= 6500f) {
+            val t = (k - 2000f) / 4500f
+            red = 1.05f + 1.15f * t
+            blue = 3.65f - 2.25f * t
+        } else {
+            val t = (k - 6500f) / 3500f
+            red = 2.20f + 0.85f * t
+            blue = 1.40f - 0.35f * t
+        }
+        return floatArrayOf(red, blue)
     }
 
     private fun matrix(vararg values: Pair<Int, Int>) = JSONArray().apply {
