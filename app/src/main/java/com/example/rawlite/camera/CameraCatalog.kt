@@ -5,6 +5,9 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.util.Log
 import android.util.Size
+import com.example.rawlite.device.CameraCapability
+import com.example.rawlite.device.DeviceCapabilitiesGateway
+import com.example.rawlite.device.Dimensions
 import java.util.Locale
 import kotlin.math.abs
 
@@ -13,12 +16,14 @@ internal data class CameraOption(
     val openId: String,
     val physicalId: String?,
     val characteristics: CameraCharacteristics,
-    val rawSizes: List<Size>
+    val rawSizes: List<Size>,
+    val capability: CameraCapability
 )
 
 /** Camera2 discovery boundary. It preserves the camera ordering used by RawLite 0.33. */
 internal class CameraCatalog(
-    private val manager: CameraManager
+    private val manager: CameraManager,
+    private val capabilities: DeviceCapabilitiesGateway
 ) {
     fun discover(): List<CameraOption> {
         val options = mutableListOf<CameraOption>()
@@ -39,25 +44,28 @@ internal class CameraCatalog(
                         Log.w(TAG, "No characteristics for physical camera $physicalId", error)
                         continue
                     }
-                    val sizes = dngCompatibleSizes(physicalChars)
+                    val capability = capabilities.camera(id, physicalId) ?: continue
+                    val sizes = dngCompatibleSizes(physicalChars, capability)
                     if (sizes.isEmpty()) continue
                     options += CameraOption(
                         label = lensLabel(physicalChars, physicalId),
                         openId = id,
                         physicalId = physicalId,
                         characteristics = physicalChars,
-                        rawSizes = sizes
+                        rawSizes = sizes,
+                        capability = capability
                     )
                 }
             } else {
-                val sizes = dngCompatibleSizes(logicalChars)
+                val capability = capabilities.camera(id) ?: continue
+                val sizes = dngCompatibleSizes(logicalChars, capability)
                 if (sizes.isEmpty()) continue
                 val label = if (facing == CameraCharacteristics.LENS_FACING_FRONT) {
                     "Frontal"
                 } else {
                     lensLabel(logicalChars, id)
                 }
-                options += CameraOption(label, id, null, logicalChars, sizes)
+                options += CameraOption(label, id, null, logicalChars, sizes, capability)
             }
         }
 
@@ -81,12 +89,20 @@ internal class CameraCatalog(
         }
     }
 
-    private fun dngCompatibleSizes(chars: CameraCharacteristics): List<Size> {
+    private fun dngCompatibleSizes(
+        chars: CameraCharacteristics,
+        capability: CameraCapability
+    ): List<Size> {
         val map = chars.get(
             CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP
         ) ?: return emptyList()
         val rawSizes = map.getOutputSizes(ImageFormat.RAW_SENSOR)?.toList() ?: return emptyList()
-        return RawSizeSelector.select(rawSizes)
+        val selected = RawSizeSelector.select(rawSizes)
+        val full = selected.firstOrNull() ?: return emptyList()
+        val reducedRaw10 = selected.drop(1).firstOrNull { size ->
+            Dimensions(size.width, size.height) in capability.raw10Sizes
+        }
+        return listOfNotNull(full, reducedRaw10)
     }
 
     private fun formatOne(value: Float): String = String.format(Locale.US, "%.1f", value)

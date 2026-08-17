@@ -1,6 +1,7 @@
 package com.example.rawlite.gallery
 
 import com.example.rawlite.RawFrameInfo
+import com.example.rawlite.LensShadingSample
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
@@ -13,14 +14,15 @@ internal object CinemaDngWriter {
         destination: File,
         mosaicLittleEndian16: ByteArray,
         metadata: JSONObject,
-        frame: RawFrameInfo
+        frame: RawFrameInfo,
+        lensShading: LensShadingSample? = null
     ) {
         val width = metadata.getInt("width")
         val height = metadata.getInt("height")
         require(mosaicLittleEndian16.size == width * height * 2) {
             "Mosaico DNG inválido: ${mosaicLittleEndian16.size}"
         }
-        val entries = dngEntries(metadata, frame).toMutableList()
+        val entries = dngEntries(metadata, frame, lensShading).toMutableList()
         entries += entry(TAG_IMAGE_WIDTH, TYPE_LONG, longs(width.toLong()))
         entries += entry(TAG_IMAGE_LENGTH, TYPE_LONG, longs(height.toLong()))
         entries += entry(TAG_BITS_PER_SAMPLE, TYPE_SHORT, shorts(16))
@@ -37,7 +39,11 @@ internal object CinemaDngWriter {
         writeTiff(destination, entries, mosaicLittleEndian16)
     }
 
-    private fun dngEntries(metadata: JSONObject, frame: RawFrameInfo): List<Entry> {
+    private fun dngEntries(
+        metadata: JSONObject,
+        frame: RawFrameInfo,
+        lensShading: LensShadingSample?
+    ): List<Entry> {
         val width = metadata.getInt("width")
         val height = metadata.getInt("height")
         val cfa = metadata.optString("cfa", "RGGB")
@@ -61,7 +67,11 @@ internal object CinemaDngWriter {
         output += entry(TAG_EXPOSURE_TIME, TYPE_RATIONAL, rationals(rational(frame.exposureNs / 1e9)))
         output += entry(TAG_ISO_SPEED, TYPE_SHORT, shorts(frame.iso.coerceAtLeast(0)))
         output += entry(TAG_DNG_VERSION, TYPE_BYTE, bytes(1, 4, 0, 0))
-        output += entry(TAG_DNG_BACKWARD_VERSION, TYPE_BYTE, bytes(1, 1, 0, 0))
+        output += entry(
+            TAG_DNG_BACKWARD_VERSION,
+            TYPE_BYTE,
+            if (lensShading != null) bytes(1, 3, 0, 0) else bytes(1, 1, 0, 0)
+        )
         output += ascii(
             TAG_UNIQUE_CAMERA_MODEL,
             metadata.optString("unique_camera_model", "RawLite $cameraName")
@@ -103,7 +113,59 @@ internal object CinemaDngWriter {
         optionalMatrix(metadata, "calibration_matrix_2", TAG_CAMERA_CALIBRATION_2)?.let(output::add)
         optionalMatrix(metadata, "forward_matrix_1", TAG_FORWARD_MATRIX_1)?.let(output::add)
         optionalMatrix(metadata, "forward_matrix_2", TAG_FORWARD_MATRIX_2)?.let(output::add)
+        lensShading?.let {
+            val opcodeList = gainMapOpcodeList(it, width, height, cfa)
+            output += Entry(TAG_OPCODE_LIST_2, TYPE_UNDEFINED, opcodeList.size, opcodeList)
+        }
         return output
+    }
+
+    /** DNG 1.3 GainMap opcodes. Opcode payloads are always big-endian. */
+    private fun gainMapOpcodeList(
+        sample: LensShadingSample,
+        width: Int,
+        height: Int,
+        cfa: String
+    ): ByteArray {
+        val channels = when (cfa) {
+            "GRBG" -> intArrayOf(1, 0, 3, 2)
+            "GBRG" -> intArrayOf(1, 3, 0, 2)
+            "BGGR" -> intArrayOf(3, 1, 2, 0)
+            else -> intArrayOf(0, 1, 2, 3)
+        }
+        val parameterBytes = 76 + sample.rows * sample.columns * Float.SIZE_BYTES
+        return ByteArrayOutputStream(4 + 4 * (16 + parameterBytes)).apply {
+            writeIntBe(4)
+            for (site in 0 until 4) {
+                writeIntBe(OPCODE_GAIN_MAP)
+                writeIntBe(DNG_VERSION_1_3)
+                writeIntBe(0)
+                writeIntBe(parameterBytes)
+                writeIntBe(site ushr 1) // Top
+                writeIntBe(site and 1) // Left
+                writeIntBe(height) // Bottom, exclusive
+                writeIntBe(width) // Right, exclusive
+                writeIntBe(0) // Plane
+                writeIntBe(1) // Planes
+                writeIntBe(2) // RowPitch
+                writeIntBe(2) // ColPitch
+                writeIntBe(sample.rows)
+                writeIntBe(sample.columns)
+                writeDoubleBe(1.0 / (sample.rows - 1))
+                writeDoubleBe(1.0 / (sample.columns - 1))
+                writeDoubleBe(0.0)
+                writeDoubleBe(0.0)
+                writeIntBe(1) // MapPlanes
+                val channel = channels[site]
+                for (row in 0 until sample.rows) {
+                    for (column in 0 until sample.columns) {
+                        writeFloatBe(
+                            sample.gains[(row * sample.columns + column) * 4 + channel]
+                        )
+                    }
+                }
+            }
+        }.toByteArray()
     }
 
     private fun asShotNeutral(frame: RawFrameInfo): Array<Pair<Long, Long>> {
@@ -281,6 +343,22 @@ internal object CinemaDngWriter {
         write((value ushr 24) and 0xff)
     }
 
+    private fun ByteArrayOutputStream.writeIntBe(value: Int) {
+        write((value ushr 24) and 0xff)
+        write((value ushr 16) and 0xff)
+        write((value ushr 8) and 0xff)
+        write(value and 0xff)
+    }
+
+    private fun ByteArrayOutputStream.writeFloatBe(value: Float) =
+        writeIntBe(value.toRawBits())
+
+    private fun ByteArrayOutputStream.writeDoubleBe(value: Double) {
+        val bits = value.toRawBits()
+        writeIntBe((bits ushr 32).toInt())
+        writeIntBe(bits.toInt())
+    }
+
     private fun gcd(a: Long, b: Long): Long {
         var x = a
         var y = b
@@ -301,6 +379,7 @@ internal object CinemaDngWriter {
     private const val TYPE_SHORT = 3
     private const val TYPE_LONG = 4
     private const val TYPE_RATIONAL = 5
+    private const val TYPE_UNDEFINED = 7
     private const val TYPE_SRATIONAL = 10
     private const val PHOTOMETRIC_CFA = 32803
 
@@ -347,4 +426,7 @@ internal object CinemaDngWriter {
     private const val TAG_ACTIVE_AREA = 50829
     private const val TAG_FORWARD_MATRIX_1 = 50964
     private const val TAG_FORWARD_MATRIX_2 = 50965
+    private const val TAG_OPCODE_LIST_2 = 51009
+    private const val OPCODE_GAIN_MAP = 9
+    private const val DNG_VERSION_1_3 = 0x01030000
 }

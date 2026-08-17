@@ -1,6 +1,7 @@
 package com.example.rawlite.gallery
 
 import com.example.rawlite.RawFrameInfo
+import com.example.rawlite.LensShadingSample
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertArrayEquals
@@ -84,6 +85,41 @@ class Raw10CinemaDngConverterTest {
         assertEquals(listOf(1, 4, 0, 0), tags.getValue(50706).bytes().map { it.toInt() and 0xff })
         assertEquals(1023, tags.getValue(50717).firstLong())
         assertEquals(mosaic.size.toLong(), tags.getValue(279).firstLong())
+    }
+
+    @Test
+    fun `DNG writer embeds Camera2 shading as standard GainMap opcodes`() {
+        val directory = createTempDirectory().toFile()
+        val destination = File(directory, "frame_000000.dng")
+        val metadata = raw10Metadata(width = 4, height = 2)
+        val shading = LensShadingSample(
+            rows = 2,
+            columns = 2,
+            gains = floatArrayOf(
+                1.1f, 1.2f, 1.3f, 1.4f,
+                1.5f, 1.6f, 1.7f, 1.8f,
+                1.9f, 2.0f, 2.1f, 2.2f,
+                2.3f, 2.4f, 2.5f, 2.6f
+            )
+        )
+
+        CinemaDngWriter.write(
+            destination,
+            ByteArray(16),
+            metadata,
+            RawFrameInfo(0, 1, 100, 10_000_000, 41_666_666, 0f, 2f, 1f, 1f, 1.5f),
+            shading
+        )
+
+        val tags = readTiffTags(destination)
+        assertEquals(listOf(1, 3, 0, 0), tags.getValue(50707).bytes().map { it.toInt() and 0xff })
+        val opcodeList = tags.getValue(51009).bytes()
+        val bigEndian = ByteBuffer.wrap(opcodeList).order(ByteOrder.BIG_ENDIAN)
+        assertEquals(4, bigEndian.int)
+        assertEquals(9, bigEndian.int)
+        assertEquals(0x01030000, bigEndian.int)
+        assertEquals(0, bigEndian.int)
+        assertEquals(76 + 4 * Float.SIZE_BYTES, bigEndian.int)
     }
 
     @Test

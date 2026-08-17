@@ -774,6 +774,10 @@ class ReviewActivity : Activity() {
                 insets
             }
         }
+        val detailRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
         detailView = TextView(this).apply {
             text = "${summary.captureFormat.uppercase(Locale.getDefault())}   " +
                 "${summary.width}×${summary.height}   ${summary.fps} FPS" +
@@ -784,7 +788,27 @@ class ReviewActivity : Activity() {
             ellipsize = TextUtils.TruncateAt.END
             setTextColor(RawLiteDesign.ACCENT)
         }
-        transport.addView(detailView, LinearLayout.LayoutParams.MATCH_PARENT, dp(26))
+        detailRow.addView(detailView, LinearLayout.LayoutParams(0, dp(26), 1f))
+        if (usesFrames) {
+            detailRow.addView(TextView(this).apply {
+                text = "PERD. ${summary.lostFrameCount}"
+                textSize = 10f
+                typeface = uiTypeface
+                gravity = Gravity.END or Gravity.CENTER_VERTICAL
+                isSingleLine = true
+                setTextColor(
+                    if (summary.lostFrameCount > 0) RawLiteDesign.RECORD
+                    else RawLiteDesign.TEXT_MUTED
+                )
+                contentDescription = if (summary.lostFrameCount > 0) {
+                    "${summary.lostFrameCount} fotogramas perdidos en la captura"
+                } else {
+                    "Sin fotogramas perdidos en la captura"
+                }
+                tooltipText = contentDescription
+            }, LinearLayout.LayoutParams(dp(76), dp(26)))
+        }
+        transport.addView(detailRow, LinearLayout.LayoutParams.MATCH_PARENT, dp(26))
 
         seekBar = SeekBar(this).apply {
             max = 1
@@ -808,7 +832,7 @@ class ReviewActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
         }
         positionView = transportText("00:00.000", Gravity.START)
-        frameView = transportText(if (usesFrames) "F 1/1" else "10 BIT", Gravity.CENTER)
+        frameView = transportText(if (usesFrames) "FOT. 1/1" else "10 BIT", Gravity.CENTER)
         durationView = transportText("00:00.000", Gravity.END)
         timeRow.addView(positionView, LinearLayout.LayoutParams(0, dp(24), 1f))
         timeRow.addView(frameView, LinearLayout.LayoutParams(0, dp(24), 1f))
@@ -1098,9 +1122,17 @@ class ReviewActivity : Activity() {
         val timelineFrame = sequenceTimelineAt(index) + 1
         val timelineCount = activeSummary?.timelineFrameCount ?: sequenceFrameCount()
         frameView?.text = if (timelineCount > sequenceFrameCount()) {
-            "F ${index + 1}/${sequenceFrameCount()}  T $timelineFrame/$timelineCount"
+            "FOT. ${index + 1}/${sequenceFrameCount()}  TL $timelineFrame/$timelineCount"
         } else {
-            "F ${index + 1}/${sequenceFrameCount()}"
+            "FOT. ${index + 1}/${sequenceFrameCount()}"
+        }
+        frameView?.contentDescription = buildString {
+            append("Fotograma almacenado ${index + 1} de ${sequenceFrameCount()}")
+            if (timelineCount > sequenceFrameCount()) {
+                append(", posición temporal $timelineFrame de $timelineCount")
+            }
+            val lost = activeSummary?.lostFrameCount ?: 0
+            append(", $lost fotogramas perdidos en la captura")
         }
     }
 

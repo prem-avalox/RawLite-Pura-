@@ -5,7 +5,6 @@ import android.graphics.Matrix
 import org.json.JSONObject
 import java.io.Closeable
 import java.io.File
-import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.util.Locale
 import kotlin.math.ceil
@@ -32,6 +31,7 @@ internal data class ClipSummary(
     val fps: Int,
     val frameCount: Int,
     val timelineFrameCount: Int,
+    val lostFrameCount: Int = 0,
     val byteCount: Long,
     val finalized: Boolean,
     val audioDescription: String?,
@@ -49,9 +49,8 @@ internal class Raw10Clip private constructor(
     private val metadata: JSONObject,
     val frames: List<RawFrameInfo>
 ) : Closeable {
-    private val rawFile = File(summary.directory, "clip.raw10")
     private val rowBytes = metadata.getInt("row_bytes")
-    private val frameBytes = rowBytes.toLong() * summary.height
+    private val frameBytes = Math.multiplyExact(rowBytes, summary.height)
     private val cfa = metadata.optString("cfa", "RGGB").uppercase(Locale.US)
     private val whiteLevel = metadata.optInt("white_level", 1023).coerceAtLeast(1)
     private val blackLevels = IntArray(4) { index ->
@@ -71,9 +70,9 @@ internal class Raw10Clip private constructor(
         frontFacing = metadata.optBoolean("front_facing", false)
     )
     private val mirrorPreview = metadata.optBoolean("front_facing", false)
-    private val rawStream = RandomAccessFile(rawFile, "r")
-    private val rawChannel = rawStream.channel
-    private val packedFrame = ByteBuffer.allocateDirect(frameBytes.toInt())
+    private val frameStore = Raw10FrameStore.open(summary.directory, metadata)
+    private val lensShadingReader = LensShadingMetadataReader.openOrNull(summary.directory)
+    private val packedFrame = ByteBuffer.allocateDirect(frameBytes)
     private var closed = false
 
     @Synchronized
@@ -89,17 +88,10 @@ internal class Raw10Clip private constructor(
         )
         val outputWidth = max(1, cellWidth / step)
         val outputHeight = max(1, cellHeight / step)
-        packedFrame.clear()
-        var bytesRead = 0L
-        val frameOffset = index * frameBytes
-        while (packedFrame.hasRemaining()) {
-            val read = rawChannel.read(packedFrame, frameOffset + bytesRead)
-            check(read > 0) { "RAW10 incompleto en el fotograma $index" }
-            bytesRead += read
-        }
-        packedFrame.flip()
+        frameStore.readFrame(index, packedFrame)
 
         val frame = frames[index]
+        val lensShading = lensShadingReader?.sampleForFrame(frame.frame)
         val bitmap = Bitmap.createBitmap(outputWidth, outputHeight, Bitmap.Config.ARGB_8888)
         val decodeNs = NativeTenBitConverter.raw10ToArgbPreview(
             raw = packedFrame,
@@ -119,7 +111,10 @@ internal class Raw10Clip private constructor(
             redGain = frame.wbRed,
             greenEvenGain = frame.wbGreenEven,
             greenOddGain = frame.wbGreenOdd,
-            blueGain = frame.wbBlue
+            blueGain = frame.wbBlue,
+            lensShadingGains = lensShading?.gains,
+            lensShadingRows = lensShading?.rows ?: 0,
+            lensShadingColumns = lensShading?.columns ?: 0
         )
         if (decodeNs < 0L) {
             bitmap.recycle()
@@ -148,8 +143,8 @@ internal class Raw10Clip private constructor(
     override fun close() {
         if (closed) return
         closed = true
-        rawChannel.close()
-        rawStream.close()
+        lensShadingReader?.close()
+        frameStore.close()
     }
 
     companion object {
@@ -162,16 +157,16 @@ internal class Raw10Clip private constructor(
 
         fun inspect(directory: File): ClipSummary? {
             val description = File(directory, "clip.json")
-            val raw = File(directory, "clip.raw10")
-            if (!description.isFile || !raw.isFile) return null
+            if (!description.isFile) return null
             return runCatching {
                 val metadata = JSONObject(description.readText())
                 if (metadata.optString("format") != "rawlite-raw10") return null
                 val width = metadata.getInt("width")
                 val height = metadata.getInt("height")
                 val rowBytes = metadata.getInt("row_bytes")
-                val frameBytes = rowBytes.toLong() * height
-                val streamFrames = if (frameBytes > 0) (raw.length() / frameBytes).toInt() else 0
+                val (streamFrames, storedBytes) = Raw10FrameStore.open(directory, metadata).use {
+                    it.frameCount to it.storedBytes
+                }
                 val state = readState(File(directory, "clip.state"))
                 val completed = state["completed_frames"]?.toIntOrNull()
                 val sourceFrames = minOf(streamFrames, completed ?: streamFrames)
@@ -201,7 +196,12 @@ internal class Raw10Clip private constructor(
                     fps = metadata.optInt("frame_rate", 0),
                     frameCount = sourceFrames,
                     timelineFrameCount = timelineFrames,
-                    byteCount = directory.listFiles()?.sumOf { it.length() } ?: raw.length(),
+                    lostFrameCount = FrameIntegrity.lostFrameCount(
+                        storedFrames = sourceFrames,
+                        timelineFrames = timelineFrames,
+                        reportedDroppedFrames = metadata.optInt("dropped_frames", 0)
+                    ),
+                    byteCount = directory.listFiles()?.sumOf { it.length() } ?: storedBytes,
                     finalized = state["status"] == "closed",
                     audioDescription = audio
                 )

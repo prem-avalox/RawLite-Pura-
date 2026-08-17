@@ -30,7 +30,10 @@ internal object NativeTenBitConverter {
         greenEvenGain: Float,
         greenOddGain: Float,
         blueGain: Float,
-        cameraRgbToRec2020: FloatArray
+        cameraRgbToRec2020: FloatArray,
+        lensShadingGains: FloatArray?,
+        lensShadingRows: Int,
+        lensShadingColumns: Int
     ): Long
 
     external fun raw10ToArgbPreview(
@@ -51,6 +54,9 @@ internal object NativeTenBitConverter {
         redGain: Float,
         greenEvenGain: Float,
         greenOddGain: Float,
-        blueGain: Float
+        blueGain: Float,
+        lensShadingGains: FloatArray?,
+        lensShadingRows: Int,
+        lensShadingColumns: Int
     ): Long
 }

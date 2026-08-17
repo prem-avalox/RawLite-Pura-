@@ -1028,22 +1028,21 @@ class CameraChromeView(context: Context) : View(context) {
         val color = if (stabilizerStable) AUTO else Color.WHITE
         val alpha = if (stabilizerStable) STABILIZER_STABLE_ALPHA else STABILIZER_ACTIVE_ALPHA
         val roll = displayedStabilizerRollDegrees
-        withContentRotation(canvas, center.x, center.y) {
-            canvas.save()
-            canvas.rotate(-roll, center.x, center.y)
-            val previousCap = paint.strokeCap
-            paint.strokeCap = Paint.Cap.ROUND
-            paint.style = Paint.Style.STROKE
-            paint.strokeWidth = if (stabilizerStable) 3f else 3.5f
-            paint.color = scaledAlpha(color, alpha)
-            drawStabilizerSegments(canvas, center)
-            paint.style = Paint.Style.FILL
-            paint.color = scaledAlpha(color, alpha)
-            canvas.drawCircle(center.x, center.y, if (stabilizerStable) 4.5f else 3.5f, paint)
-            paint.strokeCap = previousCap
-            paint.alpha = 255
-            canvas.restore()
-        }
+        canvas.save()
+        if (leftHanded) canvas.scale(-1f, 1f, center.x, center.y)
+        canvas.rotate(-roll, center.x, center.y)
+        val previousCap = paint.strokeCap
+        paint.strokeCap = Paint.Cap.ROUND
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = if (stabilizerStable) 3f else 3.5f
+        paint.color = scaledAlpha(color, alpha)
+        drawStabilizerSegments(canvas, center)
+        paint.style = Paint.Style.FILL
+        paint.color = scaledAlpha(color, alpha)
+        canvas.drawCircle(center.x, center.y, if (stabilizerStable) 4.5f else 3.5f, paint)
+        paint.strokeCap = previousCap
+        paint.alpha = 255
+        canvas.restore()
     }
 
     private fun stabilizerGuideVisible(): Boolean =
@@ -1109,7 +1108,7 @@ class CameraChromeView(context: Context) : View(context) {
     private fun drawCaptureControls(canvas: Canvas, landscape: Boolean) {
         val recordCenter = recordCenter(landscape)
         val pushAutoCenter = pushAutoCenter(landscape)
-        val indicatorCenter = if (landscape) PointF(2343f, 440f) else PointF(589.5f, 2183f)
+        val indicatorCenter = recordingIndicatorCenter(landscape)
         val timerCenter = recordingTimerCenter(landscape)
         val dPad = precisionRect(landscape)
 
@@ -2078,11 +2077,12 @@ class CameraChromeView(context: Context) : View(context) {
     }
 
     private fun precisionRect(landscape: Boolean): RectF {
-        return if (landscape) {
+        val rect = if (landscape) {
             RectF(2188f, 71.5f, 2498f, 381.5f)
         } else {
             RectF(797.5f, 2188f, 1107.5f, 2498f)
         }
+        return rect
     }
 
     private fun rulerTouchRect(landscape: Boolean): RectF {
@@ -2102,36 +2102,56 @@ class CameraChromeView(context: Context) : View(context) {
         }
     }
 
-    private fun recordCenter(landscape: Boolean): PointF =
-        if (landscape) PointF(2343f, 589.5f) else PointF(589.5f, 2343f)
+    private fun recordCenter(landscape: Boolean): PointF {
+        val center = if (landscape) PointF(2343f, 589.5f) else PointF(589.5f, 2343f)
+        return center
+    }
+
+    private fun recordingIndicatorCenter(landscape: Boolean): PointF {
+        val center = if (landscape) PointF(2343f, 440f) else PointF(589.5f, 2183f)
+        return center
+    }
 
     private fun recordingTimerCenter(landscape: Boolean): PointF {
         if (landscape) return PointF(1065f, 1138f)
-        return when (((contentRotation / 90f).roundToInt() % 4 + 4) % 4) {
-            1 -> PointF(105f, 1065f)
-            3 -> PointF(PORTRAIT_WIDTH - 105f, 1065f)
-            else -> PointF(589.5f, 1810.5f)
+        return if (contentIsVertical()) {
+            PointF(589.5f, 1810.5f)
+        } else {
+            // The whole canvas is mirrored for left-handed controls, so this
+            // single canonical anchor naturally moves to the opposite safe edge.
+            PointF(105f, 1065f)
         }
     }
 
     private fun pushAutoCenter(landscape: Boolean): PointF = when {
-        landscape -> PointF(2343f, 982.5f)
-        else -> PointF(196.5f, 2343f)
+        landscape -> {
+            val center = PointF(2343f, 982.5f)
+            center
+        }
+        else -> {
+            val center = PointF(196.5f, 2343f)
+            center
+        }
     }
 
     private fun galleryRect(landscape: Boolean): RectF = if (landscape) {
-        RectF(1945.5f, 892f, 2101.5f, 950f)
+        val raw = selectorRect(7, landscape)
+        val auto = autoRect(landscape)
+        val width = 156f
+        val height = 58f
+        RectF(
+            raw.centerX() - width / 2f,
+            auto.centerY() - height / 2f,
+            raw.centerX() + width / 2f,
+            auto.centerY() + height / 2f
+        )
     } else {
         RectF(20.25f, 1781.5f, 176.25f, 1839.5f)
     }
 
     private fun galleryDisplayRect(landscape: Boolean): RectF {
         val normal = galleryRect(landscape)
-        val auto = autoRect(landscape)
-        val travel = 1f - chromeReveal.coerceIn(0f, 1f)
-        val dx = (auto.centerX() - normal.centerX()) * travel
-        val dy = (auto.centerY() - normal.centerY()) * travel
-        return RectF(normal).apply { offset(dx, dy) }
+        return RectF(normal)
     }
 
     private fun previewTouchRect(landscape: Boolean): RectF =
@@ -2162,10 +2182,10 @@ class CameraChromeView(context: Context) : View(context) {
     }
 
     private fun visibilityCenter(landscape: Boolean): PointF =
-        if (landscape) PointF(2449.5f, 98.5f) else PointF(1080.5f, 106.5f)
+        if (landscape) PointF(106.5f, 295.5f) else PointF(1080.5f, 106.5f)
 
     private fun rotationCenter(landscape: Boolean): PointF =
-        if (landscape) PointF(2252.5f, 98.5f) else PointF(883.5f, 106.5f)
+        if (landscape) PointF(106.5f, 98.5f) else PointF(883.5f, 106.5f)
 
     private fun insideToolButton(point: PointF, lock: Boolean): Boolean {
         val center = if (layoutLandscape) {
@@ -2212,6 +2232,7 @@ class CameraChromeView(context: Context) : View(context) {
         draw()
         canvas.restore()
     }
+
 
     private fun centeredBaseline(centerY: Float, textSize: Float): Float {
         paint.textSize = textSize
@@ -2309,7 +2330,7 @@ class CameraChromeView(context: Context) : View(context) {
         private const val PREVIEW_FOCUS_LONG_PRESS_MS = 520L
         private const val HAPTIC_AMPLITUDE = 110
         private const val LEVEL_HAPTIC_AMPLITUDE = 150
-        private const val STABILIZER_MAX_ROLL_DEGREES = 85f
+        private const val STABILIZER_MAX_ROLL_DEGREES = 180f
         private const val PARAMETER_LENS = 0
         private const val PARAMETER_RESOLUTION = 6
         private const val DPAD_ARM_HALF_WIDTH = 54f

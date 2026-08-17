@@ -277,7 +277,10 @@ class TenBitCameraProbeActivity : Activity() {
                     greenEvenGain = 1.0f,
                     greenOddGain = 1.0f,
                     blueGain = 1.6f
-                )
+                ),
+                lensShadingGains = null,
+                lensShadingRows = 0,
+                lensShadingColumns = 0
             )
             if (conversionNs < 0) {
                 droppedEncoderFrames.incrementAndGet()

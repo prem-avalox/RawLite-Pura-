@@ -51,6 +51,7 @@ internal class Pure10Encoder(
     private var matrixGreenEvenGain = Float.NaN
     private var matrixGreenOddGain = Float.NaN
     private var matrixBlueGain = Float.NaN
+    private var captureLensShading: LensShadingSample? = null
     private val outputExecutor = Executors.newSingleThreadExecutor()
     private val outputFinished = CountDownLatch(1)
     private val submittedFrames = AtomicInteger()
@@ -161,6 +162,7 @@ internal class Pure10Encoder(
         greenEvenGain: Float,
         greenOddGain: Float,
         blueGain: Float,
+        lensShading: LensShadingSample?,
         exposureGain: Float,
         queuedAtNs: Long
     ): Boolean {
@@ -182,6 +184,10 @@ internal class Pure10Encoder(
             }
             val plane = image.planes[0]
             val raw = plane.buffer
+            if (captureLensShading == null && lensShading != null) {
+                captureLensShading = lensShading
+            }
+            val stableLensShading = captureLensShading
             updateColorTransform(redGain, greenEvenGain, greenOddGain, blueGain)
             output.clear()
             val conversionNs = NativeTenBitConverter.raw10ToP010Hlg(
@@ -206,7 +212,10 @@ internal class Pure10Encoder(
                 greenEvenGain = greenEvenGain,
                 greenOddGain = greenOddGain,
                 blueGain = blueGain,
-                cameraRgbToRec2020 = cameraRgbToRec2020
+                cameraRgbToRec2020 = cameraRgbToRec2020,
+                lensShadingGains = stableLensShading?.gains,
+                lensShadingRows = stableLensShading?.rows ?: 0,
+                lensShadingColumns = stableLensShading?.columns ?: 0
             )
             if (conversionNs < 0L) {
                 localCodec.queueInputBuffer(inputIndex, 0, 0, 0L, 0)

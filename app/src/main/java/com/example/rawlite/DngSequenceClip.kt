@@ -94,6 +94,15 @@ internal class DngSequenceClip private constructor(
                     "timeline_frames",
                     timeline.last() - timeline.first() + 1
                 ).coerceAtLeast(files.size)
+                val conversionReport = runCatching {
+                    JSONObject(File(directory, "conversion_report.json").readText())
+                }.getOrNull()
+                val lostFrameCount = FrameIntegrity.lostFrameCount(
+                    storedFrames = files.size,
+                    timelineFrames = timelineCount,
+                    repeatedFrames = conversionReport?.optInt("repeated_frame_count", 0) ?: 0,
+                    reportedDroppedFrames = metadata.optInt("dropped_frames", 0)
+                )
                 val inferredFps = if (audioDuration > 0.2) {
                     val measured = timelineCount / audioDuration
                     listOf(15, 24, 25, 30).minByOrNull { kotlin.math.abs(it - measured) } ?: 15
@@ -108,6 +117,7 @@ internal class DngSequenceClip private constructor(
                     fps = metadata.optInt("frame_rate", inferredFps).coerceAtLeast(1),
                     frameCount = files.size,
                     timelineFrameCount = timelineCount,
+                    lostFrameCount = lostFrameCount,
                     byteCount = directory.listFiles()?.sumOf { it.length() } ?: 0L,
                     finalized = metadata.optBoolean("finalized", true),
                     audioDescription = audioDescription(directory, audioMetadata),

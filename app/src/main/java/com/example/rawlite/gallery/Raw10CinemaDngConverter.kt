@@ -4,6 +4,8 @@ import com.example.rawlite.CaptureStorage
 import com.example.rawlite.DngSequenceClip
 import com.example.rawlite.PcmAudioRecorder
 import com.example.rawlite.RawFrameInfo
+import com.example.rawlite.Raw10FrameStore
+import com.example.rawlite.LensShadingMetadataReader
 import org.json.JSONObject
 import java.io.File
 import java.io.RandomAccessFile
@@ -62,9 +64,7 @@ internal object Raw10CinemaDngConverter {
         require(width > 0 && height > 0 && rowBytes > 0 && frameBytes > 0) {
             "Geometría RAW10 inválida"
         }
-        val rawFile = File(source, "clip.raw10")
-        require(rawFile.isFile) { "Falta clip.raw10" }
-        val rawFrames = (rawFile.length() / frameBytes).toInt()
+        val rawFrames = Raw10FrameStore.open(source, metadata).use { it.frameCount }
         val rows = readFrames(File(source, "frames.csv"))
         val state = readState(File(source, "clip.state"))
         val completed = state["completed_frames"]?.toIntOrNull()
@@ -94,9 +94,11 @@ internal object Raw10CinemaDngConverter {
         var lastTimeline = firstTimeline - 1
         var previousDng: File? = null
         val packed = ByteArray(frameBytes)
+        val packedDirect = ByteBuffer.allocateDirect(frameBytes)
         val mosaic = ByteArray(width * height * 2)
-        RandomAccessFile(rawFile, "r").use { raw ->
-            for (streamIndex in 0 until available) {
+        LensShadingMetadataReader.openOrNull(source).use { lensShading ->
+            Raw10FrameStore.open(source, metadata).use { raw ->
+                for (streamIndex in 0 until available) {
                 val row = rows[streamIndex]
                 var frameId = row.frame
                 if (streamIndex == 0) firstTimeline = frameId
@@ -110,11 +112,17 @@ internal object Raw10CinemaDngConverter {
                         repeated++
                     }
                 }
-                raw.seek(streamIndex.toLong() * frameBytes)
-                raw.readFully(packed)
+                raw.readFrame(streamIndex, packedDirect)
+                packedDirect.get(packed)
                 unpackRaw10ToLittleEndian16(packed, rowBytes, width, height, mosaic)
                 val destination = File(dngDir, "frame_%06d.dng".format(Locale.US, frameId))
-                CinemaDngWriter.write(destination, mosaic, metadata, row)
+                CinemaDngWriter.write(
+                    destination,
+                    mosaic,
+                    metadata,
+                    row,
+                    lensShading?.sampleForFrame(row.frame)
+                )
                 previousDng = destination
                 lastTimeline = frameId
                 progress(
@@ -124,6 +132,7 @@ internal object Raw10CinemaDngConverter {
                         totalFrames = available
                     )
                 )
+                }
             }
         }
         val timelineFrames = lastTimeline - firstTimeline + 1

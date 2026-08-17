@@ -7,7 +7,7 @@ hardware reference target is the Google Pixel 6.
 The application supports three capture workflows:
 
 - CinemaDNG FULL: full-resolution DNG image sequences.
-- RAW10 2K: packed Bayer RAW10 clips with frame-level metadata.
+- RAW10 2K: losslessly compressed Bayer RAW10 clips with frame-level metadata.
 - PURE 10: hardware-encoded HEVC Main10 HLG video with AAC audio in the final
   MP4.
 
@@ -46,6 +46,11 @@ PURE 10, RawLite records 10-bit HEVC Main10 HLG through hardware encoding and
 muxes audio into the final MP4. Synchronization metadata is retained for
 inspection and recovery workflows.
 
+When the camera exposes lens-shading metadata, RawLite preserves it per frame.
+CinemaDNG exports embed the standard DNG gain-map correction without modifying
+the original Bayer samples, while PURE 10 applies the corresponding optical
+falloff compensation before the Rec.2020/Rec.2100 HLG transform.
+
 Each recording is stored in its own take directory:
 
 ```text
@@ -60,7 +65,7 @@ Typical take contents include:
 - `telemetry.csv`: storage, thermal and runtime telemetry.
 - `sync.json`: audio/video synchronization metadata.
 - `audio.wav`: PCM audio intermediate or backup when applicable.
-- `clip.raw10`, `frame_XXXXXX.dng`, `pure10.mp4` or `pure10_final.mp4`,
+- `clip.raw10c`, `frame_XXXXXX.dng`, `pure10.mp4` or `pure10_final.mp4`,
   depending on the selected capture mode.
 
 ## Gallery and Playback
@@ -84,10 +89,15 @@ timeline synchronization.
 
 CinemaDNG sequences can be imported directly into DaVinci Resolve.
 
-RAW10 is a RawLite-native packed capture format. It is designed to preserve
-sensor data efficiently during recording and can be converted to CinemaDNG from
-the internal gallery with the `CONVERTIR` action. Conversion creates a separate
-CinemaDNG take while preserving the original RAW10 recording.
+RAW10 is stored in RawLite's versioned `clip.raw10c` container. Each frame is
+compressed independently and losslessly, includes integrity checks and remains
+recoverable up to the last complete frame after an interrupted recording. The
+application also continues to read legacy uncompressed `clip.raw10` takes.
+
+RAW10 can be converted to CinemaDNG from the internal gallery with the
+`CONVERTIR` action. Conversion reads the compressed frames directly and creates
+a separate CinemaDNG take while preserving the original recording; it does not
+first duplicate the complete uncompressed RAW stream.
 
 A desktop converter is also available for inspection, recovery and batch
 workflows:

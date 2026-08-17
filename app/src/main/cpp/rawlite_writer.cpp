@@ -6,12 +6,15 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <fcntl.h>
 #include <mutex>
+#include <memory>
 #include <numeric>
 #include <string>
 #include <system_error>
@@ -19,17 +22,156 @@
 #include <thread>
 #include <unistd.h>
 #include <vector>
+#include <zlib.h>
+
+#include "raw10_lossless_codec.h"
 
 namespace {
 
 constexpr char kLogTag[] = "RawLiteNative";
 constexpr size_t kDirectAlignment = 4096;
 constexpr int kMaximumDirectBatchFrames = 8;
+constexpr size_t kCompressedContainerHeaderBytes = 64;
+constexpr size_t kCompressedFrameHeaderBytes = 32;
+constexpr std::array<uint8_t, 8> kCompressedContainerMagic = {
+    'R', 'L', 'R', '1', '0', 'C', '0', '1'
+};
+constexpr std::array<uint8_t, 4> kCompressedFrameMagic = {'R', 'L', 'F', '1'};
 constexpr char kMetadataHeader[] =
     "frame,timestamp_ns,iso,exposure_ns,frame_duration_ns,focus_diopters,"
     "wb_r,wb_ge,wb_go,wb_b\n";
 
 thread_local std::string last_error;
+
+struct LensShadingCorrection {
+    int source_width = 0;
+    int source_height = 0;
+    int origin_x = 0;
+    int origin_y = 0;
+    int cell_width = 0;
+    int cell_height = 0;
+    int cell_step = 0;
+    int cfa = 0;
+    int map_rows = 0;
+    int map_columns = 0;
+    std::vector<float> source_gains;
+    std::vector<uint16_t> site_gains_q12;
+};
+
+std::mutex lens_shading_cache_mutex;
+std::shared_ptr<const LensShadingCorrection> lens_shading_cache;
+
+std::shared_ptr<const LensShadingCorrection> lens_shading_correction(
+    JNIEnv* env,
+    jfloatArray gains_array,
+    int map_rows,
+    int map_columns,
+    int source_width,
+    int source_height,
+    int origin_x,
+    int origin_y,
+    int cell_width,
+    int cell_height,
+    int cell_step,
+    int cfa
+) {
+    const int gain_count = map_rows * map_columns * 4;
+    if (gains_array == nullptr || map_rows < 2 || map_columns < 2 ||
+        gain_count <= 0 || env->GetArrayLength(gains_array) != gain_count ||
+        source_width < 2 || source_height < 2 || cell_width <= 0 || cell_height <= 0 ||
+        cell_step <= 0 || cfa < 0 || cfa > 3) {
+        return nullptr;
+    }
+    std::vector<float> source_gains(static_cast<size_t>(gain_count));
+    env->GetFloatArrayRegion(gains_array, 0, gain_count, source_gains.data());
+    if (env->ExceptionCheck()) return nullptr;
+    if (std::any_of(source_gains.begin(), source_gains.end(), [](float gain) {
+        return !std::isfinite(gain) || gain < 1.0f;
+    })) return nullptr;
+
+    std::lock_guard<std::mutex> lock(lens_shading_cache_mutex);
+    const auto cached = lens_shading_cache;
+    bool reusable = cached != nullptr &&
+        cached->source_width == source_width && cached->source_height == source_height &&
+        cached->origin_x == origin_x && cached->origin_y == origin_y &&
+        cached->cell_width == cell_width && cached->cell_height == cell_height &&
+        cached->cell_step == cell_step && cached->cfa == cfa &&
+        cached->map_rows == map_rows && cached->map_columns == map_columns &&
+        cached->source_gains.size() == source_gains.size();
+    if (reusable) {
+        for (size_t index = 0; index < source_gains.size(); ++index) {
+            const float reference = std::max(cached->source_gains[index], 1.0f);
+            if (std::abs(source_gains[index] - cached->source_gains[index]) / reference > 0.01f) {
+                reusable = false;
+                break;
+            }
+        }
+    }
+    if (reusable) return cached;
+
+    static constexpr int kSiteChannels[4][4] = {
+        {0, 1, 2, 3},  // RGGB
+        {1, 0, 3, 2},  // GRBG
+        {1, 3, 0, 2},  // GBRG
+        {3, 1, 2, 0},  // BGGR
+    };
+    auto correction = std::make_shared<LensShadingCorrection>();
+    correction->source_width = source_width;
+    correction->source_height = source_height;
+    correction->origin_x = origin_x;
+    correction->origin_y = origin_y;
+    correction->cell_width = cell_width;
+    correction->cell_height = cell_height;
+    correction->cell_step = cell_step;
+    correction->cfa = cfa;
+    correction->map_rows = map_rows;
+    correction->map_columns = map_columns;
+    correction->source_gains = std::move(source_gains);
+    correction->site_gains_q12.resize(
+        static_cast<size_t>(cell_width) * cell_height * 4
+    );
+    const auto sample = [&](int source_x, int source_y, int channel) -> float {
+        const float map_x = static_cast<float>(source_x) * (map_columns - 1) /
+            static_cast<float>(source_width - 1);
+        const float map_y = static_cast<float>(source_y) * (map_rows - 1) /
+            static_cast<float>(source_height - 1);
+        const int x0 = std::clamp(static_cast<int>(std::floor(map_x)), 0, map_columns - 1);
+        const int y0 = std::clamp(static_cast<int>(std::floor(map_y)), 0, map_rows - 1);
+        const int x1 = std::min(x0 + 1, map_columns - 1);
+        const int y1 = std::min(y0 + 1, map_rows - 1);
+        const float tx = map_x - x0;
+        const float ty = map_y - y0;
+        const auto at = [&](int x, int y) -> float {
+            return correction->source_gains[
+                (static_cast<size_t>(y) * map_columns + x) * 4 + channel
+            ];
+        };
+        const float top = at(x0, y0) + (at(x1, y0) - at(x0, y0)) * tx;
+        const float bottom = at(x0, y1) + (at(x1, y1) - at(x0, y1)) * tx;
+        return top + (bottom - top) * ty;
+    };
+    for (int cell_y = 0; cell_y < cell_height; ++cell_y) {
+        for (int cell_x = 0; cell_x < cell_width; ++cell_x) {
+            const size_t base = (static_cast<size_t>(cell_y) * cell_width + cell_x) * 4;
+            for (int site = 0; site < 4; ++site) {
+                const int source_x = std::clamp(
+                    origin_x + cell_x * cell_step + (site & 1), 0, source_width - 1
+                );
+                const int source_y = std::clamp(
+                    origin_y + cell_y * cell_step + (site >> 1), 0, source_height - 1
+                );
+                const float gain = std::clamp(
+                    sample(source_x, source_y, kSiteChannels[cfa][site]), 1.0f, 16.0f
+                );
+                correction->site_gains_q12[base + site] = static_cast<uint16_t>(
+                    std::min(std::lround(gain * 4096.0f), 65535L)
+                );
+            }
+        }
+    }
+    lens_shading_cache = correction;
+    return correction;
+}
 
 void set_error(const std::string& message) {
     last_error = message;
@@ -92,6 +234,19 @@ bool write_vectors(int fd, std::vector<iovec>& vectors) {
     return true;
 }
 
+void put_le32(uint8_t* destination, size_t offset, uint32_t value) {
+    destination[offset] = static_cast<uint8_t>(value & 0xff);
+    destination[offset + 1] = static_cast<uint8_t>((value >> 8) & 0xff);
+    destination[offset + 2] = static_cast<uint8_t>((value >> 16) & 0xff);
+    destination[offset + 3] = static_cast<uint8_t>((value >> 24) & 0xff);
+}
+
+bool ends_with(const std::string& value, const char* suffix) {
+    const size_t suffix_size = std::strlen(suffix);
+    return value.size() >= suffix_size &&
+        value.compare(value.size() - suffix_size, suffix_size, suffix) == 0;
+}
+
 std::string from_jstring(JNIEnv* env, jstring value) {
     if (value == nullptr) {
         return {};
@@ -106,6 +261,16 @@ std::string from_jstring(JNIEnv* env, jstring value) {
 }
 
 struct Writer {
+    struct CompressedJob {
+        uint64_t sequence = 0;
+        int frame = 0;
+        std::string metadata;
+        std::vector<uint8_t> raw;
+        rawlite::EncodedRaw10Frame encoded;
+        int64_t process_ns = 0;
+        bool encoded_ok = false;
+    };
+
     int raw_fd = -1;
     int metadata_fd = -1;
     int state_fd = -1;
@@ -115,9 +280,11 @@ struct Writer {
     int checkpoint_frames = 0;
     int completed_frames = 0;
     int64_t raw_bytes = 0;
+    int64_t logical_raw_bytes = 0;
     std::string raw_path;
     bool direct_io = false;
     bool staged_io = false;
+    bool compressed_io = false;
     void* staging_buffer = nullptr;
     size_t frame_bytes = 0;
     size_t staging_bytes = 0;
@@ -128,7 +295,29 @@ struct Writer {
     int64_t write_max_ns = 0;
     int write_operations = 0;
     int direct_fallbacks = 0;
+    int compression_fallback_frames = 0;
+    int64_t process_total_ns = 0;
+    int64_t process_max_ns = 0;
+    int64_t enqueue_copy_total_ns = 0;
+    int64_t enqueue_copy_max_ns = 0;
+    int enqueue_operations = 0;
+    int compression_worker_count = 0;
+    int maximum_compression_jobs = 0;
+    int outstanding_compression_jobs = 0;
+    int peak_compression_jobs = 0;
+    uint64_t next_compression_sequence = 0;
+    uint64_t next_write_sequence = 0;
+    bool compression_accepting = false;
+    bool compression_stopping = false;
+    bool compression_failed = false;
+    std::string compression_failure;
+    std::deque<std::unique_ptr<CompressedJob>> compression_jobs;
+    std::vector<std::thread> compression_workers;
+    std::mutex compression_mutex;
+    std::condition_variable compression_available;
+    std::condition_variable compression_order;
     bool closed = false;
+    bool closing = false;
     std::mutex mutex;
 
     ~Writer() {
@@ -159,6 +348,42 @@ struct Writer {
             errno = EINVAL;
             set_errno_error("calculate RAW frame size");
             return false;
+        }
+
+        compressed_io = ends_with(raw_path, ".raw10c");
+        if (compressed_io) {
+            direct_io = false;
+            staged_io = false;
+            direct_batch_frames = 0;
+            if (!open_buffered_raw(true)) {
+                return false;
+            }
+            std::array<uint8_t, kCompressedContainerHeaderBytes> header{};
+            std::copy(
+                kCompressedContainerMagic.begin(),
+                kCompressedContainerMagic.end(),
+                header.begin()
+            );
+            put_le32(header.data(), 8, static_cast<uint32_t>(kCompressedContainerHeaderBytes));
+            put_le32(header.data(), 12, 1);
+            put_le32(header.data(), 16, static_cast<uint32_t>(width));
+            put_le32(header.data(), 20, static_cast<uint32_t>(height));
+            put_le32(header.data(), 24, static_cast<uint32_t>(row_bytes));
+            put_le32(header.data(), 28, static_cast<uint32_t>(frame_bytes));
+            put_le32(header.data(), 32, 1);  // CFA delta transform.
+            put_le32(header.data(), 36, 1);  // Deflate codec.
+            if (!write_all(raw_fd, header.data(), header.size())) {
+                set_errno_error("write compressed RAW header");
+                return false;
+            }
+            raw_bytes = static_cast<int64_t>(header.size());
+            __android_log_print(
+                ANDROID_LOG_INFO,
+                kLogTag,
+                "RAW writer opened lossless container frame_bytes=%zu",
+                frame_bytes
+            );
+            return true;
         }
 
         const size_t divisor = std::gcd(frame_bytes, kDirectAlignment);
@@ -231,34 +456,57 @@ struct Writer {
             set_errno_error("write metadata header");
             return false;
         }
-        return write_state("recording", true);
+        if (!write_state("recording", true)) {
+            return false;
+        }
+        return !compressed_io || start_compression_workers();
     }
 
     bool write_state(const char* status, bool sync) {
-        char state[512];
-        const char* io_mode = direct_io ? "direct" : (staged_io ? "buffered_staged" : "buffered");
+        char state[1024];
+        const char* io_mode = compressed_io
+            ? "lossless_huffman_parallel"
+            : (direct_io ? "direct" : (staged_io ? "buffered_staged" : "buffered"));
         const int64_t average_write_us = write_operations > 0
             ? write_total_ns / write_operations / 1000
             : 0;
         const int length = std::snprintf(
             state,
             sizeof(state),
-            "version=1\nstatus=%s\ncompleted_frames=%d\nraw_bytes=%lld\n"
+            "version=2\nstatus=%s\ncompleted_frames=%d\nraw_bytes=%lld\n"
+            "logical_raw_bytes=%lld\ncontainer=%s\n"
             "width=%d\nheight=%d\nrow_bytes=%d\nio_mode=%s\n"
             "direct_batch_frames=%d\ndirect_fallbacks=%d\n"
-            "write_operations=%d\nwrite_average_us=%lld\nwrite_max_us=%lld\n",
+            "compression_fallback_frames=%d\ncompression_workers=%d\n"
+            "compression_peak_pending=%d\n"
+            "write_operations=%d\nwrite_average_us=%lld\nwrite_max_us=%lld\n"
+            "process_average_us=%lld\nprocess_max_us=%lld\n"
+            "enqueue_copy_average_us=%lld\nenqueue_copy_max_us=%lld\n",
             status,
             completed_frames,
             static_cast<long long>(raw_bytes),
+            static_cast<long long>(logical_raw_bytes),
+            compressed_io ? "rawlite-raw10c" : "rawlite-raw10",
             width,
             height,
             row_bytes,
             io_mode,
             direct_batch_frames,
             direct_fallbacks,
+            compression_fallback_frames,
+            compression_worker_count,
+            peak_compression_jobs,
             write_operations,
             static_cast<long long>(average_write_us),
-            static_cast<long long>(write_max_ns / 1000)
+            static_cast<long long>(write_max_ns / 1000),
+            static_cast<long long>(
+                completed_frames > 0 ? process_total_ns / completed_frames / 1000 : 0
+            ),
+            static_cast<long long>(process_max_ns / 1000),
+            static_cast<long long>(
+                enqueue_operations > 0 ? enqueue_copy_total_ns / enqueue_operations / 1000 : 0
+            ),
+            static_cast<long long>(enqueue_copy_max_ns / 1000)
         );
         if (length <= 0 || length >= static_cast<int>(sizeof(state))) {
             errno = EOVERFLOW;
@@ -372,11 +620,235 @@ struct Writer {
 
         completed_frames += staged_frames;
         raw_bytes += static_cast<int64_t>(logical_bytes);
+        logical_raw_bytes += static_cast<int64_t>(logical_bytes);
         staged_frames = 0;
         staged_metadata.clear();
         if (checkpoint_frames > 0 && completed_frames % checkpoint_frames == 0) {
             return checkpoint();
         }
+        return true;
+    }
+
+    bool write_compressed_job(CompressedJob& job) {
+        process_total_ns += job.process_ns;
+        process_max_ns = std::max(process_max_ns, job.process_ns);
+        if ((job.encoded.flags & rawlite::kRaw10FrameFlagDeflate) == 0) {
+            ++compression_fallback_frames;
+        }
+
+        std::array<uint8_t, kCompressedFrameHeaderBytes> header{};
+        std::copy(kCompressedFrameMagic.begin(), kCompressedFrameMagic.end(), header.begin());
+        put_le32(header.data(), 4, static_cast<uint32_t>(kCompressedFrameHeaderBytes));
+        put_le32(header.data(), 8, static_cast<uint32_t>(job.frame));
+        put_le32(header.data(), 12, job.encoded.flags);
+        put_le32(header.data(), 16, static_cast<uint32_t>(frame_bytes));
+        put_le32(header.data(), 20, static_cast<uint32_t>(job.encoded.payload.size()));
+        put_le32(header.data(), 24, job.encoded.raw_crc32);
+        put_le32(header.data(), 28, job.encoded.payload_crc32);
+
+        std::vector<iovec> chunks{
+            iovec{.iov_base = header.data(), .iov_len = header.size()},
+            iovec{
+                .iov_base = job.encoded.payload.data(),
+                .iov_len = job.encoded.payload.size(),
+            },
+        };
+        const auto write_started = std::chrono::steady_clock::now();
+        if (!write_vectors(raw_fd, chunks)) {
+            set_errno_error("write compressed RAW frame");
+            return false;
+        }
+        const auto write_finished = std::chrono::steady_clock::now();
+        const int64_t write_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            write_finished - write_started
+        ).count();
+        write_total_ns += write_ns;
+        write_max_ns = std::max(write_max_ns, write_ns);
+        ++write_operations;
+
+        if (!write_all(metadata_fd, job.metadata.data(), job.metadata.size())) {
+            set_errno_error("write compressed frame metadata");
+            return false;
+        }
+        ++completed_frames;
+        logical_raw_bytes += static_cast<int64_t>(frame_bytes);
+        raw_bytes += static_cast<int64_t>(header.size() + job.encoded.payload.size());
+        if (checkpoint_frames > 0 && completed_frames % checkpoint_frames == 0) {
+            return checkpoint();
+        }
+        return true;
+    }
+
+    void compression_worker() {
+        std::vector<uint8_t> transform_scratch;
+        while (true) {
+            std::unique_ptr<CompressedJob> job;
+            {
+                std::unique_lock<std::mutex> lock(compression_mutex);
+                compression_available.wait(lock, [this] {
+                    return compression_stopping || !compression_jobs.empty();
+                });
+                if (compression_jobs.empty()) {
+                    if (compression_stopping) return;
+                    continue;
+                }
+                job = std::move(compression_jobs.front());
+                compression_jobs.pop_front();
+            }
+
+            const auto process_started = std::chrono::steady_clock::now();
+            job->encoded_ok = rawlite::encode_raw10_lossless(
+                job->raw.data(),
+                width,
+                height,
+                row_bytes,
+                transform_scratch,
+                job->encoded
+            );
+            const auto process_finished = std::chrono::steady_clock::now();
+            job->process_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                process_finished - process_started
+            ).count();
+            std::unique_lock<std::mutex> lock(compression_mutex);
+            compression_order.wait(lock, [this, &job] {
+                return compression_failed || job->sequence == next_write_sequence;
+            });
+            if (!compression_failed) {
+                if (!job->encoded_ok) {
+                    compression_failed = true;
+                    compression_failure = "compress RAW10 frame failed";
+                } else {
+                    lock.unlock();
+                    const bool written = write_compressed_job(*job);
+                    const std::string write_error = last_error;
+                    lock.lock();
+                    if (!written) {
+                        compression_failed = true;
+                        compression_failure = write_error.empty()
+                            ? "write compressed RAW10 frame failed"
+                            : write_error;
+                    }
+                }
+                ++next_write_sequence;
+            }
+            --outstanding_compression_jobs;
+            compression_order.notify_all();
+        }
+    }
+
+    bool start_compression_workers() {
+        const unsigned cores = std::thread::hardware_concurrency();
+        compression_worker_count = static_cast<int>(std::clamp(
+            cores == 0 ? 3U : (cores + 2U) / 3U,
+            2U,
+            4U
+        ));
+        maximum_compression_jobs = compression_worker_count * 4;
+        compression_accepting = true;
+        compression_stopping = false;
+        try {
+            compression_workers.reserve(static_cast<size_t>(compression_worker_count));
+            for (int index = 0; index < compression_worker_count; ++index) {
+                compression_workers.emplace_back([this] { compression_worker(); });
+            }
+        } catch (const std::system_error& error) {
+            compression_accepting = false;
+            compression_stopping = true;
+            compression_available.notify_all();
+            for (std::thread& worker : compression_workers) {
+                if (worker.joinable()) worker.join();
+            }
+            compression_workers.clear();
+            set_error(std::string("start RAW compression workers: ") + error.what());
+            return false;
+        }
+        __android_log_print(
+            ANDROID_LOG_INFO,
+            kLogTag,
+            "RAW compression pipeline workers=%d maximum_jobs=%d",
+            compression_worker_count,
+            maximum_compression_jobs
+        );
+        return true;
+    }
+
+    bool stop_compression_workers(bool drain) {
+        {
+            std::lock_guard<std::mutex> lock(compression_mutex);
+            compression_accepting = false;
+            if (!drain) {
+                outstanding_compression_jobs -= static_cast<int>(compression_jobs.size());
+                compression_jobs.clear();
+            }
+            compression_stopping = true;
+        }
+        compression_available.notify_all();
+        compression_order.notify_all();
+        for (std::thread& worker : compression_workers) {
+            if (worker.joinable()) worker.join();
+        }
+        compression_workers.clear();
+        if (compression_failed) {
+            set_error(compression_failure.empty() ? "RAW compression pipeline failed" : compression_failure);
+            return false;
+        }
+        return true;
+    }
+
+    bool enqueue_compressed_frame(
+        uint8_t* buffer,
+        int buffer_offset,
+        int row_stride,
+        int frame,
+        const char* metadata,
+        size_t metadata_length
+    ) {
+        {
+            std::lock_guard<std::mutex> lock(compression_mutex);
+            if (!compression_accepting || compression_failed) {
+                set_error(compression_failure.empty() ? "RAW compression writer is closing" : compression_failure);
+                errno = EPIPE;
+                return false;
+            }
+            if (outstanding_compression_jobs >= maximum_compression_jobs) {
+                set_error("RAW compression queue is full");
+                errno = EAGAIN;
+                return false;
+            }
+        }
+
+        const auto copy_started = std::chrono::steady_clock::now();
+        auto job = std::make_unique<CompressedJob>();
+        job->frame = frame;
+        job->metadata.assign(metadata, metadata_length);
+        job->raw.resize(frame_bytes);
+        copy_frame(buffer, buffer_offset, row_stride, job->raw.data());
+        const auto copy_finished = std::chrono::steady_clock::now();
+        const int64_t copy_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            copy_finished - copy_started
+        ).count();
+
+        {
+            std::lock_guard<std::mutex> lock(compression_mutex);
+            if (!compression_accepting || compression_failed) {
+                set_error(compression_failure.empty() ? "RAW compression writer is closing" : compression_failure);
+                errno = EPIPE;
+                return false;
+            }
+            if (outstanding_compression_jobs >= maximum_compression_jobs) {
+                set_error("RAW compression queue is full");
+                errno = EAGAIN;
+                return false;
+            }
+            job->sequence = next_compression_sequence++;
+            compression_jobs.push_back(std::move(job));
+            ++outstanding_compression_jobs;
+            peak_compression_jobs = std::max(peak_compression_jobs, outstanding_compression_jobs);
+            enqueue_copy_total_ns += copy_ns;
+            enqueue_copy_max_ns = std::max(enqueue_copy_max_ns, copy_ns);
+            ++enqueue_operations;
+        }
+        compression_available.notify_one();
         return true;
     }
 
@@ -396,8 +868,8 @@ struct Writer {
         float wb_green_odd,
         float wb_blue
     ) {
-        std::lock_guard<std::mutex> lock(mutex);
-        if (closed || raw_fd < 0 || metadata_fd < 0) {
+        std::unique_lock<std::mutex> lock(mutex);
+        if (closed || closing || raw_fd < 0 || metadata_fd < 0) {
             set_error("writer is closed");
             return false;
         }
@@ -433,6 +905,17 @@ struct Writer {
         if (metadata_length <= 0 || metadata_length >= static_cast<int>(sizeof(metadata))) {
             set_error("metadata line is too long");
             return false;
+        }
+        if (compressed_io) {
+            lock.unlock();
+            return enqueue_compressed_frame(
+                buffer,
+                buffer_offset,
+                row_stride,
+                frame,
+                metadata,
+                static_cast<size_t>(metadata_length)
+            );
         }
         if (staged_io) {
             auto* destination = static_cast<uint8_t*>(staging_buffer) +
@@ -485,6 +968,7 @@ struct Writer {
         }
         ++completed_frames;
         raw_bytes += static_cast<int64_t>(frame_bytes);
+        logical_raw_bytes += static_cast<int64_t>(frame_bytes);
         if (checkpoint_frames > 0 && completed_frames % checkpoint_frames == 0) {
             return checkpoint();
         }
@@ -492,11 +976,18 @@ struct Writer {
     }
 
     int close_files(bool finalize) {
-        std::lock_guard<std::mutex> lock(mutex);
-        if (closed) {
-            return 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (closed || closing) {
+                return 0;
+            }
+            closing = true;
         }
         int result = 0;
+        if (compressed_io && !stop_compression_workers(finalize)) {
+            result = -EIO;
+        }
+        std::lock_guard<std::mutex> lock(mutex);
         if (finalize && raw_fd >= 0 && metadata_fd >= 0 && state_fd >= 0) {
             if (!flush_staged(true) || ::fdatasync(raw_fd) < 0 || ::fdatasync(metadata_fd) < 0 ||
                 !write_state("closed", true)) {
@@ -517,17 +1008,24 @@ struct Writer {
         metadata_fd = -1;
         state_fd = -1;
         closed = true;
+        closing = false;
         __android_log_print(
             ANDROID_LOG_INFO,
             kLogTag,
-            "RAW writer closed mode=%s frames=%d bytes=%lld writes=%d avg_us=%lld max_us=%lld fallbacks=%d result=%d",
-            direct_io ? "direct" : (staged_io ? "buffered_staged" : "buffered"),
+            "RAW writer closed mode=%s frames=%d bytes=%lld logical=%lld writes=%d avg_us=%lld max_us=%lld fallbacks=%d compression_fallbacks=%d process_avg_us=%lld result=%d",
+            compressed_io ? "lossless_huffman_parallel" :
+                (direct_io ? "direct" : (staged_io ? "buffered_staged" : "buffered")),
             completed_frames,
             static_cast<long long>(raw_bytes),
+            static_cast<long long>(logical_raw_bytes),
             write_operations,
             static_cast<long long>(write_operations > 0 ? write_total_ns / write_operations / 1000 : 0),
             static_cast<long long>(write_max_ns / 1000),
             direct_fallbacks,
+            compression_fallback_frames,
+            static_cast<long long>(
+                completed_frames > 0 ? process_total_ns / completed_frames / 1000 : 0
+            ),
             result
         );
         return result;
@@ -654,6 +1152,57 @@ Java_com_example_rawlite_NativeRawWriter_lastError(
     return env->NewStringUTF(last_error.c_str());
 }
 
+extern "C" JNIEXPORT jint JNICALL
+Java_com_example_rawlite_NativeRawCompression_decodeFrame(
+    JNIEnv* env,
+    jobject,
+    jobject payload_buffer,
+    jint payload_size,
+    jint flags,
+    jlong raw_crc32,
+    jlong payload_crc32,
+    jobject output_buffer,
+    jint width,
+    jint height,
+    jint row_bytes
+) {
+    last_error.clear();
+    auto* payload = static_cast<uint8_t*>(env->GetDirectBufferAddress(payload_buffer));
+    auto* output = static_cast<uint8_t*>(env->GetDirectBufferAddress(output_buffer));
+    const jlong payload_capacity = env->GetDirectBufferCapacity(payload_buffer);
+    const jlong output_capacity = env->GetDirectBufferCapacity(output_buffer);
+    const int64_t frame_bytes = static_cast<int64_t>(row_bytes) * height;
+    if (payload == nullptr || output == nullptr || payload_size <= 0 ||
+        payload_size > payload_capacity || frame_bytes <= 0 || frame_bytes > output_capacity) {
+        set_error("invalid compressed RAW buffers");
+        return -EINVAL;
+    }
+    const uint32_t actual_payload_crc = static_cast<uint32_t>(
+        ::crc32(0L, payload, static_cast<uInt>(payload_size))
+    );
+    if (actual_payload_crc != static_cast<uint32_t>(payload_crc32)) {
+        set_error("compressed RAW payload CRC mismatch");
+        return -EBADMSG;
+    }
+    std::vector<uint8_t> scratch;
+    if (!rawlite::decode_raw10_lossless(
+            payload,
+            static_cast<size_t>(payload_size),
+            static_cast<uint32_t>(flags),
+            static_cast<uint32_t>(raw_crc32),
+            width,
+            height,
+            row_bytes,
+            output,
+            static_cast<size_t>(output_capacity),
+            scratch
+        )) {
+        set_error("compressed RAW frame decode or CRC validation failed");
+        return -EBADMSG;
+    }
+    return 0;
+}
+
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
     JNIEnv* env,
@@ -679,7 +1228,10 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
     jfloat green_even_gain,
     jfloat green_odd_gain,
     jfloat blue_gain,
-    jfloatArray camera_to_rec2020_array
+    jfloatArray camera_to_rec2020_array,
+    jfloatArray lens_shading_gains_array,
+    jint lens_shading_rows,
+    jint lens_shading_columns
 ) {
     const auto started = std::chrono::steady_clock::now();
     auto* raw_base = static_cast<uint8_t*>(env->GetDirectBufferAddress(raw_buffer));
@@ -729,6 +1281,20 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
     const float safe_green_even_gain = safe_gain(green_even_gain);
     const float safe_green_odd_gain = safe_gain(green_odd_gain);
     const float safe_blue_gain = safe_gain(blue_gain);
+    const auto lens_shading = lens_shading_correction(
+        env,
+        lens_shading_gains_array,
+        lens_shading_rows,
+        lens_shading_columns,
+        source_width,
+        source_height,
+        crop_x,
+        crop_y,
+        output_width / 2,
+        output_height / 2,
+        2,
+        cfa
+    );
 
     constexpr int kLinearScale = 4096;
     constexpr int kMatrixScale = 16384;
@@ -820,10 +1386,10 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
     const auto convert_rows = [&](int first_y, int end_y) {
         for (int y = first_y; y < end_y; y += 2) {
             for (int x = 0; x < output_width; x += 2) {
-            const int p00 = raw10_at(x, y);
-            const int p01 = raw10_at(x + 1, y);
-            const int p10 = raw10_at(x, y + 1);
-            const int p11 = raw10_at(x + 1, y + 1);
+            int p00 = raw10_at(x, y);
+            int p01 = raw10_at(x + 1, y);
+            int p10 = raw10_at(x, y + 1);
+            int p11 = raw10_at(x + 1, y + 1);
             int r = 0;
             int b_value = 0;
             int g0 = 0;
@@ -844,10 +1410,40 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
                     break;
             }
 
-            const int rf = red_lut[std::clamp(r, 0, 1023)];
-            const int bf = blue_lut[std::clamp(b_value, 0, 1023)];
-            const int gf0 = green_even_lut[std::clamp(g0, 0, 1023)];
-            const int gf1 = green_odd_lut[std::clamp(g1, 0, 1023)];
+            int rf = red_lut[std::clamp(r, 0, 1023)];
+            int bf = blue_lut[std::clamp(b_value, 0, 1023)];
+            int gf0 = green_even_lut[std::clamp(g0, 0, 1023)];
+            int gf1 = green_odd_lut[std::clamp(g1, 0, 1023)];
+            if (lens_shading != nullptr) {
+                const size_t gain_base =
+                    (static_cast<size_t>(y / 2) * (output_width / 2) + x / 2) * 4;
+                const auto corrected = [&](int value, int site) -> int {
+                    return std::min(
+                        (value * static_cast<int>(lens_shading->site_gains_q12[gain_base + site]) +
+                            2048) >> 12,
+                        kLinearScale
+                    );
+                };
+                switch (cfa) {
+                    case 1:  // GRBG: G0,R,B,G1
+                        gf0 = corrected(gf0, 0); rf = corrected(rf, 1);
+                        bf = corrected(bf, 2); gf1 = corrected(gf1, 3);
+                        break;
+                    case 2:  // GBRG: G0,B,R,G1
+                        gf0 = corrected(gf0, 0); bf = corrected(bf, 1);
+                        rf = corrected(rf, 2); gf1 = corrected(gf1, 3);
+                        break;
+                    case 3:  // BGGR: B,G0,G1,R
+                        bf = corrected(bf, 0); gf0 = corrected(gf0, 1);
+                        gf1 = corrected(gf1, 2); rf = corrected(rf, 3);
+                        break;
+                    case 0:
+                    default:  // RGGB: R,G0,G1,B
+                        rf = corrected(rf, 0); gf0 = corrected(gf0, 1);
+                        gf1 = corrected(gf1, 2); bf = corrected(bf, 3);
+                        break;
+                }
+            }
             const int gf = (gf0 + gf1) >> 1;
             const auto rec2020_hlg = [
                 &camera_to_rec2020_q,
@@ -925,15 +1521,24 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
         }
     };
 
-    // PURE 10 spends its frame budget in Bayer -> P010 conversion. Split 2K and larger
-    // frames between one worker and the calling thread so 30 FPS has real headroom.
+    // PURE 10 spends its frame budget in Bayer -> P010 conversion. Three independent
+    // row bands keep lens-shading correction inside the 30 FPS budget on Tensor-class SoCs.
     if (static_cast<int64_t>(output_width) * output_height >= 1920LL * 1080LL) {
-        const int split_y = (output_height / 2) & ~1;
+        const int first_split_y = (output_height / 3) & ~1;
+        const int second_split_y = ((output_height * 2) / 3) & ~1;
+        std::thread first_band;
+        std::thread second_band;
         try {
-            std::thread upper_half([&] { convert_rows(0, split_y); });
-            convert_rows(split_y, output_height);
-            upper_half.join();
+            first_band = std::thread([&] { convert_rows(0, first_split_y); });
+            second_band = std::thread([&] {
+                convert_rows(first_split_y, second_split_y);
+            });
+            convert_rows(second_split_y, output_height);
+            first_band.join();
+            second_band.join();
         } catch (const std::system_error&) {
+            if (first_band.joinable()) first_band.join();
+            if (second_band.joinable()) second_band.join();
             convert_rows(0, output_height);
         }
     } else {
@@ -998,7 +1603,10 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToArgbPreview(
     jfloat red_gain,
     jfloat green_even_gain,
     jfloat green_odd_gain,
-    jfloat blue_gain
+    jfloat blue_gain,
+    jfloatArray lens_shading_gains_array,
+    jint lens_shading_rows,
+    jint lens_shading_columns
 ) {
     const auto started = std::chrono::steady_clock::now();
     auto* raw_base = static_cast<uint8_t*>(env->GetDirectBufferAddress(raw_buffer));
@@ -1032,6 +1640,21 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToArgbPreview(
         })) {
         return -EINVAL;
     }
+
+    const auto lens_shading = lens_shading_correction(
+        env,
+        lens_shading_gains_array,
+        lens_shading_rows,
+        lens_shading_columns,
+        source_width,
+        source_height,
+        0,
+        0,
+        output_width,
+        output_height,
+        sample_step * 2,
+        cfa
+    );
 
     void* bitmap_pixels = nullptr;
     if (AndroidBitmap_lockPixels(env, output_bitmap, &bitmap_pixels) !=
@@ -1068,7 +1691,9 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToArgbPreview(
         red_gain,
         green_even_gain,
         green_odd_gain,
-        blue_gain
+        blue_gain,
+        lens_shading,
+        output_width
     ](int output_x, int output_y) -> Rgb {
         const int source_x = std::min(output_x * sample_step * 2, source_width - 2);
         const int source_y = std::min(output_y * sample_step * 2, source_height - 2);
@@ -1079,8 +1704,13 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToArgbPreview(
             const int x = source_x + (site & 1);
             const int y = source_y + (site >> 1);
             const int black = black_levels[site];
-            const float normalized = std::max(raw10_at(x, y) - black, 0) /
+            float normalized = std::max(raw10_at(x, y) - black, 0) /
                 static_cast<float>(white_level - black);
+            if (lens_shading != nullptr) {
+                const size_t gain_index =
+                    (static_cast<size_t>(output_y) * output_width + output_x) * 4 + site;
+                normalized *= lens_shading->site_gains_q12[gain_index] / 4096.0f;
+            }
             switch (kCfaColors[cfa][site]) {
                 case 0:
                     result.red = normalized * red_gain;

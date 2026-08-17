@@ -8,7 +8,9 @@ import csv
 import json
 import os
 import shutil
+import struct
 import wave
+import zlib
 from fractions import Fraction
 from pathlib import Path
 
@@ -22,6 +24,16 @@ CFA_PATTERNS = {
     "GBRG": (1, 2, 0, 1),
     "BGGR": (2, 1, 1, 0),
 }
+
+RAW10C_MAGIC = b"RLR10C01"
+RAW10C_FRAME_MAGIC = b"RLF1"
+RAW10C_HEADER_BYTES = 64
+RAW10C_FRAME_HEADER_BYTES = 32
+RAW10C_FLAG_DEFLATE = 1
+RAW10C_FLAG_CFA_DELTA = 2
+LENS_SHADING_FILE = "lens_shading.bin"
+LENS_SHADING_MAGIC = b"RLLSM001"
+LENS_SHADING_RECORD_MAGIC = b"LSM1"
 
 
 # Pixel 6 main-camera DNG profile extracted from
@@ -42,7 +54,7 @@ PIXEL_6_MAIN_DNG_PROFILE = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Convert clip.raw10 + metadata into a CinemaDNG sequence."
+        description="Convert a RawLite RAW10 recording into a CinemaDNG sequence."
     )
     parser.add_argument("recording", type=Path, help="RawLite recording directory")
     parser.add_argument(
@@ -70,6 +82,199 @@ def unpack_raw10(frame: np.ndarray, width: int, height: int) -> np.ndarray:
     output[:, :, 2] = (groups[:, :, 2] << 2) | ((low >> 4) & 0x03)
     output[:, :, 3] = (groups[:, :, 3] << 2) | ((low >> 6) & 0x03)
     return output.reshape(height, width)
+
+
+def inverse_cfa_delta(transformed: bytes, width: int, height: int) -> bytes:
+    pixel_count = width * height
+    expected = pixel_count + (pixel_count + 3) // 4
+    if len(transformed) != expected:
+        raise ValueError("invalid RAW10C transform size")
+    encoded = np.frombuffer(transformed, dtype=np.uint8)
+    low = encoded[:pixel_count].astype(np.uint16).reshape(height, width)
+    high_packed = encoded[pixel_count:]
+    indices = np.arange(pixel_count, dtype=np.int64)
+    high = (
+        (high_packed[indices // 4] >> ((indices & 3) * 2)) & 0x03
+    ).astype(np.uint16).reshape(height, width)
+    residual = low | (high << 8)
+    mosaic = np.empty((height, width), dtype=np.uint16)
+    for parity_y in range(2):
+        for parity_x in range(2):
+            plane_residual = residual[parity_y::2, parity_x::2].astype(np.uint32)
+            row_starts = np.cumsum(plane_residual[:, 0], dtype=np.uint32) & 0x03FF
+            plane = np.empty_like(plane_residual)
+            plane[:, 0] = row_starts
+            if plane.shape[1] > 1:
+                plane[:, 1:] = (
+                    row_starts[:, None]
+                    + np.cumsum(plane_residual[:, 1:], axis=1, dtype=np.uint32)
+                ) & 0x03FF
+            mosaic[parity_y::2, parity_x::2] = plane.astype(np.uint16)
+    groups = mosaic.reshape(height, width // 4, 4)
+    packed = np.empty((height, width // 4, 5), dtype=np.uint8)
+    packed[:, :, :4] = (groups >> 2).astype(np.uint8)
+    packed[:, :, 4] = (
+        (groups[:, :, 0] & 0x03)
+        | ((groups[:, :, 1] & 0x03) << 2)
+        | ((groups[:, :, 2] & 0x03) << 4)
+        | ((groups[:, :, 3] & 0x03) << 6)
+    ).astype(np.uint8)
+    return packed.tobytes()
+
+
+def read_lens_shading_maps(recording: Path) -> dict[int, tuple[int, int, tuple[float, ...]]]:
+    path = recording / LENS_SHADING_FILE
+    if not path.is_file():
+        return {}
+    result: dict[int, tuple[int, int, tuple[float, ...]]] = {}
+    with path.open("rb") as stream:
+        header = stream.read(32)
+        if len(header) != 32 or header[:8] != LENS_SHADING_MAGIC:
+            return {}
+        version, header_bytes = struct.unpack_from("<II", header, 8)
+        if version != 1 or header_bytes < 32:
+            return {}
+        stream.seek(header_bytes)
+        while True:
+            record = stream.read(24)
+            if len(record) < 24 or record[:4] != LENS_SHADING_RECORD_MAGIC:
+                break
+            frame, rows, columns, count, expected_crc = struct.unpack_from("<iiiii", record, 4)
+            if rows < 2 or columns < 2 or count != rows * columns * 4:
+                break
+            payload = stream.read(count * 4)
+            if len(payload) != count * 4:
+                break
+            if zlib.crc32(payload) & 0xFFFFFFFF != expected_crc & 0xFFFFFFFF:
+                continue
+            result[frame] = (rows, columns, struct.unpack(f"<{count}f", payload))
+    return result
+
+
+def gain_map_opcode_list(
+    shading: tuple[int, int, tuple[float, ...]], width: int, height: int, cfa: str
+) -> bytes:
+    rows, columns, gains = shading
+    channels = {
+        "RGGB": (0, 1, 2, 3),
+        "GRBG": (1, 0, 3, 2),
+        "GBRG": (1, 3, 0, 2),
+        "BGGR": (3, 1, 2, 0),
+    }[cfa]
+    parameter_bytes = 76 + rows * columns * 4
+    output = bytearray(struct.pack(">I", 4))
+    for site, channel in enumerate(channels):
+        output.extend(struct.pack(">IIII", 9, 0x01030000, 0, parameter_bytes))
+        output.extend(
+            struct.pack(
+                ">IIIIIIIIII",
+                site // 2,
+                site % 2,
+                height,
+                width,
+                0,
+                1,
+                2,
+                2,
+                rows,
+                columns,
+            )
+        )
+        output.extend(struct.pack(">ddddI", 1.0 / (rows - 1), 1.0 / (columns - 1), 0.0, 0.0, 1))
+        for row in range(rows):
+            for column in range(columns):
+                output.extend(struct.pack(">f", gains[(row * columns + column) * 4 + channel]))
+    return bytes(output)
+
+
+class Raw10FrameReader:
+    def __init__(self, recording: Path, width: int, height: int, row_bytes: int):
+        self.width = width
+        self.height = height
+        self.row_bytes = row_bytes
+        self.frame_bytes = row_bytes * height
+        self.legacy_path = recording / "clip.raw10"
+        self.compressed_path = recording / "clip.raw10c"
+        self._legacy = None
+        self._stream = None
+        self._chunks: list[tuple[int, int, int, int, int]] = []
+        if self.compressed_path.is_file():
+            self._open_compressed()
+        elif self.legacy_path.is_file():
+            size = self.legacy_path.stat().st_size
+            self.frame_count, self.trailing_bytes = divmod(size, self.frame_bytes)
+            self._legacy = np.memmap(self.legacy_path, dtype=np.uint8, mode="r")
+        else:
+            raise FileNotFoundError("missing clip.raw10 or clip.raw10c")
+
+    def _open_compressed(self) -> None:
+        self._stream = self.compressed_path.open("rb")
+        header = self._stream.read(RAW10C_HEADER_BYTES)
+        if len(header) != RAW10C_HEADER_BYTES or header[:8] != RAW10C_MAGIC:
+            raise ValueError("invalid RAW10C header")
+        header_bytes, version, width, height, row_bytes, frame_bytes = struct.unpack_from(
+            "<6I", header, 8
+        )
+        if (
+            header_bytes != RAW10C_HEADER_BYTES
+            or version != 1
+            or (width, height, row_bytes, frame_bytes)
+            != (self.width, self.height, self.row_bytes, self.frame_bytes)
+        ):
+            raise ValueError("RAW10C geometry or version does not match clip.json")
+        offset = RAW10C_HEADER_BYTES
+        size = self.compressed_path.stat().st_size
+        while offset + RAW10C_FRAME_HEADER_BYTES <= size:
+            self._stream.seek(offset)
+            frame_header = self._stream.read(RAW10C_FRAME_HEADER_BYTES)
+            if len(frame_header) != RAW10C_FRAME_HEADER_BYTES or frame_header[:4] != RAW10C_FRAME_MAGIC:
+                break
+            header_size, _, flags, raw_size, payload_size, raw_crc, payload_crc = struct.unpack_from(
+                "<7I", frame_header, 4
+            )
+            payload_offset = offset + RAW10C_FRAME_HEADER_BYTES
+            if (
+                header_size != RAW10C_FRAME_HEADER_BYTES
+                or raw_size != self.frame_bytes
+                or payload_size <= 0
+                or payload_size > self.frame_bytes + 65_536
+                or payload_offset + payload_size > size
+            ):
+                break
+            self._chunks.append((payload_offset, payload_size, flags, raw_crc, payload_crc))
+            offset = payload_offset + payload_size
+        self.frame_count = len(self._chunks)
+        self.trailing_bytes = size - offset
+
+    def read(self, index: int) -> np.ndarray:
+        if index < 0 or index >= self.frame_count:
+            raise IndexError(index)
+        if self._legacy is not None:
+            start = index * self.frame_bytes
+            return np.asarray(self._legacy[start : start + self.frame_bytes], dtype=np.uint8)
+        assert self._stream is not None
+        payload_offset, payload_size, flags, raw_crc, payload_crc = self._chunks[index]
+        self._stream.seek(payload_offset)
+        payload = self._stream.read(payload_size)
+        if len(payload) != payload_size or zlib.crc32(payload) & 0xFFFFFFFF != payload_crc:
+            raise ValueError(f"RAW10C payload CRC mismatch at frame {index}")
+        decoded = zlib.decompress(payload) if flags & RAW10C_FLAG_DEFLATE else payload
+        if flags & RAW10C_FLAG_CFA_DELTA:
+            decoded = inverse_cfa_delta(decoded, self.width, self.height)
+        if len(decoded) != self.frame_bytes or zlib.crc32(decoded) & 0xFFFFFFFF != raw_crc:
+            raise ValueError(f"RAW10C raw CRC mismatch at frame {index}")
+        return np.frombuffer(decoded, dtype=np.uint8)
+
+    def close(self) -> None:
+        if self._stream is not None:
+            self._stream.close()
+        self._legacy = None
+
+    def __enter__(self) -> "Raw10FrameReader":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
 
 
 def rational(value: float, limit: int = 1_000_000) -> tuple[int, int]:
@@ -350,6 +555,7 @@ def write_playback_metadata(
 def dng_tags(
     metadata: dict,
     row: dict[str, str],
+    shading: tuple[int, int, tuple[float, ...]] | None = None,
 ) -> list[tuple[int, str, int, object, bool]]:
     width = int(metadata["width"])
     height = int(metadata["height"])
@@ -379,7 +585,7 @@ def dng_tags(
         (33434, "2I", 1, rational(int(row["exposure_ns"]) / 1e9), False),
         (34855, "H", 1, int(row["iso"]), False),
         (50706, "B", 4, (1, 4, 0, 0), False),
-        (50707, "B", 4, (1, 1, 0, 0), False),
+        (50707, "B", 4, (1, 3, 0, 0) if shading else (1, 1, 0, 0), False),
         (50708, "s", 0, metadata.get("unique_camera_model", f"RawLite {camera_name}"), False),
         (50710, "B", 3, (0, 1, 2), False),
         (50711, "H", 1, 1, False),
@@ -420,6 +626,9 @@ def dng_tags(
         values = metadata.get(key, [])
         if len(values) == 9:
             tags.append((tag, "2i", 9, matrix_tag(values), False))
+    if shading:
+        opcode_list = gain_map_opcode_list(shading, width, height, metadata["cfa"])
+        tags.append((51009, "B", len(opcode_list), tuple(opcode_list), False))
     return tags
 
 
@@ -428,6 +637,7 @@ def write_dng(
     mosaic: np.ndarray,
     metadata: dict,
     row: dict[str, str],
+    shading: tuple[int, int, tuple[float, ...]] | None = None,
 ) -> None:
     """Write a conservative, uncompressed DNG accepted as CinemaDNG by Resolve."""
     tifffile.imwrite(
@@ -440,8 +650,22 @@ def write_dng(
         rowsperstrip=1,
         resolution=(72, 72),
         resolutionunit="INCH",
-        extratags=dng_tags(metadata, row),
+        extratags=dng_tags(metadata, row, shading),
     )
+    if shading:
+        # tifffile exposes BYTE for arbitrary payloads; DNG mandates UNDEFINED for OpcodeList2.
+        with destination.open("r+b") as stream:
+            stream.seek(4)
+            ifd_offset = struct.unpack("<I", stream.read(4))[0]
+            stream.seek(ifd_offset)
+            entry_count = struct.unpack("<H", stream.read(2))[0]
+            for entry in range(entry_count):
+                offset = ifd_offset + 2 + entry * 12
+                stream.seek(offset)
+                tag = struct.unpack("<H", stream.read(2))[0]
+                if tag == 51009:
+                    stream.write(struct.pack("<H", 7))
+                    break
 
 
 def main() -> None:
@@ -455,6 +679,7 @@ def main() -> None:
         print("Using Pixel 6 main-camera DNG color profile")
 
     rows = read_rows(recording / "frames.csv")
+    lens_shading_maps = read_lens_shading_maps(recording)
     state = read_state(recording / "clip.state")
     if state.get("status") not in (None, "closed"):
         print(
@@ -465,11 +690,11 @@ def main() -> None:
     height = int(metadata["height"])
     row_bytes = int(metadata["row_bytes"])
     frame_bytes = row_bytes * height
-    raw_path = recording / "clip.raw10"
-    stream_frames, remainder = divmod(raw_path.stat().st_size, frame_bytes)
-    if remainder:
+    reader = Raw10FrameReader(recording, width, height, row_bytes)
+    stream_frames = reader.frame_count
+    if reader.trailing_bytes:
         print(
-            f"Warning: ignoring {remainder} trailing bytes from an incomplete RAW frame"
+            f"Warning: ignoring {reader.trailing_bytes} trailing bytes from an incomplete RAW frame"
         )
     available = min(stream_frames, len(rows))
     end = available if args.count is None else min(available, args.start + args.count)
@@ -478,39 +703,37 @@ def main() -> None:
 
     output = (args.output or recording / "dng").expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
-    raw = np.memmap(raw_path, dtype=np.uint8, mode="r")
-
     first_timeline_frame = int(rows[args.start]["frame"])
     last_timeline_frame = first_timeline_frame - 1
     previous_destination: Path | None = None
     repeated_frames: list[int] = []
 
-    for stream_index in range(args.start, end):
-        row = rows[stream_index]
-        frame_id = int(row["frame"])
-        if frame_id <= last_timeline_frame:
-            print(
-                f"\nWarning: non-monotonic frame id {frame_id}; "
-                f"placing it at {last_timeline_frame + 1}"
-            )
-            frame_id = last_timeline_frame + 1
-        if previous_destination is not None:
-            for missing_id in range(last_timeline_frame + 1, frame_id):
-                repeated = output / f"frame_{missing_id:06d}.dng"
-                link_or_copy(previous_destination, repeated, args.overwrite)
-                previous_destination = repeated
-                repeated_frames.append(missing_id)
-        destination = output / f"frame_{frame_id:06d}.dng"
-        if destination.exists() and not args.overwrite:
-            raise SystemExit(f"{destination} exists; use --overwrite to replace it")
-        if destination.exists():
-            destination.unlink()
-        start = stream_index * frame_bytes
-        mosaic = unpack_raw10(raw[start : start + frame_bytes], width, height)
-        write_dng(destination, mosaic, metadata, row)
-        previous_destination = destination
-        last_timeline_frame = frame_id
-        print(f"\r{stream_index - args.start + 1}/{end - args.start}", end="", flush=True)
+    with reader:
+        for stream_index in range(args.start, end):
+            row = rows[stream_index]
+            frame_id = int(row["frame"])
+            if frame_id <= last_timeline_frame:
+                print(
+                    f"\nWarning: non-monotonic frame id {frame_id}; "
+                    f"placing it at {last_timeline_frame + 1}"
+                )
+                frame_id = last_timeline_frame + 1
+            if previous_destination is not None:
+                for missing_id in range(last_timeline_frame + 1, frame_id):
+                    repeated = output / f"frame_{missing_id:06d}.dng"
+                    link_or_copy(previous_destination, repeated, args.overwrite)
+                    previous_destination = repeated
+                    repeated_frames.append(missing_id)
+            destination = output / f"frame_{frame_id:06d}.dng"
+            if destination.exists() and not args.overwrite:
+                raise SystemExit(f"{destination} exists; use --overwrite to replace it")
+            if destination.exists():
+                destination.unlink()
+            mosaic = unpack_raw10(reader.read(stream_index), width, height)
+            write_dng(destination, mosaic, metadata, row, lens_shading_maps.get(int(row["frame"])))
+            previous_destination = destination
+            last_timeline_frame = frame_id
+            print(f"\r{stream_index - args.start + 1}/{end - args.start}", end="", flush=True)
 
     output_frame_count = last_timeline_frame - first_timeline_frame + 1
     audio_metadata = inspect_audio(recording)

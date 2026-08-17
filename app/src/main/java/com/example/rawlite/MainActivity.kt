@@ -85,6 +85,9 @@ import com.example.rawlite.core.model.CaptureFormatPolicy
 import com.example.rawlite.core.model.CaptureMode
 import com.example.rawlite.core.model.CaptureOutput
 import com.example.rawlite.core.state.CaptureOperationState
+import com.example.rawlite.device.CaptureFeature
+import com.example.rawlite.device.AvailableCameraControls
+import com.example.rawlite.device.DeviceCapabilitiesGateway
 import com.example.rawlite.gallery.Pixel6MainDngColorProfile
 import org.json.JSONObject
 import java.io.File
@@ -193,7 +196,8 @@ class MainActivity : Activity() {
         val wbRed: Float,
         val wbGreenEven: Float,
         val wbGreenOdd: Float,
-        val wbBlue: Float
+        val wbBlue: Float,
+        val lensShading: LensShadingSample?
     )
 
     private data class SessionRequest(
@@ -297,6 +301,7 @@ class MainActivity : Activity() {
     }
 
     private var cameraOptions: List<CameraOption> = emptyList()
+    private lateinit var deviceCapabilities: DeviceCapabilitiesGateway
     private var selectedCameraIndex = 0
     private var selectedRawIndex = 1
     private var selectedPreviewIndex = 1
@@ -332,6 +337,7 @@ class MainActivity : Activity() {
     private val peakPendingWrites = AtomicInteger(0)
     private var sessionDir: File? = null
     private var nativeWriterHandle = 0L
+    private var lensShadingWriter: LensShadingMetadataWriter? = null
     private var pure10Encoder: Pure10Encoder? = null
     private var telemetryStream: FileOutputStream? = null
     private var sessionStartElapsedMs = 0L
@@ -436,7 +442,7 @@ class MainActivity : Activity() {
                 detectedDeviceOrientationDegrees = compensation
                 val base = currentDisplayRotationDegrees()
                 baseContentOrientation = base
-                val relative = (base + compensation) % 360
+                val relative = (base - compensation + 360) % 360
                 lastAllowedContentRotation = relative.toFloat()
                 applyLatestAutomaticRotation()
             }
@@ -1121,8 +1127,7 @@ class MainActivity : Activity() {
                 "${((raw / 50.0).roundToInt() * 50).coerceIn(MIN_KELVIN, MAX_KELVIN)}"
             }
             CameraParameter.FOCUS -> {
-                val maxFocus = currentCharacteristics()
-                    ?.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
+                val maxFocus = maximumFocusDistanceDiopters()
                 formatFocus(progressToLinear(progress, 0.0, maxFocus.toDouble()).toFloat())
             }
             CameraParameter.RESOLUTION -> {
@@ -1192,8 +1197,7 @@ class MainActivity : Activity() {
                 scheduleControlApply()
             }
             CameraParameter.FOCUS -> {
-                val maxFocus = currentCharacteristics()
-                    ?.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
+                val maxFocus = maximumFocusDistanceDiopters()
                 if (maxFocus > 0f) {
                     manualFocus = true
                     scheduleUserPreferencesSave()
@@ -1269,8 +1273,7 @@ class MainActivity : Activity() {
                 manualWbTransform = null
             }
             CameraParameter.FOCUS -> {
-                val maxFocus = currentCharacteristics()
-                    ?.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
+                val maxFocus = maximumFocusDistanceDiopters()
                 if (maxFocus > 0f) manualFocus = !manualFocus
             }
             else -> return
@@ -1294,8 +1297,7 @@ class MainActivity : Activity() {
             manualWbGains = null
             manualWbTransform = null
         }
-        val canFocus = (currentCharacteristics()
-            ?.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f) > 0f
+        val canFocus = currentAvailableControls().manualFocus
         if (canFocus && (!recording || !lockFocus)) {
             changed = changed || manualFocus
             manualFocus = false
@@ -1313,6 +1315,16 @@ class MainActivity : Activity() {
 
     private fun selectedParameterCanChangeNow(): Boolean {
         if (switchingSession || finalizingOutput || finalizingAudio || pure10MuxInProgress()) return false
+        val controls = currentAvailableControls()
+        val supported = when (selectedParameter) {
+            CameraParameter.SHUTTER, CameraParameter.ISO -> controls.manualExposure
+            CameraParameter.WHITE_BALANCE -> controls.manualWhiteBalance
+            CameraParameter.FOCUS -> controls.manualFocus
+            CameraParameter.LENS -> cameraOptions.size > 1
+            CameraParameter.FPS -> true
+            CameraParameter.RESOLUTION -> (currentOption()?.rawSizes?.size ?: 0) > 1
+        }
+        if (!supported) return false
         if (!recording) return true
         return when (selectedParameter) {
             CameraParameter.SHUTTER, CameraParameter.ISO -> !lockExposure
@@ -1327,10 +1339,8 @@ class MainActivity : Activity() {
             pure10MuxInProgress()
         ) return
         val characteristics = currentCharacteristics() ?: return
-        val maxAfRegions = characteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0
-        val canFocus = (characteristics
-            .get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f) > 0f
-        if (maxAfRegions <= 0 || !canFocus) {
+        val controls = currentAvailableControls()
+        if (!controls.tapToFocus || !controls.manualFocus) {
             cameraChrome.showStatusPopup("SIN AF")
             return
         }
@@ -1437,8 +1447,7 @@ class MainActivity : Activity() {
             finalizingAudio || pure10MuxInProgress()
         ) return false
         if (!recording) return true
-        val canFocus = (currentCharacteristics()
-            ?.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f) > 0f
+        val canFocus = currentAvailableControls().manualFocus
         return !lockExposure || !lockWhiteBalance || (!lockFocus && canFocus)
     }
 
@@ -1449,8 +1458,7 @@ class MainActivity : Activity() {
         pushAutoCapturesExposure = !recording || !lockExposure
         pushAutoCapturesWb = !recording || !lockWhiteBalance
         pushAutoCapturesFocus = (!recording || !lockFocus) &&
-            ((currentCharacteristics()?.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE)
-                ?: 0f) > 0f)
+            currentAvailableControls().manualFocus
         if (!pushAutoCapturesExposure && !pushAutoCapturesWb && !pushAutoCapturesFocus) return
         pushAutoRunning = true
         pushAutoPreviousExposure = manualExposure
@@ -1492,8 +1500,7 @@ class MainActivity : Activity() {
         }
         if (pushAutoCapturesFocus) {
             measured.focusDiopters?.let { focusDiopters = it }
-            val maxFocus = currentCharacteristics()
-                ?.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
+            val maxFocus = maximumFocusDistanceDiopters()
             if (maxFocus > 0f) {
                 focusControls.seek.progress = linearToProgress(
                     focusDiopters.toDouble(), 0.0, maxFocus.toDouble()
@@ -1518,9 +1525,9 @@ class MainActivity : Activity() {
     private fun updateWheelAutoButton() {
         if (!::wheelAutoButton.isInitialized) return
         val supportsAuto = when (selectedParameter) {
-            CameraParameter.SHUTTER, CameraParameter.ISO, CameraParameter.WHITE_BALANCE -> true
-            CameraParameter.FOCUS -> (currentCharacteristics()
-                ?.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f) > 0f
+            CameraParameter.SHUTTER, CameraParameter.ISO -> currentAvailableControls().manualExposure
+            CameraParameter.WHITE_BALANCE -> currentAvailableControls().manualWhiteBalance
+            CameraParameter.FOCUS -> currentAvailableControls().manualFocus
             else -> false
         }
         val automatic = when (selectedParameter) {
@@ -1542,7 +1549,12 @@ class MainActivity : Activity() {
         if (recording || switchingSession || finalizingOutput ||
             finalizingAudio || pure10MuxInProgress()
         ) return
-        captureMode = if (captureMode == CaptureMode.RAW) CaptureMode.PURE10 else CaptureMode.RAW
+        val next = if (captureMode == CaptureMode.RAW) CaptureMode.PURE10 else CaptureMode.RAW
+        if (next == CaptureMode.PURE10 && !currentPure10Availability()) {
+            cameraChrome.showStatusPopup("PURE 10 NO DISPONIBLE")
+            return
+        }
+        captureMode = next
         updateFormatHint()
         updateChromeValues()
         syncWheelToSelectedParameter()
@@ -1793,8 +1805,7 @@ class MainActivity : Activity() {
             restartRepeating()
         }
         focusControls.mode?.setOnClickListener {
-            val maxFocus = currentCharacteristics()
-                ?.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
+            val maxFocus = maximumFocusDistanceDiopters()
             if (maxFocus <= 0f) return@setOnClickListener
             manualFocus = !manualFocus
             scheduleUserPreferencesSave()
@@ -1858,7 +1869,8 @@ class MainActivity : Activity() {
         }
 
         val manager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
-        cameraOptions = CameraCatalog(manager).discover()
+        deviceCapabilities = DeviceCapabilitiesGateway.discover(manager)
+        cameraOptions = CameraCatalog(manager, deviceCapabilities).discover()
         if (cameraOptions.isEmpty()) {
             setStatusText("No se encontró ninguna cámara RAW compatible")
             return
@@ -1897,6 +1909,13 @@ class MainActivity : Activity() {
 
     private fun configureUiForCamera() {
         val option = currentOption() ?: return
+        val availableControls = deviceCapabilities.controls(option.openId, option.physicalId)
+        if (!availableControls.manualExposure) manualExposure = false
+        if (!availableControls.manualWhiteBalance) manualWb = false
+        if (!availableControls.manualFocus) manualFocus = false
+        if (captureMode == CaptureMode.PURE10 && !currentPure10Availability()) {
+            captureMode = CaptureMode.RAW
+        }
         manualWbGains = null
         manualWbTransform = null
         suppressSpinnerEvents = true
@@ -1909,9 +1928,10 @@ class MainActivity : Activity() {
         suppressSpinnerEvents = false
         updateFormatHint()
 
-        val apertures = option.characteristics
-            .get(CameraCharacteristics.LENS_INFO_AVAILABLE_APERTURES)
-        apertureValue.text = apertures?.joinToString(" / ") { "f/${formatOne(it)}" } ?: "No disponible"
+        val apertures = option.capability.lens.apertures
+        apertureValue.text = apertures.takeIf { it.isNotEmpty() }
+            ?.joinToString(" / ") { "f/${formatOne(it)}" }
+            ?: "No disponible"
 
         val isoRange = isoRange()
         isoValue = IsoStepPolicy.nearest(isoValue, isoRange.lower, isoRange.upper)
@@ -1931,8 +1951,7 @@ class MainActivity : Activity() {
             gainRange.upper.toDouble()
         )
 
-        val maxFocus = option.characteristics
-            .get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
+        val maxFocus = maximumFocusDistanceDiopters()
         focusDiopters = focusDiopters.coerceIn(0f, maxFocus)
         focusControls.seek.progress = if (maxFocus > 0f) {
             linearToProgress(focusDiopters.toDouble(), 0.0, maxFocus.toDouble())
@@ -2353,6 +2372,7 @@ class MainActivity : Activity() {
                         greenEvenGain = metadata.wbGreenEven,
                         greenOddGain = metadata.wbGreenOdd,
                         blueGain = metadata.wbBlue,
+                        lensShading = metadata.lensShading,
                         exposureGain = Pixel6MainDngColorProfile.DEFAULT_RENDER_GAIN *
                             postRawGain / 100f,
                         queuedAtNs = queuedAtNs
@@ -2410,6 +2430,7 @@ class MainActivity : Activity() {
                             "Native RAW write failed ($writeResult): ${NativeRawWriter.lastError()}"
                         )
                     }
+                    metadata.lensShading?.let { lensShadingWriter?.write(currentFrame, it) }
                     savedFrames++
                 } catch (error: Throwable) {
                     Log.e(TAG, "RAW write failed", error)
@@ -2455,6 +2476,14 @@ class MainActivity : Activity() {
 
     private fun frameMetadata(result: CaptureResult): FrameMetadata {
         val gains = result.get(CaptureResult.COLOR_CORRECTION_GAINS)
+        val lensShading = result.get(CaptureResult.STATISTICS_LENS_SHADING_CORRECTION_MAP)
+            ?.let { map ->
+                val factors = FloatArray(map.gainFactorCount)
+                map.copyGainFactors(factors, 0)
+                runCatching {
+                    LensShadingSample(map.rowCount, map.columnCount, factors)
+                }.getOrNull()
+            }
         return FrameMetadata(
             timestampNs = result.get(CaptureResult.SENSOR_TIMESTAMP) ?: 0L,
             iso = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: 0,
@@ -2464,7 +2493,8 @@ class MainActivity : Activity() {
             wbRed = gains?.red ?: 1f,
             wbGreenEven = gains?.greenEven ?: 1f,
             wbGreenOdd = gains?.greenOdd ?: 1f,
-            wbBlue = gains?.blue ?: 1f
+            wbBlue = gains?.blue ?: 1f,
+            lensShading = lensShading
         )
     }
 
@@ -2669,8 +2699,7 @@ class MainActivity : Activity() {
     }
 
     private fun lockFocusAtResultDistance(result: CaptureResult) {
-        val maxFocus = currentCharacteristics()
-            ?.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
+        val maxFocus = maximumFocusDistanceDiopters()
         if (maxFocus <= 0f) return
         val measuredFocus = result.get(CaptureResult.LENS_FOCUS_DISTANCE)
             ?.coerceIn(0f, maxFocus)
@@ -2708,6 +2737,12 @@ class MainActivity : Activity() {
         put(builder, CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, chooseCoolerFpsRange())
         put(builder, CaptureRequest.CONTROL_POST_RAW_SENSITIVITY_BOOST, postRawGain)
         put(builder, CaptureRequest.SCALER_CROP_REGION, previewCropRegion())
+        put(
+            builder,
+            CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE,
+            CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE_ON
+        )
+        put(builder, CaptureRequest.SHADING_MODE, CaptureRequest.SHADING_MODE_FAST)
         applyRec709PreviewProcessing(builder)
 
         val cadenceExposure = !includeRaw &&
@@ -2782,12 +2817,10 @@ class MainActivity : Activity() {
             put(builder, CaptureRequest.CONTROL_AWB_LOCK, lockedWb)
         }
 
-        val maxFocus = option.characteristics
-            .get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
+        val maxFocus = maximumFocusDistanceDiopters()
         val lockedFocus = includeRaw && lockFocus && snapshot?.focusDiopters != null
         val meteringRegion = previewMeteringRegion
-        val canApplyAfRegion = meteringRegion != null &&
-            (option.characteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0) > 0
+        val canApplyAfRegion = meteringRegion != null && currentAvailableControls().tapToFocus
         when {
             maxFocus <= 0f -> {
                 put(builder, CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
@@ -3069,7 +3102,7 @@ class MainActivity : Activity() {
         return try {
             File(dir, "clip.json").writeText(buildPackedDescription(size).toString(2))
             nativeWriterHandle = NativeRawWriter.open(
-                rawPath = File(dir, "clip.raw10").absolutePath,
+                rawPath = File(dir, Raw10FrameStore.COMPRESSED_FILE).absolutePath,
                 metadataPath = File(dir, "frames.csv").absolutePath,
                 statePath = File(dir, "clip.state").absolutePath,
                 width = size.width,
@@ -3080,10 +3113,17 @@ class MainActivity : Activity() {
             if (nativeWriterHandle == 0L) {
                 throw IOException("Native writer open failed: ${NativeRawWriter.lastError()}")
             }
+            lensShadingWriter = runCatching {
+                LensShadingMetadataWriter(File(dir, LensShadingMetadataWriter.FILE_NAME))
+            }.onFailure {
+                Log.w(TAG, "Could not create lens-shading sidecar", it)
+            }.getOrNull()
             true
         } catch (error: Exception) {
             Log.e(TAG, "Could not create RAW10 outputs", error)
             nativeWriterHandle = 0L
+            runCatching { lensShadingWriter?.close() }
+            lensShadingWriter = null
             setStatusText("No se pudo crear el archivo RAW10")
             false
         }
@@ -3210,10 +3250,15 @@ class MainActivity : Activity() {
             updateStatus(force = true)
         }
         ioExecutor.execute {
+            runCatching { lensShadingWriter?.close() }
+                .onFailure { Log.e(TAG, "Could not finalize lens-shading metadata", it) }
+            lensShadingWriter = null
             val closeResult = NativeRawWriter.close(handle)
             logStopMeasurement(
                 "RAW10_CLOSE_DONE",
-                "result=$closeResult raw_bytes=${sessionDir?.let { File(it, "clip.raw10").length() } ?: -1L}"
+                "result=$closeResult raw_bytes=${sessionDir?.let {
+                    File(it, Raw10FrameStore.COMPRESSED_FILE).length()
+                } ?: -1L}"
             )
             if (closeResult != 0) {
                 Log.e(
@@ -3374,11 +3419,17 @@ class MainActivity : Activity() {
             context = captureMetadataContext(size),
             technicalOverlay = technicalMode.name,
             checkpointFrames = max(selectedFps * CHECKPOINT_SECONDS, 1)
-        )
+        ).put("raw_container", "rawlite-raw10c")
+            .put("raw_file", Raw10FrameStore.COMPRESSED_FILE)
+            .put("raw_compression", "lossless-cfa-delta-deflate")
+            .put("raw_compression_version", 1)
+            .put("lens_shading_map_file", LensShadingMetadataWriter.FILE_NAME)
+            .put("lens_shading_correction", "camera2-per-frame")
     }
 
     private fun buildDngDescription(size: Size): JSONObject {
         return CaptureMetadataFactory.cinemaDng(captureMetadataContext(size))
+            .put("lens_shading_correction", "camera2-dngcreator")
     }
 
     private fun updateDngDescription(directory: File) {
@@ -3410,6 +3461,7 @@ class MainActivity : Activity() {
             .put("requested_frame_duration_ns", sessionRequestedFrameDurationNs)
             .put("recording_exposure_policy", sessionExposurePolicy)
             .put("auto_cadence_lock", sessionAutoCadenceLock)
+            .put("lens_shading_correction", "camera2-capture-start-cached")
     }
 
     private fun captureMetadataContext(size: Size): CaptureMetadataContext {
@@ -3674,8 +3726,9 @@ class MainActivity : Activity() {
     }
 
     private fun chooseCoolerFpsRange(): Range<Int>? {
-        val ranges = currentCharacteristics()
-            ?.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+        val ranges = currentOption()?.capability?.controls?.targetFpsRanges
+            ?.map { Range(it.minimum.roundToInt(), it.maximum.roundToInt()) }
+            ?.takeIf { it.isNotEmpty() }
             ?: return null
         val target = selectedFps
         if (target < 30) {
@@ -3688,6 +3741,7 @@ class MainActivity : Activity() {
     }
 
     private fun updateControlModes() {
+        val deviceControls = currentAvailableControls()
         exposureControls.mode?.text = when {
             manualExposure -> "MAN"
             !recording && previewTimingValues != null -> "A-L"
@@ -3704,12 +3758,12 @@ class MainActivity : Activity() {
         val exposureAdjustable = interactionEnabled && (!recording || !lockExposure)
         val wbAdjustable = interactionEnabled && (!recording || !lockWhiteBalance)
         val focusAdjustable = interactionEnabled && (!recording || !lockFocus)
-        exposureControls.seek.isEnabled = manualExposure && exposureAdjustable
-        exposureControls.minus.isEnabled = manualExposure && exposureAdjustable
-        exposureControls.plus.isEnabled = manualExposure && exposureAdjustable
-        isoControls.seek.isEnabled = manualExposure && exposureAdjustable
-        isoControls.minus.isEnabled = manualExposure && exposureAdjustable
-        isoControls.plus.isEnabled = manualExposure && exposureAdjustable
+        exposureControls.seek.isEnabled = deviceControls.manualExposure && manualExposure && exposureAdjustable
+        exposureControls.minus.isEnabled = deviceControls.manualExposure && manualExposure && exposureAdjustable
+        exposureControls.plus.isEnabled = deviceControls.manualExposure && manualExposure && exposureAdjustable
+        isoControls.seek.isEnabled = deviceControls.manualExposure && manualExposure && exposureAdjustable
+        isoControls.minus.isEnabled = deviceControls.manualExposure && manualExposure && exposureAdjustable
+        isoControls.plus.isEnabled = deviceControls.manualExposure && manualExposure && exposureAdjustable
 
         val autoExposure = !manualExposure
         evControls.seek.isEnabled = autoExposure && exposureAdjustable
@@ -3720,12 +3774,11 @@ class MainActivity : Activity() {
         gainControls.minus.isEnabled = exposureAdjustable
         gainControls.plus.isEnabled = exposureAdjustable
 
-        wbControls.seek.isEnabled = manualWb && wbAdjustable
-        wbControls.minus.isEnabled = manualWb && wbAdjustable
-        wbControls.plus.isEnabled = manualWb && wbAdjustable
+        wbControls.seek.isEnabled = deviceControls.manualWhiteBalance && manualWb && wbAdjustable
+        wbControls.minus.isEnabled = deviceControls.manualWhiteBalance && manualWb && wbAdjustable
+        wbControls.plus.isEnabled = deviceControls.manualWhiteBalance && manualWb && wbAdjustable
 
-        val canFocus = (currentCharacteristics()
-            ?.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f) > 0f
+        val canFocus = deviceControls.manualFocus
         focusControls.mode?.isEnabled = canFocus
         focusControls.seek.isEnabled = canFocus && manualFocus && focusAdjustable
         focusControls.minus.isEnabled = canFocus && manualFocus && focusAdjustable
@@ -3745,8 +3798,8 @@ class MainActivity : Activity() {
         microphoneButton.isEnabled = sessionControlsEnabled
         lockSwitch.isEnabled = !recording && !finalizingOutput &&
             !finalizingAudio && !pure10MuxInProgress()
-        exposureControls.mode?.isEnabled = exposureAdjustable
-        wbControls.mode?.isEnabled = wbAdjustable
+        exposureControls.mode?.isEnabled = deviceControls.manualExposure && exposureAdjustable
+        wbControls.mode?.isEnabled = deviceControls.manualWhiteBalance && wbAdjustable
         if (canFocus) focusControls.mode?.isEnabled = focusAdjustable
         wheelView.isEnabled = interactionEnabled && selectedParameterCanChangeNow()
         decreaseButton.isEnabled = interactionEnabled && selectedParameterCanChangeNow()
@@ -3814,8 +3867,7 @@ class MainActivity : Activity() {
     }
 
     private fun updateFocusFromProgress(progress: Int) {
-        val maxFocus = currentCharacteristics()
-            ?.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
+        val maxFocus = maximumFocusDistanceDiopters()
         focusDiopters = progressToLinear(progress, 0.0, maxFocus.toDouble()).toFloat()
             .coerceIn(0f, maxFocus)
         focusControls.value.text = formatFocus(focusDiopters)
@@ -3998,6 +4050,24 @@ class MainActivity : Activity() {
 
     private fun currentOption(): CameraOption? = cameraOptions.getOrNull(selectedCameraIndex)
     private fun currentCharacteristics(): CameraCharacteristics? = currentOption()?.characteristics
+    private fun maximumFocusDistanceDiopters(): Float =
+        currentOption()?.capability?.lens?.minimumFocusDistanceDiopters ?: 0f
+
+    private fun currentAvailableControls(): AvailableCameraControls {
+        val option = currentOption() ?: return AvailableCameraControls()
+        if (!::deviceCapabilities.isInitialized) return AvailableCameraControls()
+        return deviceCapabilities.controls(option.openId, option.physicalId)
+    }
+
+    private fun currentPure10Availability(): Boolean {
+        val option = currentOption() ?: return false
+        if (!::deviceCapabilities.isInitialized) return false
+        return deviceCapabilities.feature(
+            CaptureFeature.PURE10,
+            option.openId,
+            option.physicalId
+        ).available
+    }
 
     private fun currentDisplayRotationDegrees(): Int {
         @Suppress("DEPRECATION")
@@ -4019,31 +4089,42 @@ class MainActivity : Activity() {
     }
 
     private fun orientationCompensationWithHysteresis(orientation: Int): Int? {
+        val allowedLandscape = allowedLandscapeOrientationDegrees()
+        val oppositeLandscape = if (allowedLandscape == 90) 270 else 90
+        val upright = orientation <= 30 || orientation >= 330
+        val allowed = if (allowedLandscape == 90) {
+            orientation in 60..120
+        } else {
+            orientation in 240..300
+        }
+        val opposite = if (oppositeLandscape == 90) {
+            orientation in 60..120
+        } else {
+            orientation in 240..300
+        }
+        val upsideDown = orientation in 120..240
         return when (detectedDeviceOrientationDegrees) {
             0 -> when {
-                orientation in 60..120 -> 90
-                orientation in 240..300 -> 270
-                orientation in 120..240 -> null
+                allowed -> allowedLandscape
+                opposite || upsideDown -> null
                 else -> 0
             }
-            90 -> when {
-                orientation <= 30 || orientation >= 330 -> 0
-                orientation in 240..300 -> 270
-                else -> 90
-            }
-            270 -> when {
-                orientation <= 30 || orientation >= 330 -> 0
-                orientation in 60..120 -> 90
-                else -> 270
+            allowedLandscape -> when {
+                upright -> 0
+                allowed -> allowedLandscape
+                opposite || upsideDown -> null
+                else -> allowedLandscape
             }
             else -> when {
-                orientation < 45 || orientation >= 315 -> 0
-                orientation < 135 -> 90
-                orientation >= 225 -> 270
+                upright -> 0
+                allowed -> allowedLandscape
                 else -> null
             }
         }
     }
+
+    private fun allowedLandscapeOrientationDegrees(): Int =
+        if (leftHandedMode) 90 else 270
 
     private fun applyLatestAutomaticRotation() {
         if (rotationLockedByUser || recording || switchingSession ||
@@ -4102,27 +4183,24 @@ class MainActivity : Activity() {
         val rollDegrees = Math.toDegrees(
             atan2(screenX.toDouble(), (-screenY).toDouble())
         ).toFloat().normalizeDegrees()
-        val orientationAnchor = stabilizerOrientationAnchorDegrees()
-        val leveledRollDegrees = (rollDegrees - orientationAnchor).normalizeDegrees()
+        val leveledRollDegrees = rollDegrees.normalizeQuarterTurnDeviation()
         val stable = abs(leveledRollDegrees) <= STABILIZER_LEVEL_TOLERANCE_DEGREES
         cameraChrome.stabilizerAvailable = true
-        cameraChrome.stabilizerRollDegrees = leveledRollDegrees
+        cameraChrome.stabilizerRollDegrees = rollDegrees
         cameraChrome.stabilizerStable = stable
-    }
-
-    private fun stabilizerOrientationAnchorDegrees(): Float {
-        val contentRotation = if (::cameraChrome.isInitialized) {
-            cameraChrome.currentContentRotationDegrees()
-        } else {
-            appliedContentRotation
-        }
-        return (180f - contentRotation).normalizeDegrees()
     }
 
     private fun Float.normalizeDegrees(): Float {
         var value = this
         while (value > 180f) value -= 360f
         while (value < -180f) value += 360f
+        return value
+    }
+
+    private fun Float.normalizeQuarterTurnDeviation(): Float {
+        var value = normalizeDegrees()
+        while (value > 45f) value -= 90f
+        while (value < -45f) value += 90f
         return value
     }
 
@@ -4444,9 +4522,12 @@ class MainActivity : Activity() {
     }
 
     private fun isoRange(): Range<Int> {
-        return currentCharacteristics()
-            ?.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
-            ?: Range(50, 3200)
+        val range = currentOption()?.capability?.sensor?.sensitivityRange
+        return if (range != null) {
+            Range(range.minimum.roundToInt(), range.maximum.roundToInt())
+        } else {
+            Range(50, 3200)
+        }
     }
 
     private fun isoValueForProgress(progress: Int): Int {
@@ -4465,9 +4546,12 @@ class MainActivity : Activity() {
     }
 
     private fun exposureRange(): Range<Long> {
-        val hardware = currentCharacteristics()
-            ?.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
-            ?: Range(100_000L, 1_000_000_000L)
+        val declared = currentOption()?.capability?.sensor?.exposureTimeRangeNs
+        val hardware = if (declared != null) {
+            Range(declared.minimum.toLong(), declared.maximum.toLong())
+        } else {
+            Range(100_000L, 1_000_000_000L)
+        }
         val fastestVideoExposure = min(
             hardware.upper,
             max(hardware.lower, FASTEST_VIDEO_EXPOSURE_NS)

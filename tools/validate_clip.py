@@ -7,9 +7,11 @@ import argparse
 import csv
 import json
 import shutil
+import struct
 import subprocess
 import sys
 import wave
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -141,6 +143,7 @@ def validate_audio(directory: Path, metadata: dict, fps: int, report: Report) ->
 
 def validate_raw10(directory: Path, metadata: dict, report: Report) -> None:
     raw = directory / "clip.raw10"
+    compressed = directory / "clip.raw10c"
     state = parse_state(directory / "clip.state")
     width = as_int(metadata.get("width"))
     height = as_int(metadata.get("height"))
@@ -149,19 +152,37 @@ def validate_raw10(directory: Path, metadata: dict, report: Report) -> None:
     report.check(width > 0 and height > 0 and row_bytes >= (width * 10 + 7) // 8,
                  f"Geometría RAW10 {width}×{height}, row={row_bytes}",
                  "Geometría o stride RAW10 inválido")
-    if not raw.is_file() or frame_bytes <= 0:
-        report.errors.append("Falta clip.raw10 o su geometría es inválida")
+    if frame_bytes <= 0 or (not raw.is_file() and not compressed.is_file()):
+        report.errors.append("Falta clip.raw10/clip.raw10c o su geometría es inválida")
         return
-    complete_stream_frames, tail = divmod(raw.stat().st_size, frame_bytes)
+    if compressed.is_file():
+        complete_stream_frames, complete_bytes, tail, payload_errors = inspect_raw10c(
+            compressed, width, height, row_bytes, frame_bytes, report
+        )
+        report.check(
+            payload_errors == 0,
+            f"CRC de payload válido en {complete_stream_frames} frames RAW10C",
+            f"RAW10C contiene {payload_errors} payload(s) corrupto(s)",
+        )
+    else:
+        complete_stream_frames, tail = divmod(raw.stat().st_size, frame_bytes)
+        complete_bytes = complete_stream_frames * frame_bytes
     report.check(tail == 0, f"RAW contiene {complete_stream_frames} frames completos",
-                 f"RAW termina con {tail} bytes incompletos")
+                 f"RAW termina con {tail} bytes después del último frame completo")
     completed = as_int(state.get("completed_frames"), complete_stream_frames)
     report.check(0 <= completed <= complete_stream_frames,
                  f"Checkpoint: {completed} frames", "Checkpoint excede el stream RAW")
-    state_bytes = as_int(state.get("raw_bytes"), completed * frame_bytes)
-    report.check(state_bytes == completed * frame_bytes,
+    expected_state_bytes = complete_bytes if compressed.is_file() else completed * frame_bytes
+    state_bytes = as_int(state.get("raw_bytes"), expected_state_bytes)
+    report.check(state_bytes == expected_state_bytes,
                  f"Checkpoint de bytes: {state_bytes}",
                  "clip.state no coincide con el tamaño de sus frames completos")
+    logical_bytes = as_int(state.get("logical_raw_bytes"), completed * frame_bytes)
+    report.check(
+        logical_bytes == completed * frame_bytes,
+        f"RAW lógico sin pérdida: {logical_bytes} bytes",
+        "El tamaño RAW lógico no coincide con los frames completos",
+    )
     frames_path = directory / "frames.csv"
     rows: list[dict[str, str]] = []
     if frames_path.is_file():
@@ -189,6 +210,55 @@ def validate_raw10(directory: Path, metadata: dict, report: Report) -> None:
     except (KeyError, TypeError, ValueError) as error:
         report.errors.append(f"frames.csv no se puede interpretar: {error}")
     report.check(state.get("status") == "closed", "RAW finalizado", "RAW no finalizado")
+
+
+def inspect_raw10c(
+    path: Path,
+    width: int,
+    height: int,
+    row_bytes: int,
+    frame_bytes: int,
+    report: Report,
+) -> tuple[int, int, int, int]:
+    size = path.stat().st_size
+    with path.open("rb") as source:
+        header = source.read(64)
+        if len(header) != 64 or header[:8] != b"RLR10C01":
+            report.errors.append("Cabecera RAW10C inválida")
+            return 0, 0, size, 0
+        values = struct.unpack_from("<6I", header, 8)
+        expected = (64, 1, width, height, row_bytes, frame_bytes)
+        if values != expected:
+            report.errors.append(
+                f"Cabecera RAW10C incompatible: {values}, esperada {expected}"
+            )
+            return 0, 0, size, 0
+        offset = 64
+        frames = 0
+        payload_errors = 0
+        while offset + 32 <= size:
+            source.seek(offset)
+            frame_header = source.read(32)
+            if len(frame_header) != 32 or frame_header[:4] != b"RLF1":
+                break
+            header_size, _, _, raw_size, payload_size, _, payload_crc = struct.unpack_from(
+                "<7I", frame_header, 4
+            )
+            payload_offset = offset + 32
+            if (
+                header_size != 32
+                or raw_size != frame_bytes
+                or payload_size <= 0
+                or payload_size > frame_bytes + 65_536
+                or payload_offset + payload_size > size
+            ):
+                break
+            payload = source.read(payload_size)
+            if len(payload) != payload_size or zlib.crc32(payload) & 0xFFFFFFFF != payload_crc:
+                payload_errors += 1
+            frames += 1
+            offset = payload_offset + payload_size
+        return frames, offset, size - offset, payload_errors
 
 
 def validate_pure10(directory: Path, metadata: dict, report: Report) -> None:
