@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.rawlite"
         minSdk = 28
         targetSdk = 35
-        versionCode = 108
-        versionName = "0.34.1-alpha.75"
+        versionCode = 109
+        versionName = "0.34.2-alpha.76"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         ndk {

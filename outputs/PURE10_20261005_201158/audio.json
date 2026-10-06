@@ -1,0 +1,36 @@
+{
+  "format": "wav-pcm",
+  "status": "closed",
+  "file": "audio.wav",
+  "sample_rate": 48000,
+  "channels": 2,
+  "bits_per_sample": 24,
+  "source": "CAMCORDER",
+  "preferred_input": null,
+  "preferred_input_accepted": true,
+  "routed_input": {
+    "id": 22,
+    "type": 15,
+    "name": "Pixel 6",
+    "external": false
+  },
+  "route_changes": [
+    {
+      "observed_boottime_ns": 164248805826926,
+      "device": {
+        "id": 22,
+        "type": 15,
+        "name": "Pixel 6",
+        "external": false
+      }
+    }
+  ],
+  "clock": "CLOCK_BOOTTIME",
+  "sample_zero_boottime_ns": 164248712902366,
+  "audio_end_boottime_ns": 164252912902366,
+  "stop_requested_boottime_ns": 164252871457706,
+  "stopped_boottime_ns": 164253104240909,
+  "frames": 201600,
+  "data_bytes": 1209600,
+  "finalized": true
+}

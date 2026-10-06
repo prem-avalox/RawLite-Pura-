@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "video_clock": "CLOCK_BOOTTIME",
+  "audio_clock": "CLOCK_BOOTTIME",
+  "camera_first_timestamp_ns": 164248838528928,
+  "camera_last_timestamp_ns": 164252695110959,
+  "audio_sample_zero_timestamp_ns": 164248712902366,
+  "audio_end_timestamp_ns": 164252912902366,
+  "audio_stop_requested_timestamp_ns": 164252871457706,
+  "audio_stopped_timestamp_ns": 164253104240909,
+  "camera_start_minus_audio_start_ns": 125626562,
+  "audio_end_minus_camera_last_ns": 217791407,
+  "timeline_frames": 59,
+  "audio_file": "audio.wav",
+  "audio_sample_rate": 48000,
+  "audio_channels": 2,
+  "audio_bits_per_sample": 24,
+  "audio_source": "CAMCORDER",
+  "audio_frames": 201600,
+  "audio_data_bytes": 1209600,
+  "cadence_gaps": 1,
+  "finalized": true
+}

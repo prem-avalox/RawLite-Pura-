@@ -1553,140 +1553,170 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
         return static_cast<uint16_t>(std::clamp(512 + value, 64, 960));
     };
 
+    const auto luma = [](const std::array<uint16_t, 3>& rgb_in) -> uint16_t {
+        return static_cast<uint16_t>(std::clamp(
+            (269 * static_cast<int>(rgb_in[0]) +
+                694 * static_cast<int>(rgb_in[1]) +
+                61 * static_cast<int>(rgb_in[2]) + 512) >> 10,
+            64,
+            940
+        ));
+    };
+
     const auto convert_rows = [&](int first_y, int end_y) {
-        for (int y = first_y; y < end_y; y += 2) {
+        if (first_y >= end_y) return;
+        const int num_row_pairs = (end_y - first_y) / 2;
+        const int num_quads = output_width / 2;
+        std::vector<uint16_t> quad_y(static_cast<size_t>(num_row_pairs) * num_quads);
+
+        for (int ry = 0; ry < num_row_pairs; ++ry) {
+            const int y = first_y + ry * 2;
             const int source_y = crop_y + y;
             const uint8_t* top_row = raw_base + raw_offset +
                 static_cast<size_t>(source_y) * raw_row_stride;
             const uint8_t* bottom_row = top_row + raw_row_stride;
-            for (int x = 0; x < output_width; x += 2) {
-            const int source_x = crop_x + x;
-            const int group = source_x >> 2;
-            const int lane = source_x & 3;
-            const uint8_t* top_packed = top_row + group * 5;
-            const uint8_t* bottom_packed = bottom_row + group * 5;
-            const int p00 = (static_cast<int>(top_packed[lane]) << 2) |
-                ((top_packed[4] >> (lane * 2)) & 0x03);
-            const int p01 = (static_cast<int>(top_packed[lane + 1]) << 2) |
-                ((top_packed[4] >> ((lane + 1) * 2)) & 0x03);
-            const int p10 = (static_cast<int>(bottom_packed[lane]) << 2) |
-                ((bottom_packed[4] >> (lane * 2)) & 0x03);
-            const int p11 = (static_cast<int>(bottom_packed[lane + 1]) << 2) |
-                ((bottom_packed[4] >> ((lane + 1) * 2)) & 0x03);
-            int r = 0;
-            int b_value = 0;
-            int g0 = 0;
-            int g1 = 0;
-            switch (cfa) {
-                case 1:  // GRBG
-                    g0 = p00; r = p01; b_value = p10; g1 = p11;
-                    break;
-                case 2:  // GBRG
-                    g0 = p00; b_value = p01; r = p10; g1 = p11;
-                    break;
-                case 3:  // BGGR
-                    b_value = p00; g0 = p01; g1 = p10; r = p11;
-                    break;
-                case 0:  // RGGB
-                default:
-                    r = p00; g0 = p01; g1 = p10; b_value = p11;
-                    break;
-            }
-
-            int rf = red_lut[std::clamp(r, 0, 1023)];
-            int bf = blue_lut[std::clamp(b_value, 0, 1023)];
-            int gf0 = green_even_lut[std::clamp(g0, 0, 1023)];
-            int gf1 = green_odd_lut[std::clamp(g1, 0, 1023)];
-            if (lens_shading != nullptr) {
-                const size_t gain_base =
-                    (static_cast<size_t>(y / 2) * (output_width / 2) + x / 2) * 4;
-                const auto corrected = [&](int value, int site) -> int {
-                    return std::min(
-                        (value * static_cast<int>(lens_shading->site_gains_q12[gain_base + site]) +
-                            2048) >> 12,
-                        kLinearScale
-                    );
-                };
+            for (int qx = 0; qx < num_quads; ++qx) {
+                const int x = qx * 2;
+                const int source_x = crop_x + x;
+                const int group = source_x >> 2;
+                const int lane = source_x & 3;
+                const uint8_t* top_packed = top_row + group * 5;
+                const uint8_t* bottom_packed = bottom_row + group * 5;
+                const int p00 = (static_cast<int>(top_packed[lane]) << 2) |
+                    ((top_packed[4] >> (lane * 2)) & 0x03);
+                const int p01 = (static_cast<int>(top_packed[lane + 1]) << 2) |
+                    ((top_packed[4] >> ((lane + 1) * 2)) & 0x03);
+                const int p10 = (static_cast<int>(bottom_packed[lane]) << 2) |
+                    ((bottom_packed[4] >> (lane * 2)) & 0x03);
+                const int p11 = (static_cast<int>(bottom_packed[lane + 1]) << 2) |
+                    ((bottom_packed[4] >> ((lane + 1) * 2)) & 0x03);
+                int r = 0;
+                int b_value = 0;
+                int g0 = 0;
+                int g1 = 0;
                 switch (cfa) {
-                    case 1:  // GRBG: G0,R,B,G1
-                        gf0 = corrected(gf0, 0); rf = corrected(rf, 1);
-                        bf = corrected(bf, 2); gf1 = corrected(gf1, 3);
+                    case 1:  // GRBG
+                        g0 = p00; r = p01; b_value = p10; g1 = p11;
                         break;
-                    case 2:  // GBRG: G0,B,R,G1
-                        gf0 = corrected(gf0, 0); bf = corrected(bf, 1);
-                        rf = corrected(rf, 2); gf1 = corrected(gf1, 3);
+                    case 2:  // GBRG
+                        g0 = p00; b_value = p01; r = p10; g1 = p11;
                         break;
-                    case 3:  // BGGR: B,G0,G1,R
-                        bf = corrected(bf, 0); gf0 = corrected(gf0, 1);
-                        gf1 = corrected(gf1, 2); rf = corrected(rf, 3);
+                    case 3:  // BGGR
+                        b_value = p00; g0 = p01; g1 = p10; r = p11;
                         break;
-                    case 0:
-                    default:  // RGGB: R,G0,G1,B
-                        rf = corrected(rf, 0); gf0 = corrected(gf0, 1);
-                        gf1 = corrected(gf1, 2); bf = corrected(bf, 3);
+                    case 0:  // RGGB
+                    default:
+                        r = p00; g0 = p01; g1 = p10; b_value = p11;
                         break;
                 }
-            }
-            const int gf = (gf0 + gf1) >> 1;
-            const std::array<int64_t, 3> red_blue_contribution = {
-                static_cast<int64_t>(camera_to_rec2020_q[0]) * rf +
-                    static_cast<int64_t>(camera_to_rec2020_q[2]) * bf,
-                static_cast<int64_t>(camera_to_rec2020_q[3]) * rf +
-                    static_cast<int64_t>(camera_to_rec2020_q[5]) * bf,
-                static_cast<int64_t>(camera_to_rec2020_q[6]) * rf +
-                    static_cast<int64_t>(camera_to_rec2020_q[8]) * bf
-            };
-            const auto rec2020_hlg = [
-                &camera_to_rec2020_q,
-                &red_blue_contribution,
-                &hlg_lut,
-                kLinearScale
-            ](
-                int camera_g
-            ) -> std::array<uint16_t, 3> {
+
+                int rf = red_lut[std::clamp(r, 0, 1023)];
+                int bf = blue_lut[std::clamp(b_value, 0, 1023)];
+                int gf0 = green_even_lut[std::clamp(g0, 0, 1023)];
+                int gf1 = green_odd_lut[std::clamp(g1, 0, 1023)];
+                if (lens_shading != nullptr) {
+                    const size_t gain_base =
+                        (static_cast<size_t>(y / 2) * (output_width / 2) + qx) * 4;
+                    const auto corrected = [&](int value, int site) -> int {
+                        return std::min(
+                            (value * static_cast<int>(lens_shading->site_gains_q12[gain_base + site]) +
+                                2048) >> 12,
+                            kLinearScale
+                        );
+                    };
+                    switch (cfa) {
+                        case 1:  // GRBG: G0,R,B,G1
+                            gf0 = corrected(gf0, 0); rf = corrected(rf, 1);
+                            bf = corrected(bf, 2); gf1 = corrected(gf1, 3);
+                            break;
+                        case 2:  // GBRG: G0,B,R,G1
+                            gf0 = corrected(gf0, 0); bf = corrected(bf, 1);
+                            rf = corrected(rf, 2); gf1 = corrected(gf1, 3);
+                            break;
+                        case 3:  // BGGR: B,G0,G1,R
+                            bf = corrected(bf, 0); gf0 = corrected(gf0, 1);
+                            gf1 = corrected(gf1, 2); rf = corrected(rf, 3);
+                            break;
+                        case 0:
+                        default:  // RGGB: R,G0,G1,B
+                            rf = corrected(rf, 0); gf0 = corrected(gf0, 1);
+                            gf1 = corrected(gf1, 2); bf = corrected(bf, 3);
+                            break;
+                    }
+                }
+                const int gf = (gf0 + gf1 + 1) >> 1;
+                const std::array<int64_t, 3> red_blue_contribution = {
+                    static_cast<int64_t>(camera_to_rec2020_q[0]) * rf +
+                        static_cast<int64_t>(camera_to_rec2020_q[2]) * bf,
+                    static_cast<int64_t>(camera_to_rec2020_q[3]) * rf +
+                        static_cast<int64_t>(camera_to_rec2020_q[5]) * bf,
+                    static_cast<int64_t>(camera_to_rec2020_q[6]) * rf +
+                        static_cast<int64_t>(camera_to_rec2020_q[8]) * bf
+                };
                 const auto channel = [&](int row) -> int {
                     const int64_t value = red_blue_contribution[row / 3] +
-                        static_cast<int64_t>(camera_to_rec2020_q[row + 1]) * camera_g;
+                        static_cast<int64_t>(camera_to_rec2020_q[row + 1]) * gf;
                     return std::clamp(
                         static_cast<int>((value + (kMatrixScale >> 1)) / kMatrixScale),
                         0,
                         kLinearScale
                     );
                 };
-                return {
+                const std::array<uint16_t, 3> rgb = {
                     hlg_lut[channel(0)],
                     hlg_lut[channel(3)],
                     hlg_lut[channel(6)]
                 };
-            };
-            const auto rgb = rec2020_hlg(gf);
-            const auto luma = [](const std::array<uint16_t, 3>& rgb_in) -> uint16_t {
-                return static_cast<uint16_t>(std::clamp(
-                    (269 * static_cast<int>(rgb_in[0]) +
-                        694 * static_cast<int>(rgb_in[1]) +
-                        61 * static_cast<int>(rgb_in[2]) + 512) >> 10,
-                    64,
-                    940
-                ));
-            };
-            const uint16_t y_val = luma(rgb);
-            const uint16_t y_shifted = static_cast<uint16_t>(y_val << 6);
-            const size_t top = static_cast<size_t>(y) * output_stride_pixels + x;
-            const size_t bottom = top + output_stride_pixels;
-            y_plane[top] = y_shifted;
-            y_plane[top + 1] = y_shifted;
-            y_plane[bottom] = y_shifted;
-            y_plane[bottom + 1] = y_shifted;
+                const uint16_t y_val = luma(rgb);
+                quad_y[static_cast<size_t>(ry) * num_quads + qx] = y_val;
 
-            const uint16_t cb = limited_chroma(
-                ((static_cast<int>(rgb[2]) - static_cast<int>(y_val)) * 557) >> 10
-            );
-            const uint16_t cr = limited_chroma(
-                ((static_cast<int>(rgb[0]) - static_cast<int>(y_val)) * 711) >> 10
-            );
-            const size_t uv = static_cast<size_t>(y / 2) * output_stride_pixels + x;
-            uv_plane[uv] = static_cast<uint16_t>(cb << 6);
-            uv_plane[uv + 1] = static_cast<uint16_t>(cr << 6);
+                const uint16_t cb = limited_chroma(
+                    ((static_cast<int>(rgb[2]) - static_cast<int>(y_val)) * 557) >> 10
+                );
+                const uint16_t cr = limited_chroma(
+                    ((static_cast<int>(rgb[0]) - static_cast<int>(y_val)) * 711) >> 10
+                );
+                const size_t uv = static_cast<size_t>(y / 2) * output_stride_pixels + x;
+                uv_plane[uv] = static_cast<uint16_t>(cb << 6);
+                uv_plane[uv + 1] = static_cast<uint16_t>(cr << 6);
+            }
+        }
+
+        // Pass 2: continuous 2D spatial bilinear interpolation for luminance.
+        for (int ry = 0; ry < num_row_pairs; ++ry) {
+            const int y = first_y + ry * 2;
+            const int prev_ry = ry > 0 ? ry - 1 : ry;
+            const int next_ry = ry + 1 < num_row_pairs ? ry + 1 : ry;
+            const auto* curr_row = &quad_y[static_cast<size_t>(ry) * num_quads];
+            const auto* prev_row = &quad_y[static_cast<size_t>(prev_ry) * num_quads];
+            const auto* next_row = &quad_y[static_cast<size_t>(next_ry) * num_quads];
+
+            const size_t top = static_cast<size_t>(y) * output_stride_pixels;
+            const size_t bottom = top + output_stride_pixels;
+
+            for (int qx = 0; qx < num_quads; ++qx) {
+                const int prev_qx = qx > 0 ? qx - 1 : qx;
+                const int next_qx = qx + 1 < num_quads ? qx + 1 : qx;
+
+                const uint32_t c = curr_row[qx];
+                const uint32_t h_left = (c * 3 + curr_row[prev_qx] + 2) >> 2;
+                const uint32_t h_right = (c * 3 + curr_row[next_qx] + 2) >> 2;
+
+                const uint32_t up_left = (static_cast<uint32_t>(prev_row[qx]) * 3 + prev_row[prev_qx] + 2) >> 2;
+                const uint32_t up_right = (static_cast<uint32_t>(prev_row[qx]) * 3 + prev_row[next_qx] + 2) >> 2;
+                const uint32_t down_left = (static_cast<uint32_t>(next_row[qx]) * 3 + next_row[prev_qx] + 2) >> 2;
+                const uint32_t down_right = (static_cast<uint32_t>(next_row[qx]) * 3 + next_row[next_qx] + 2) >> 2;
+
+                const uint16_t y00 = static_cast<uint16_t>(((h_left * 3 + up_left + 2) >> 2) << 6);
+                const uint16_t y01 = static_cast<uint16_t>(((h_right * 3 + up_right + 2) >> 2) << 6);
+                const uint16_t y10 = static_cast<uint16_t>(((h_left * 3 + down_left + 2) >> 2) << 6);
+                const uint16_t y11 = static_cast<uint16_t>(((h_right * 3 + down_right + 2) >> 2) << 6);
+
+                const size_t px = static_cast<size_t>(qx * 2);
+                y_plane[top + px] = y00;
+                y_plane[top + px + 1] = y01;
+                y_plane[bottom + px] = y10;
+                y_plane[bottom + px + 1] = y11;
             }
         }
     };

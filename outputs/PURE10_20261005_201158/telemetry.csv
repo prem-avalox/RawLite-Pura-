@@ -1,0 +1,4 @@
+elapsed_ms,battery_c,thermal_status,thermal_headroom,available_bytes,saved_frames,dropped_frames,pending_writes,no_metadata_drops,writer_busy_drops,write_error_drops,cadence_gaps,capture_failure_drops,audio_peak
+281,38.5,1,0.809,28212289536,0,0,0,0,0,0,0,0,0.000
+1696,38.5,1,0.811,28204732416,15,0,0,0,0,0,1,0,0.011
+3700,38.5,1,0.809,28192489472,45,0,0,0,0,0,1,0,0.012
