@@ -63,6 +63,13 @@ internal object Pure10AudioMuxer {
                     }
                 }
             }
+            if (wavFile.exists() && output.isFile && output.length() > 0L) {
+                wavFile.delete().also { deleted ->
+                    if (!deleted && wavFile.exists()) {
+                        Log.w(TAG, "Could not delete intermediate PURE 10 audio ${wavFile.name}")
+                    }
+                }
+            }
             val result = Pure10AudioMuxResult(
                 outputFile = output,
                 videoBytes = output.length(),

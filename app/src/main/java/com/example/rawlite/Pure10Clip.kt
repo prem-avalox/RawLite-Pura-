@@ -73,16 +73,17 @@ internal object Pure10Clip {
             )
             val audio = runCatching {
                 val audioMetadata = JSONObject(File(directory, "audio.json").readText())
-                val audioFile = File(directory, audioMetadata.optString("file", "audio.wav"))
-                if (!audioFile.isFile) {
-                    null
-                } else {
-                    val bits = audioMetadata.optInt("bits_per_sample", 0)
-                    val sampleRate = audioMetadata.optInt("sample_rate", 0) / 1000
-                    val channels = audioMetadata.optInt("channels", 0)
+                val bits = audioMetadata.optInt("bits_per_sample", 0)
+                val sampleRate = audioMetadata.optInt("sample_rate", 0) / 1000
+                val channels = audioMetadata.optInt("channels", 0)
+                if (bits > 0 && sampleRate > 0) {
                     "AUDIO ${bits}-bit ${sampleRate}k ${if (channels == 2) "ST" else "MONO"}"
+                } else if (integratedAudio) {
+                    "AUDIO AAC 48k ST"
+                } else {
+                    null
                 }
-            }.getOrNull()
+            }.getOrNull() ?: if (integratedAudio) "AUDIO AAC 48k ST" else null
             ClipSummary(
                 directory = directory,
                 camera = metadata.optString("camera", "Cámara"),
