@@ -1567,8 +1567,13 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
         if (first_y >= end_y) return;
         const int num_row_pairs = (end_y - first_y) / 2;
         const int num_quads = output_width / 2;
-        std::vector<uint16_t> quad_y(static_cast<size_t>(num_row_pairs) * num_quads);
+        const size_t total_quads = static_cast<size_t>(num_row_pairs) * num_quads;
+        std::vector<uint16_t> quad_rf(total_quads);
+        std::vector<uint16_t> quad_bf(total_quads);
+        std::vector<uint16_t> quad_gf(total_quads);
+        std::vector<uint16_t> quad_y(total_quads);
 
+        // Pass 1a: extract raw samples, apply lookup tables and lens shading
         for (int ry = 0; ry < num_row_pairs; ++ry) {
             const int y = first_y + ry * 2;
             const int source_y = crop_y + y;
@@ -1644,14 +1649,63 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
                             break;
                     }
                 }
-                const int gf = (gf0 + gf1 + 1) >> 1;
+                const size_t idx = static_cast<size_t>(ry) * num_quads + qx;
+                quad_rf[idx] = static_cast<uint16_t>(rf);
+                quad_bf[idx] = static_cast<uint16_t>(bf);
+                quad_gf[idx] = static_cast<uint16_t>((gf0 + gf1 + 1) >> 1);
+            }
+        }
+
+        // Pass 1b: Subpixel spatial centering of R and B to match G and Y center (cancels chromatic aberration)
+        const bool r_on_right = (cfa == 1 || cfa == 3);
+        const bool b_on_right = !r_on_right;
+        const bool r_on_bottom = (cfa == 2 || cfa == 3);
+        const bool b_on_bottom = !r_on_bottom;
+
+        for (int ry = 0; ry < num_row_pairs; ++ry) {
+            const int y = first_y + ry * 2;
+            const int r_ry_neighbor = r_on_bottom
+                ? (ry > 0 ? ry - 1 : ry)
+                : (ry + 1 < num_row_pairs ? ry + 1 : ry);
+            const int b_ry_neighbor = b_on_bottom
+                ? (ry > 0 ? ry - 1 : ry)
+                : (ry + 1 < num_row_pairs ? ry + 1 : ry);
+
+            const auto* curr_r = &quad_rf[static_cast<size_t>(ry) * num_quads];
+            const auto* v_r = &quad_rf[static_cast<size_t>(r_ry_neighbor) * num_quads];
+            const auto* curr_b = &quad_bf[static_cast<size_t>(ry) * num_quads];
+            const auto* v_b = &quad_bf[static_cast<size_t>(b_ry_neighbor) * num_quads];
+            const auto* curr_g = &quad_gf[static_cast<size_t>(ry) * num_quads];
+
+            for (int qx = 0; qx < num_quads; ++qx) {
+                const int r_qx_neighbor = r_on_right
+                    ? (qx > 0 ? qx - 1 : qx)
+                    : (qx + 1 < num_quads ? qx + 1 : qx);
+                const int b_qx_neighbor = b_on_right
+                    ? (qx > 0 ? qx - 1 : qx)
+                    : (qx + 1 < num_quads ? qx + 1 : qx);
+
+                const uint32_t r_c = curr_r[qx];
+                const uint32_t r_h = (r_c * 3 + curr_r[r_qx_neighbor] + 2) >> 2;
+                const uint32_t r_v_c = v_r[qx];
+                const uint32_t r_v_h = (r_v_c * 3 + v_r[r_qx_neighbor] + 2) >> 2;
+                const int rf_centered = static_cast<int>((r_h * 3 + r_v_h + 2) >> 2);
+
+                const uint32_t b_c = curr_b[qx];
+                const uint32_t b_h = (b_c * 3 + curr_b[b_qx_neighbor] + 2) >> 2;
+                const uint32_t b_v_c = v_b[qx];
+                const uint32_t b_v_h = (b_v_c * 3 + v_b[b_qx_neighbor] + 2) >> 2;
+                const int bf_centered = static_cast<int>((b_h * 3 + b_v_h + 2) >> 2);
+
+                const int gf = static_cast<int>(curr_g[qx]);
+
                 const std::array<int64_t, 3> red_blue_contribution = {
-                    static_cast<int64_t>(camera_to_rec2020_q[0]) * rf +
-                        static_cast<int64_t>(camera_to_rec2020_q[2]) * bf,
-                    static_cast<int64_t>(camera_to_rec2020_q[3]) * rf +
-                        static_cast<int64_t>(camera_to_rec2020_q[5]) * bf,
-                    static_cast<int64_t>(camera_to_rec2020_q[6]) * rf +
-                        static_cast<int64_t>(camera_to_rec2020_q[8]) * bf
+                    static_cast<int64_t>(camera_to_rec2020_q[0]) * rf_centered +
+                        static_cast<int64_t>(camera_to_rec2020_q[2]) * bf_centered,
+                    static_cast<int64_t>(camera_to_rec2020_q[3]) * rf_centered +
+                        static_cast<int64_t>(camera_to_rec2020_q[5]) * bf_centered,
+                    static_cast<int64_t>(camera_to_rec2020_q[6]) * rf_centered +
+                        static_cast<int64_t>(camera_to_rec2020_q[8]) * bf_centered
                 };
                 const auto channel = [&](int row) -> int {
                     const int64_t value = red_blue_contribution[row / 3] +
@@ -1676,7 +1730,7 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
                 const uint16_t cr = limited_chroma(
                     ((static_cast<int>(rgb[0]) - static_cast<int>(y_val)) * 711) >> 10
                 );
-                const size_t uv = static_cast<size_t>(y / 2) * output_stride_pixels + x;
+                const size_t uv = static_cast<size_t>(y / 2) * output_stride_pixels + (qx * 2);
                 uv_plane[uv] = static_cast<uint16_t>(cb << 6);
                 uv_plane[uv + 1] = static_cast<uint16_t>(cr << 6);
             }

@@ -1,0 +1,194 @@
+{
+  "camera": "Principal · 6.8 mm",
+  "camera_id": "2",
+  "width": 2032,
+  "height": 1536,
+  "frame_rate": 24,
+  "telemetry_file": "telemetry.csv",
+  "audio_enabled": true,
+  "audio_file": "audio.wav",
+  "audio_metadata_file": "audio.json",
+  "sync_file": "sync.json",
+  "sensor_orientation": 90,
+  "display_rotation_degrees": 270,
+  "detected_device_orientation_degrees": 270,
+  "ui_content_rotation_degrees": 0,
+  "front_facing": false,
+  "rotation_degrees": 0,
+  "preview_width": 1024,
+  "preview_height": 768,
+  "cfa": "GBRG",
+  "black_level": [
+    64,
+    64,
+    64,
+    64
+  ],
+  "white_level": 1023,
+  "color_matrix_1": [
+    [
+      12453,
+      10000
+    ],
+    [
+      -6954,
+      10000
+    ],
+    [
+      134,
+      10000
+    ],
+    [
+      -2949,
+      10000
+    ],
+    [
+      11718,
+      10000
+    ],
+    [
+      1364,
+      10000
+    ],
+    [
+      71,
+      10000
+    ],
+    [
+      1626,
+      10000
+    ],
+    [
+      6290,
+      10000
+    ]
+  ],
+  "color_matrix_2": [
+    [
+      10537,
+      10000
+    ],
+    [
+      -4544,
+      10000
+    ],
+    [
+      -906,
+      10000
+    ],
+    [
+      -3178,
+      10000
+    ],
+    [
+      11784,
+      10000
+    ],
+    [
+      1552,
+      10000
+    ],
+    [
+      -109,
+      10000
+    ],
+    [
+      1865,
+      10000
+    ],
+    [
+      5324,
+      10000
+    ]
+  ],
+  "reference_illuminant_1": 17,
+  "reference_illuminant_2": 21,
+  "format": "rawlite-pure10",
+  "version": 1,
+  "mode": "PURE 10",
+  "container": "MP4",
+  "video_file": "pure10_final.mp4",
+  "codec": "HEVC",
+  "codec_profile": "Main10",
+  "encoder": "c2.exynos.hevc.encoder",
+  "bits_per_sample": 10,
+  "pixel_format": "P010",
+  "color_primaries": "BT.2020",
+  "color_space": "Rec.2020",
+  "transfer": "Rec.2100 HLG (ARIB STD-B67)",
+  "gamma": "Rec.2100 HLG",
+  "range": "limited",
+  "color_temperature_kelvin": 4300,
+  "color_pipeline": "RAW10 -> DNG AsShotNeutral gains -> dual-illuminant ColorMatrix -> Bradford D50\/D65 -> linear Rec.2020 -> Rec.2100 HLG",
+  "color_transform_strategy": "white-balanced DNG camera space",
+  "white_balanced_camera_rgb_to_rec2020_reference": [
+    0.7713908553123474,
+    0.36524027585983276,
+    -0.13663116097450256,
+    -0.14260481297969818,
+    1.269850730895996,
+    -0.12724590301513672,
+    -0.1131211444735527,
+    -1.0268173217773438,
+    2.1399385929107666
+  ],
+  "color_adjustment": "none",
+  "scene_linear_gain": 1.505247,
+  "baseline_exposure": 0.59,
+  "bit_rate": 50000000,
+  "source": "Camera2 RAW10",
+  "demosaic": "native 2x2",
+  "finalized": true,
+  "unique_camera_model": "Google Pixel 6",
+  "color_profile": "Google Pixel 6 main DNG",
+  "color_profile_source": "PXL_20260805_192832722.RAW-02.ORIGINAL.dng",
+  "raw_source_width": 2032,
+  "raw_source_height": 1536,
+  "pure10_crop_x": 0,
+  "pure10_crop_y": 0,
+  "pure10_experimental_4k": false,
+  "hlg10_profile_id": "sensor-2k-4x3",
+  "hlg10_output_width": 2032,
+  "hlg10_output_height": 1536,
+  "hlg10_aspect_ratio": "4:3",
+  "hlg10_profile_status": "VALIDATED",
+  "sensor_capture_rotation_degrees": 180,
+  "requested_frame_duration_ns": 41666666,
+  "recording_exposure_policy": "manual",
+  "auto_cadence_lock": false,
+  "lens_shading_correction": "camera2-capture-start-cached",
+  "video_bytes": 20142699,
+  "saved_frames": 75,
+  "dropped_frames": 0,
+  "cadence_gaps": 1,
+  "peak_pending_writes": 1,
+  "no_metadata_drops": 0,
+  "writer_busy_drops": 0,
+  "write_error_drops": 0,
+  "capture_interval_count": 74,
+  "capture_long_intervals": 1,
+  "capture_interval_average_ns": 42119592,
+  "capture_interval_min_ns": 41557861,
+  "capture_interval_max_ns": 83115967,
+  "capture_effective_fps": 23.74192003667816,
+  "submitted_frames": 75,
+  "encoded_frames": 75,
+  "encoder_drops": 0,
+  "queue_average_ms": 0.540956,
+  "queue_max_ms": 1.637939,
+  "conversion_average_ms": 19.886082,
+  "conversion_max_ms": 54.848877,
+  "processing_average_ms": 22.30958,
+  "processing_max_ms": 58.393311,
+  "encoder_first_timestamp_ns": 165101217478390,
+  "encoder_last_timestamp_ns": 165104334328244,
+  "capture_failure_drops": 0,
+  "final_video_file": "pure10_final.mp4",
+  "final_video_has_audio": true,
+  "final_video_bytes": 20223034,
+  "audio_mux_finalized": true,
+  "audio_mux_offset_ns": 121474574,
+  "audio_codec": "AAC-LC",
+  "intermediate_video_file": "pure10.mp4",
+  "intermediate_video_deleted": true
+}
