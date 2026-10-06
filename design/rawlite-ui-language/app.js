@@ -118,46 +118,32 @@ const captureFormats = [
     color: "REC.2020 / HLG",
     colorNote: "Metadatos Rec.2100",
     audio: "AAC · 48 KHZ",
-    audioNote: "Integrado en MP4",
+    audioNote: "Integrado en MP4 (sin WAV duplicado)",
     bitrate: "AUTO · 82 MB/S",
     bitrateNote: "Límite medido del perfil",
-    compatibleResolutions: ["uhd169", "2k169", "fhd169"],
+    compatibleResolutions: ["uhd169", "2k43", "fhd169"],
     compatibility: "HEVC MAIN10 POR HARDWARE · 24/30 FPS · AUDIO INTEGRADO"
   },
   {
-    id: "raw10",
-    label: "RAW 10",
-    short: "BAYER LOSSLESS",
+    id: "raw",
+    label: "RAW",
+    short: "BAYER SENSOR",
     color: "SENSOR / DNG",
-    colorNote: "Matrices al convertir",
+    colorNote: "Perfil DNG Pixel 6",
     audio: "PCM · 48 KHZ",
     audioNote: "WAV sincronizado",
     bitrate: "VARIABLE",
-    bitrateNote: "Compresión RAW sin pérdida",
+    bitrateNote: "Secuencia DNG o Contenedor RAW10C",
     compatibleResolutions: ["full43", "2k43"],
-    compatibility: "RAW10 + PREVIEW VERIFICADO · 24 FPS · ESCRITURA DIRECTA"
-  },
-  {
-    id: "cinemadng",
-    label: "CINEMADNG",
-    short: "SECUENCIA DNG",
-    color: "SENSOR / DNG",
-    colorNote: "Metadatos por fotograma",
-    audio: "PCM · 48 KHZ",
-    audioNote: "WAV sincronizado",
-    bitrate: "SIN COMPRESIÓN",
-    bitrateNote: "Limitado por almacenamiento",
-    compatibleResolutions: ["full43"],
-    compatibility: "RAW SENSOR VERIFICADO · 24 FPS · ALTO USO DE ESPACIO"
+    compatibility: "RAW SENSOR VERIFICADO · DNG O RAW10C · ESCRITURA DIRECTA"
   }
 ];
 
 const captureResolutions = [
-  { id: "full43", label: "4080×3072", name: "FULL", ratio: "4:3", detail: "12.5 MP" },
-  { id: "uhd169", label: "3840×2160", name: "UHD", ratio: "16:9", detail: "8.3 MP" },
-  { id: "2k43", label: "2032×1536", name: "2K", ratio: "4:3", detail: "3.1 MP" },
-  { id: "2k169", label: "2048×1152", name: "2K", ratio: "16:9", detail: "2.4 MP" },
-  { id: "fhd169", label: "1920×1080", name: "FHD", ratio: "16:9", detail: "2.1 MP" }
+  { id: "full43", label: "4080×3072", name: "FULL 4K", ratio: "4:3", detail: "SECUENCIA CINEMADNG (12.5 MP)" },
+  { id: "2k43", label: "2032×1536", name: "2K", ratio: "4:3", detail: "CONTENEDOR RAW10C (3.1 MP)" },
+  { id: "uhd169", label: "3840×2160", name: "UHD", ratio: "16:9", detail: "8.3 MP · HEVC HLG" },
+  { id: "fhd169", label: "1920×1080", name: "FHD", ratio: "16:9", detail: "2.1 MP · HEVC HLG" }
 ];
 
 let appliedFormatId = "hlg10";
@@ -740,24 +726,57 @@ function init() {
   $("#share-selected").onclick = () => showToast(`LISTO PARA COMPARTIR · ${selected.size} ${selected.size === 1 ? "TOMA" : "TOMAS"}`);
   $("#tools-selected").onclick = event => showToolsMenu(event.currentTarget, clips.filter(clip => selected.has(clip.id)));
   $("#delete-selected").onclick = () => showDeleteDialog(clips.filter(clip => selected.has(clip.id)));
+  let activeFormatFilter = "ALL";
+  let activeSortOrder = "newest";
+
+  window.applyGalleryFilter = (format) => {
+    activeFormatFilter = format;
+    const cards = $$(".clip-card");
+    let visibleCount = 0;
+    cards.forEach(card => {
+      const clip = clips.find(c => c.id === card.dataset.clipId);
+      if (!clip) return;
+      const match = format === "ALL" ||
+        (format === "HLG10" && clip.format === "PURE 10") ||
+        (format === "RAW10" && clip.format === "RAW10") ||
+        (format === "CINEMADNG" && clip.format === "CinemaDNG");
+      card.style.display = match ? "" : "none";
+      if (match) visibleCount++;
+    });
+    const statusLabel = format === "ALL" ? "TODAS LAS TOMAS" : (format === "HLG10" ? "SÓLO HLG 10" : (format === "RAW10" ? "SÓLO RAW 10" : "SÓLO CINEMADNG"));
+    const filterEl = $("#gallery-filter-status");
+    if (filterEl) filterEl.textContent = `FILTRO / ${statusLabel}`;
+    showToast(`FILTRO · ${statusLabel} (${visibleCount})`);
+  };
+
   $("#gallery-more").onclick = event => {
     showPopover(event.currentTarget, `
-      <span class="popover-section-label">GALERÍA</span>
+      <span class="popover-section-label">FILTRAR POR FORMATO</span>
+      <button class="popover-button" data-filter-format="ALL">TODOS LOS FORMATOS</button>
+      <button class="popover-button" data-filter-format="HLG10">HLG 10 (HEVC MAIN10)</button>
+      <button class="popover-button" data-filter-format="RAW10">RAW 10 (CONTENEDOR 2K)</button>
+      <button class="popover-button" data-filter-format="CINEMADNG">CINEMADNG (SECUENCIA 4K)</button>
+      <div class="popover-divider"></div>
+      <span class="popover-section-label">ACCIONES DE TOMAS</span>
       <button class="popover-button" data-gallery-action="select-all">${icon("i-check")}SELECCIONAR TODO</button>
       <button class="popover-button" data-gallery-action="location">${icon("i-info")}UBICACIÓN DE TOMAS</button>
-      <div class="popover-divider"></div>
-      <span class="popover-section-label">ORDEN</span>
-      <button class="popover-button" data-gallery-action="recent">MÁS RECIENTES PRIMERO</button>
     `);
     $("#popover").onclick = popEvent => {
+      const formatBtn = popEvent.target.closest("[data-filter-format]");
+      if (formatBtn) {
+        closePopover();
+        window.applyGalleryFilter(formatBtn.dataset.filterFormat);
+        return;
+      }
       const action = popEvent.target.closest("[data-gallery-action]")?.dataset.galleryAction;
       if (!action) return;
       closePopover();
       if (action === "select-all") {
         setSelectionMode(true);
         clips.forEach(clip => setClipSelected(clip.id, true));
-      } else if (action === "location") showToast("ANDROID / MOVIES / RAWLITE");
-      else showToast("ORDEN · MÁS RECIENTES");
+      } else if (action === "location") {
+        showToast("DCIM / MOVIES / RAWLITE");
+      }
     };
   };
   $("#player-back").onclick = () => showScreen("gallery");
@@ -801,6 +820,62 @@ function init() {
     $$("button", control).forEach(item => item.classList.toggle("is-active", item === button));
     showToast(`${control.dataset.segmented === "handedness" ? "CONTROL" : "HÁPTICA"} · ${button.textContent}`);
   });
+    // Wire composition grids
+  $$("[data-grid-choice]").forEach(button => {
+    button.addEventListener("click", () => {
+      const choice = button.dataset.gridChoice;
+      $$("[data-grid-choice]").forEach(b => {
+        const isActive = b === button;
+        b.classList.toggle("is-active", isActive);
+        b.setAttribute("aria-checked", String(isActive));
+      });
+      const preview = $("#grid-preview");
+      preview.dataset.grid = choice;
+      const labels = {
+        off: "COMPOSICIÓN · VISOR LIMPIO",
+        thirds: "COMPOSICIÓN · TERCIOS 3×3",
+        center: "COMPOSICIÓN · CUADRÍCULA DE CENTRO (4 CUADRANTES)",
+        golden: "COMPOSICIÓN · PROPORCIÓN ÁUREA (ESPIRAL DE FIBONACCI)",
+        diagonal: "COMPOSICIÓN · DIAGONAL ARMÓNICA",
+        scope: "COMPOSICIÓN · 2.39:1 PANORÁMICO"
+      };
+      showToast(labels[choice] || "COMPOSICIÓN ACTUALIZADA");
+    });
+  });
+
+  // Wire Invert button for Golden and Diagonal
+  const invertBtn = $("#btn-invert-grid");
+  if (invertBtn) {
+    invertBtn.addEventListener("click", () => {
+      const preview = $("#grid-preview");
+      const current = preview.dataset.gridInverted === "true";
+      const next = !current;
+      preview.dataset.gridInverted = String(next);
+      invertBtn.classList.toggle("is-active", next);
+      invertBtn.setAttribute("aria-pressed", String(next));
+      showToast(next ? "CUADRÍCULA · INVERTIDA ⇄" : "CUADRÍCULA · ESTÁNDAR");
+    });
+  }
+
+  // Wire Additive Safe Zones (DaVinci Resolve Style)
+  $$(".safe-zone-toggle").forEach(cb => {
+    cb.addEventListener("change", () => {
+      const safeId = cb.dataset.safeId;
+      const overlay = $(`#overlay-${safeId}`);
+      if (overlay) {
+        overlay.classList.toggle("is-active", cb.checked);
+      }
+      const names = {
+        reels916: "ÁREA SEGURA · 9:16 REELS/TIKTOK",
+        feed11: "ÁREA SEGURA · 1:1 FEED",
+        portrait45: "ÁREA SEGURA · 4:5 RETRATO",
+        action90: "ÁREA SEGURA · 90% ACTION",
+        title80: "ÁREA SEGURA · 80% TITLE"
+      };
+      showToast(`${names[safeId] || "ZONA SEGURA"} · ${cb.checked ? "ACTIVA" : "DESACTIVADA"}`);
+    });
+  });
+
   $$(".switch-input").forEach(input => input.addEventListener("change", () => showToast(input.checked ? "AJUSTE ACTIVADO" : "AJUSTE DESACTIVADO")));
   $$(".settings-action").forEach(button => button.onclick = () => showToast(button.textContent.trim()));
   $$(".setting-row-button").forEach(button => button.onclick = () => showToast($("strong", button).textContent));
@@ -849,7 +924,7 @@ function init() {
       else showScreen("gallery");
     }
     if (["1", "2", "3", "4"].includes(event.key) && !event.metaKey && !event.ctrlKey) {
-      const names = ["gallery", "player", "settings", "language"];
+      const names = ["gallery", "settings", "language"];
       const target = names[Number(event.key) - 1];
       if (target === "player") openPlayer(activeClip || clips[0]); else showScreen(target);
     }

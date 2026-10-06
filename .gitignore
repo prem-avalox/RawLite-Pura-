@@ -28,3 +28,4 @@ test-output/
 .cxx/
 externalNativeBuild/
 .android/
+design/*-backup*

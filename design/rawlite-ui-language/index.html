@@ -35,7 +35,6 @@
     </div>
     <nav class="lab-nav">
       <button class="lab-tab is-active" data-screen="gallery">TOMAS</button>
-      <button class="lab-tab" data-screen="player">REPRODUCTOR</button>
       <button class="lab-tab" data-screen="settings">AJUSTES</button>
       <button class="lab-tab" data-screen="language">LENGUAJE</button>
     </nav>
@@ -55,7 +54,7 @@
           <h1 id="gallery-title">TOMAS</h1>
           <p id="gallery-summary">5 TOMAS · 18,7 GB</p>
         </div>
-        <button class="text-button accent" id="select-mode">SEL</button>
+        <button class="text-button accent" id="select-mode">SELECCIONAR</button>
         <button class="icon-button" id="gallery-more" aria-label="Más opciones">
           <svg><use href="#i-more"/></svg>
         </button>
@@ -159,24 +158,160 @@
           <section class="settings-group is-active" id="settings-general" data-settings-group="general">
             <div class="settings-section-lead">
               <span class="eyebrow">GENERAL / VISOR</span>
-              <h2>La imagen primero.<br>Las ayudas, sólo cuando sirven.</h2>
-              <p>Estos ajustes modifican la operación y el visor. Nunca alteran el archivo capturado.</p>
+              <h2>RETÍCULAS Y ASISTENCIAS DE ENCUADRE</h2>
+              <p>Configuración de guías de composición óptica, áreas seguras para redes y ergonomía de control.</p>
             </div>
 
-            <div class="grid-config">
-              <div class="grid-preview" id="grid-preview" data-grid="thirds" aria-label="Vista previa de cuadrícula">
-                <span class="grid-preview-h one"></span><span class="grid-preview-h two"></span>
-                <span class="grid-preview-v one"></span><span class="grid-preview-v two"></span>
-                <span class="grid-preview-center horizontal"></span><span class="grid-preview-center vertical"></span>
-                <span class="grid-preview-frame"></span>
+                        <div class="grid-config">
+              <div class="grid-preview" id="grid-preview" data-grid="thirds" data-grid-inverted="false" aria-label="Vista previa de composición y áreas seguras">
+                
+                <!-- Capas de Cuadrículas de Composición (Excluyentes) -->
+                <div class="grid-layer-container" id="grid-layer-container">
+                  <!-- Tercios (3x3) -->
+                  <div class="grid-layer grid-layer-thirds">
+                    <span class="grid-line-h one"></span><span class="grid-line-h two"></span>
+                    <span class="grid-line-v one"></span><span class="grid-line-v two"></span>
+                  </div>
+
+                  <!-- Cuadrícula de Centro (2x2 / 4 cuadrantes completos) -->
+                  <div class="grid-layer grid-layer-center">
+                    <span class="grid-center-h"></span>
+                    <span class="grid-center-v"></span>
+                  </div>
+
+                  <!-- Proporción Áurea (Clásica Espiral de Fibonacci + Rectángulos Áureos) -->
+                  <div class="grid-layer grid-layer-golden">
+                    <svg class="golden-spiral-svg" viewBox="0 0 1000 618" preserveAspectRatio="none" aria-hidden="true">
+                      <!-- Rectángulos áureos -->
+                      <line x1="382" y1="0" x2="382" y2="618" stroke="rgba(255,193,0,0.5)" stroke-width="1.5" />
+                      <line x1="0" y1="382" x2="382" y2="382" stroke="rgba(255,193,0,0.5)" stroke-width="1.5" />
+                      <line x1="236" y1="382" x2="236" y2="618" stroke="rgba(255,193,0,0.5)" stroke-width="1.5" />
+                      <line x1="236" y1="472" x2="382" y2="472" stroke="rgba(255,193,0,0.5)" stroke-width="1.5" />
+                      <line x1="292" y1="472" x2="292" y2="618" stroke="rgba(255,193,0,0.5)" stroke-width="1.5" />
+                      <line x1="236" y1="528" x2="292" y2="528" stroke="rgba(255,193,0,0.5)" stroke-width="1.5" />
+                      <!-- Espiral Áurea de Fibonacci continua -->
+                      <path d="M 1000,618 A 618,618 0 0,0 382,0 A 382,382 0 0,0 0,382 A 236,236 0 0,0 236,618 A 146,146 0 0,0 382,472 A 90,90 0 0,0 292,382 A 56,56 0 0,0 236,438 A 34,34 0 0,0 270,472" fill="none" stroke="var(--yellow)" stroke-width="2.5" stroke-linecap="round" />
+                    </svg>
+                  </div>
+
+                  <!-- Cuadrícula Diagonal Armónica -->
+                  <div class="grid-layer grid-layer-diagonal">
+                    <svg class="diagonal-svg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+                      <line x1="0" y1="0" x2="100" y2="100" stroke="rgba(255,255,255,0.7)" stroke-width="0.8" stroke-dasharray="3,3" />
+                      <line x1="100" y1="0" x2="0" y2="100" stroke="rgba(255,255,255,0.7)" stroke-width="0.8" stroke-dasharray="3,3" />
+                      <line x1="0" y1="100" x2="50" y2="0" stroke="rgba(255,193,0,0.6)" stroke-width="0.8" />
+                      <line x1="100" y1="100" x2="50" y2="0" stroke="rgba(255,193,0,0.6)" stroke-width="0.8" />
+                    </svg>
+                  </div>
+
+                  <!-- Panorámico 2.39:1 -->
+                  <div class="grid-layer grid-layer-scope">
+                    <span class="grid-scope-matte"></span>
+                  </div>
+                </div>
+
+                <!-- ZONAS SEGURAS SUPERPUESTAS Y SUMABLES (DaVinci Resolve Style) -->
+                <div class="safezone-overlays-container" aria-hidden="true">
+                  <!-- 9:16 Reels / TikTok / Shorts -->
+                  <div class="safezone-layer" id="overlay-reels916">
+                    <div class="safezone-box-916">
+                      <span class="safezone-matte-side left"></span>
+                      <span class="safezone-matte-side right"></span>
+                      <div class="safezone-guide-916">
+                        <span class="safezone-guide-line top"></span>
+                        <span class="safezone-guide-line bottom"></span>
+                        <span class="safezone-guide-line right"></span>
+                        <span class="safezone-tag top">TOP 15% (BARRAS)</span>
+                        <span class="safezone-tag bottom">UI 20% (DESCRIPCIÓN / AUDIO)</span>
+                        <span class="safezone-tag right">ICONS 15%</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- 1:1 Feed Instagram -->
+                  <div class="safezone-layer" id="overlay-feed11">
+                    <div class="safezone-box-11">
+                      <span class="safezone-tag top-left">FEED 1:1</span>
+                    </div>
+                  </div>
+
+                  <!-- 4:5 Retrato Instagram -->
+                  <div class="safezone-layer" id="overlay-portrait45">
+                    <div class="safezone-box-45">
+                      <span class="safezone-tag bottom-left">4:5 RETRATO</span>
+                    </div>
+                  </div>
+
+                  <!-- 90% Action Safe -->
+                  <div class="safezone-layer" id="overlay-action90">
+                    <div class="safezone-box-action">
+                      <span class="safezone-tag top-right">ACTION 90%</span>
+                    </div>
+                  </div>
+
+                  <!-- 80% Title Safe -->
+                  <div class="safezone-layer" id="overlay-title80">
+                    <div class="safezone-box-title">
+                      <span class="safezone-tag bottom-right">TITLE 80%</span>
+                    </div>
+                  </div>
+                </div>
+
                 <div class="grid-preview-copy"><small>PREVIEW</small><strong>24 <i>FPS</i></strong></div>
               </div>
-              <div class="grid-options" role="radiogroup" aria-label="Cuadrícula del visor">
-                <div class="section-heading"><span>CUADRÍCULA</span><small>NO SE GRABA</small></div>
+
+              <div class="grid-options" aria-label="Guías de encuadre y zonas seguras">
+                <div class="section-heading"><span>GUÍA DE COMPOSICIÓN</span></div>
                 <button class="grid-choice" data-grid-choice="off" role="radio" aria-checked="false"><strong>NINGUNA</strong><small>Visor limpio</small></button>
-                <button class="grid-choice is-active" data-grid-choice="thirds" role="radio" aria-checked="true"><strong>TERCIOS</strong><small>Composición 3 × 3</small></button>
-                <button class="grid-choice" data-grid-choice="center" role="radio" aria-checked="false"><strong>CENTRO</strong><small>Ejes ópticos</small></button>
-                <button class="grid-choice" data-grid-choice="scope" role="radio" aria-checked="false"><strong>2.39:1</strong><small>Área segura panorámica</small></button>
+                <button class="grid-choice is-active" data-grid-choice="thirds" role="radio" aria-checked="true"><strong>TERCIOS</strong><small>Composición 3 × 3 (33.3% / 66.6%)</small></button>
+                <button class="grid-choice" data-grid-choice="center" role="radio" aria-checked="false"><strong>CUADRÍCULA DE CENTRO</strong><small>Ejes completos en 4 cuadrantes (50% / 50%)</small></button>
+
+                <!-- Bloque con Invertir para Áurea y Diagonal -->
+                <div class="grid-invert-block">
+                  <div class="grid-invert-header">
+                    <span>COMPOSICIÓN DINÁMICA</span>
+                    <button class="invert-btn" id="btn-invert-grid" title="Invertir orientación horizontal de la cuadrícula" aria-pressed="false">
+                      <svg class="icon-flip" viewBox="0 0 24 24"><path d="M8 7h8m0 0-3-3m3 3-3 3M16 17H8m0 0 3 3m-3-3 3-3"/></svg>
+                      <span>INVERTIR ⇄</span>
+                    </button>
+                  </div>
+                  <button class="grid-choice" data-grid-choice="golden" role="radio" aria-checked="false"><strong>PROPORCIÓN ÁUREA</strong><small>Espiral de Fibonacci + Rectángulos Phi</small></button>
+                  <button class="grid-choice" data-grid-choice="diagonal" role="radio" aria-checked="false"><strong>DIAGONAL</strong><small>Armadura armónica desde esquinas</small></button>
+                </div>
+
+                <button class="grid-choice" data-grid-choice="scope" role="radio" aria-checked="false"><strong>2.39:1 PANORÁMICO</strong><small>Formato anamórfico / cine</small></button>
+
+                <div class="section-heading" style="margin-top: 20px;">
+                  <span>ZONAS SEGURAS (SUMABLES)</span>
+                  <small>SUPERPOSICIÓN DAVINCI</small>
+                </div>
+                <div class="safezone-checklist" role="group" aria-label="Zonas seguras superpuestas">
+                  <label class="safe-check-item">
+                    <input type="checkbox" class="safe-zone-toggle" data-safe-id="reels916">
+                    <span class="safe-check-indicator"></span>
+                    <span class="safe-check-text"><strong>9:16 REELS / TIKTOK / SHORTS</strong><small>Caja vertical con insets de botones</small></span>
+                  </label>
+                  <label class="safe-check-item">
+                    <input type="checkbox" class="safe-zone-toggle" data-safe-id="feed11">
+                    <span class="safe-check-indicator"></span>
+                    <span class="safe-check-text"><strong>1:1 FEED INSTAGRAM</strong><small>Recorte cuadrado central</small></span>
+                  </label>
+                  <label class="safe-check-item">
+                    <input type="checkbox" class="safe-zone-toggle" data-safe-id="portrait45">
+                    <span class="safe-check-indicator"></span>
+                    <span class="safe-check-text"><strong>4:5 RETRATO</strong><small>Feed vertical Instagram</small></span>
+                  </label>
+                  <label class="safe-check-item">
+                    <input type="checkbox" class="safe-zone-toggle" data-safe-id="action90">
+                    <span class="safe-check-indicator"></span>
+                    <span class="safe-check-text"><strong>90% ACTION SAFE</strong><small>Margen de acción broadcast</small></span>
+                  </label>
+                  <label class="safe-check-item">
+                    <input type="checkbox" class="safe-zone-toggle" data-safe-id="title80">
+                    <span class="safe-check-indicator"></span>
+                    <span class="safe-check-text"><strong>80% TITLE SAFE</strong><small>Margen de títulos y subtítulos</small></span>
+                  </label>
+                </div>
               </div>
             </div>
 
@@ -213,7 +348,7 @@
               <div>
                 <span class="eyebrow">PROYECTO / CAPTURA</span>
                 <h2>PERFIL 01</h2>
-                <p>Todo lo que define el archivo final vive aquí. Los controles de exposición permanecen en el visor.</p>
+                <p>Configuración del pipeline de captura, contenedor y perfil de hardware verificado.</p>
               </div>
               <div class="project-health"><span></span><strong>COMPATIBLE</strong><small>PIXEL 6 · CÁMARA 24 MM</small></div>
             </div>
@@ -256,13 +391,13 @@
           </header>
 
           <div class="wheel-stage">
-            <div class="config-wheel is-focused" id="format-wheel" data-wheel="format" tabindex="0" aria-label="Formato">
-              <div class="wheel-heading"><span>01</span><strong>FORMATO</strong><small>TIPO DE ARCHIVO</small></div>
+            <div class="config-wheel is-focused" id="format-wheel" data-wheel="format" tabindex="0" aria-label="Pipeline de procesado">
+              <div class="wheel-heading"><span>01</span><strong>PIPELINE</strong><small>TIPO DE PROCESADO</small></div>
               <div class="wheel-window"><div class="wheel-list" id="format-wheel-list"></div><span class="wheel-focus-line"></span></div>
             </div>
             <div class="wheel-connector" aria-hidden="true"><span></span><i></i><span></span></div>
-            <div class="config-wheel" id="resolution-wheel" data-wheel="resolution" tabindex="0" aria-label="Resolución">
-              <div class="wheel-heading"><span>02</span><strong>RESOLUCIÓN</strong><small>VENTANA DE CAPTURA</small></div>
+            <div class="config-wheel" id="resolution-wheel" data-wheel="resolution" tabindex="0" aria-label="Resolución y Contenedor">
+              <div class="wheel-heading"><span>02</span><strong>RESOLUCIÓN / CONTENEDOR</strong><small>VENTANA Y FLUJO</small></div>
               <div class="wheel-window"><div class="wheel-list" id="resolution-wheel-list"></div><span class="wheel-focus-line"></span></div>
             </div>
           </div>
@@ -273,7 +408,10 @@
               <div><strong>COMBINACIÓN VERIFICADA</strong><small id="compatibility-copy">HEVC MAIN10 POR HARDWARE · 24/30 FPS · AUDIO INTEGRADO</small></div>
             </div>
             <div class="profile-selection-summary"><span>SELECCIÓN</span><strong id="profile-selection-value">HLG 10 · 3840×2160</strong><small id="profile-selection-detail">16:9 · REC.2100 HLG</small></div>
-            <div class="profile-editor-actions"><button id="cancel-capture-profile">CANCELAR</button><button class="primary" id="apply-capture-profile">USAR CONFIGURACIÓN</button></div>
+            <div class="profile-editor-actions">
+              <button id="cancel-capture-profile" class="btn-cancel">CANCELAR</button>
+              <button class="primary btn-apply" id="apply-capture-profile">USAR CONFIGURACIÓN</button>
+            </div>
           </footer>
         </section>
       </div>

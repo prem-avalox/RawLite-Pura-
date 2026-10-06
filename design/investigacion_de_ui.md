@@ -70,21 +70,25 @@ Al ser RawLite una herramienta de captura técnica profesional, su interfaz debe
 
 ---
 
-### Punto 5: Retículas, Cuadrículas y Safe Zones para Redes Verticales
-* **Problema detectado:**
-  1. El distintivo *"NO SE GRABA"* es innecesario. Un operador de cámara RAW sabe por defecto que las asistencias de pantalla no se queman en el negativo.
-  2. La opción *"CENTRO"* se titula erróneamente como cuadrícula cuando se trata de una **retícula de punto central / cruz óptica (*center crosshair*)**.
-* **Nueva funcionalidad: Superposición de Safe Zones para Redes Sociales (9:16):**
-  Al capturar vídeo horizontal (16:9 o 4:3), es vital encuadrar pensando en la distribución vertical en plataformas como **Instagram Reels, TikTok y YouTube Shorts**.
-* **Especificaciones recomendadas de Safe Zones (Canvas vertical 1080×1920 / Proporción 9:16 centrada):**
-  - **Margen Superior (Top Inset):** `15%` (aprox. 288 px). Zona reservada para botones de navegación, pestañas "Siguiendo/Para ti" y barras de estado.
-  - **Margen Inferior (Bottom Inset):** `20%–22%` (aprox. 384–422 px). Zona crítica donde las aplicaciones superponen nombre de usuario, descripción, hashtags, selector de audio y botón de acción.
-  - **Margen Lateral Derecho (Right Inset):** `12%–15%` (aprox. 130–160 px). Columna vertical de interacción (avatar, botón de like, comentarios, guardar y compartir).
-  - **Zona Segura Central Cuadrada (1:1):** Caja centrada de `1080×1080` (utilizada por Instagram para el recorte en cuadrícula del feed).
-* **Propuesta de controles:**
-  - Separar en dos selectores independientes:
-    1. **Guía de Composición:** `NINGUNA` | `TERCIOS (3×3)` | `RETÍCULA DE CENTRO (+)` | `PANORÁMICO (2.39:1)`.
-    2. **Área Segura Social (Toggle superpuesto):** `OFF` | `VERTICAL 9:16 (Reels / TikTok / Shorts)` | `FEED 1:1`.
+### Punto 5: Cuadrículas de Composición, Espiral Áurea de Fibonacci y Zonas Seguras Sumables
+* **Revisión de Guías de Composición (Exclusivas):**
+  1. **Eliminar la retícula de cruz central (+):** En su lugar, incorporar una verdadera **Cuadrícula de Centro (2×2)** con ejes ortogonales completos de lado a lado que dividen el fotograma en cuatro cuadrantes iguales (50% / 50%) para composiciones simétricas y balance de masas.
+  2. **Espiral Áurea clásica de Fibonacci (Golden Spiral):** Implementar la construcción geométrica canónica basada en rectángulos áureos subdivididos sucesivamente ($1, 1, 2, 3, 5, 8, 13, 21 \dots$) con el arco logarítmico continuo que guía la mirada hacia el ojo/foco de atención áureo.
+  3. **Cuadrícula Diagonal (Armadura Armónica):** Diagonales continuas desde las cuatro esquinas hacia los centros y vértices opuestos para componer líneas de fuga y tensión dramática.
+  4. **Control `INVERTIR ⇄`:** Un botón ubicado inmediatamente sobre la Espiral Áurea y la Diagonal que permite voltear horizontalmente (`transform: scaleX(-1)`) la orientación de la guía para alinear el ojo de la espiral o las diagonales con la dirección de la mirada del sujeto (*lead room*) o el vector del movimiento en escena.
+  5. **Cuadrícula de Tercios (3×3)** y **Panorámico (2.39:1)** como opciones estándar de rodaje.
+  6. **Eliminación del texto *"NO SE GRABA"*:** Paternalista e innecesario en un entorno técnico profesional.
+
+* **Zonas Seguras Superpuestas y Sumables (Estilo DaVinci Resolve):**
+  A diferencia de las cuadrículas (que son excluyentes), las **Zonas Seguras son aditivas**: se activan como un checklist independiente y se superponen simultáneamente sobre cualquier cuadrícula activa:
+  - **`[✓] 9:16 REELS / TIKTOK / SHORTS`:** Caja vertical 9:16 centrada con márgenes de interfaz proyectados:
+    * Margen superior: `15%` (288 px para barras de estado y búsqueda).
+    * Margen inferior: `20%–22%` (384–422 px para pie de foto, autor y música).
+    * Margen derecho: `12%–15%` (140 px para iconos de interacción).
+  - **`[✓] 1:1 FEED INSTAGRAM`:** Recorte cuadrado central para previsualizar feed de publicaciones.
+  - **`[✓] 4:5 RETRATO`:** Caja vertical para encuadre vertical de publicaciones de Instagram.
+  - **`[✓] 90% ACTION SAFE`:** Margen de seguridad broadcast para asegurar que la acción no quede tapada en bordes de pantallas.
+  - **`[✓] 80% TITLE SAFE`:** Margen de seguridad para subtítulos y rótulos.
 
 ---
 
