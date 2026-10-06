@@ -6,9 +6,17 @@ import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
+import android.media.AudioRouting
 import android.media.AudioTimestamp
 import android.media.MediaRecorder
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
+import com.example.rawlite.capture.audio.AudioInputDevice
+import com.example.rawlite.capture.audio.AudioInputMonitor
+import com.example.rawlite.capture.audio.AudioInputPolicy
+import com.example.rawlite.capture.audio.inputDescription
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.RandomAccessFile
@@ -41,8 +49,32 @@ internal class PcmAudioRecorder private constructor(
     private val bitsPerSample: Int,
     private val sourceName: String,
     private val bufferBytes: Int,
+    context: Context,
+    private val routeListener: (AudioInputDevice?) -> Unit,
+    private val errorListener: (String) -> Unit,
     private val levelListener: (Float) -> Unit
 ) {
+    private val routeLock = Any()
+    private var routingClosed = false
+    private var preferredInput: AudioInputDevice? = null
+    private var routedInput: AudioInputDevice? = null
+    private var preferenceAccepted = false
+    private val routeHistory = JSONArray()
+    private val routingListener = AudioRouting.OnRoutingChangedListener { updateRoutedInput() }
+    private val inputMonitor = AudioInputMonitor(context) { device ->
+        synchronized(routeLock) {
+            if (!routingClosed) {
+                val externalDevice = device?.takeIf { it.inputDescription().isExternal }
+                val description = externalDevice?.inputDescription()
+                if (description != preferredInput || !preferenceAccepted) {
+                    preferredInput = description
+                    // Restore the source's default phone-mic routing on disconnect.
+                    preferenceAccepted = audioRecord.setPreferredDevice(externalDevice)
+                }
+                updateRoutedInput()
+            }
+        }
+    }
     private val running = AtomicBoolean(false)
     private val wavFile = File(directory, AUDIO_FILE)
     private val metadataFile = File(directory, AUDIO_METADATA_FILE)
@@ -65,11 +97,14 @@ internal class PcmAudioRecorder private constructor(
                 output.setLength(0L)
                 output.write(waveHeader(0L))
             }
+            audioRecord.addOnRoutingChangedListener(routingListener, Handler(Looper.getMainLooper()))
+            inputMonitor.start()
             writeMetadata(status = "recording", finalized = false, stoppedNs = 0L)
             audioRecord.startRecording()
             if (audioRecord.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
                 error("AudioRecord no comenzó a grabar")
             }
+            updateRoutedInput()
             worker = Thread(::captureLoop, "RawLiteAudio").apply {
                 priority = Thread.MAX_PRIORITY
                 start()
@@ -78,6 +113,7 @@ internal class PcmAudioRecorder private constructor(
         } catch (error: Throwable) {
             terminalError = error.message ?: error.javaClass.simpleName
             running.set(false)
+            closeRouting()
             runCatching { audioRecord.release() }
             writeMetadata(status = "failed", finalized = false, stoppedNs = 0L)
             false
@@ -86,6 +122,7 @@ internal class PcmAudioRecorder private constructor(
 
     fun stop(): AudioCaptureSummary {
         stopRequestedBoottimeNs = SystemClock.elapsedRealtimeNanos()
+        closeRouting()
         // Keep reading until the WAV timeline reaches the stop request. This
         // covers both an in-flight block and a request arriving between reads.
         runCatching { worker?.join(GRACEFUL_DRAIN_TIMEOUT_MS) }
@@ -109,6 +146,35 @@ internal class PcmAudioRecorder private constructor(
         return summary(finalized)
     }
 
+    private fun closeRouting() {
+        inputMonitor.stop()
+        synchronized(routeLock) {
+            routingClosed = true
+            runCatching { audioRecord.removeOnRoutingChangedListener(routingListener) }
+        }
+    }
+
+    private fun updateRoutedInput() = synchronized(routeLock) {
+        if (routingClosed || audioRecord.recordingState != AudioRecord.RECORDSTATE_RECORDING) return
+        // A preferred device is only a request. Report the route Android actually uses.
+        val actual = audioRecord.routedDevice?.inputDescription()
+        if (actual != routedInput || routeHistory.length() == 0) {
+            routedInput = actual
+            routeHistory.put(JSONObject().apply {
+                put("observed_boottime_ns", SystemClock.elapsedRealtimeNanos())
+                put("device", actual?.toJson() ?: JSONObject.NULL)
+            })
+            routeListener(actual)
+        }
+    }
+
+    private fun AudioInputDevice.toJson() = JSONObject().apply {
+        put("id", id)
+        put("type", type)
+        put("name", name)
+        put("external", isExternal)
+    }
+
     private fun captureLoop() {
         val buffer = ByteBuffer.allocateDirect(bufferBytes).order(ByteOrder.LITTLE_ENDIAN)
         val timestamp = AudioTimestamp()
@@ -124,6 +190,7 @@ internal class PcmAudioRecorder private constructor(
                         if (running.get()) terminalError = "AudioRecord.read=$read"
                         break
                     }
+                    if (dataBytes == 0L) updateRoutedInput()
                     if (sampleZeroBoottimeNs == 0L &&
                         audioRecord.getTimestamp(
                             timestamp,
@@ -159,6 +226,7 @@ internal class PcmAudioRecorder private constructor(
             } finally {
                 running.set(false)
                 levelListener(0f)
+                terminalError?.let(errorListener)
             }
         }
     }
@@ -243,6 +311,12 @@ internal class PcmAudioRecorder private constructor(
             put("channels", channels)
             put("bits_per_sample", bitsPerSample)
             put("source", sourceName)
+            synchronized(routeLock) {
+                put("preferred_input", preferredInput?.toJson() ?: JSONObject.NULL)
+                put("preferred_input_accepted", preferenceAccepted)
+                put("routed_input", routedInput?.toJson() ?: JSONObject.NULL)
+                put("route_changes", JSONArray(routeHistory.toString()))
+            }
             put("clock", "CLOCK_BOOTTIME")
             put("sample_zero_boottime_ns", sampleZeroBoottimeNs)
             put("audio_end_boottime_ns", audioEndNs)
@@ -290,6 +364,8 @@ internal class PcmAudioRecorder private constructor(
         fun create(
             context: Context,
             directory: File,
+            routeListener: (AudioInputDevice?) -> Unit = {},
+            errorListener: (String) -> Unit = {},
             levelListener: (Float) -> Unit
         ): PcmAudioRecorder? {
             if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) !=
@@ -301,7 +377,12 @@ internal class PcmAudioRecorder private constructor(
             val unprocessed = manager.getProperty(
                 AudioManager.PROPERTY_SUPPORT_AUDIO_SOURCE_UNPROCESSED
             ) == "true"
-            val sources = if (unprocessed) {
+            val external = AudioInputPolicy.select(
+                manager.getDevices(AudioManager.GET_DEVICES_INPUTS).map { it.inputDescription() }
+            )?.isExternal == true
+            val sources = if (external) {
+                listOf(MediaRecorder.AudioSource.MIC to "MIC")
+            } else if (unprocessed) {
                 listOf(MediaRecorder.AudioSource.UNPROCESSED to "UNPROCESSED")
             } else {
                 listOf(MediaRecorder.AudioSource.CAMCORDER to "CAMCORDER")
@@ -347,6 +428,9 @@ internal class PcmAudioRecorder private constructor(
                             bits,
                             sourceName,
                             aligned,
+                            context,
+                            routeListener,
+                            errorListener,
                             levelListener
                         )
                     }

@@ -3,6 +3,7 @@ package com.example.rawlite
 import android.media.MediaMetadataRetriever
 import org.json.JSONObject
 import java.io.File
+import kotlin.math.roundToInt
 
 internal object Pure10Clip {
     fun inspect(directory: File): ClipSummary? {
@@ -30,17 +31,19 @@ internal object Pure10Clip {
             val muxInProgress = File(directory, Pure10AudioMuxer.MUX_IN_PROGRESS_FILE).isFile &&
                 !integratedAudio
             val fps = metadata.optInt("frame_rate", 0).coerceAtLeast(1)
-            var frameCount = metadata.optInt("encoded_frames", 0)
+            var frameCount = maxOf(
+                metadata.optInt("encoded_frames", 0),
+                metadata.optInt("saved_frames", 0)
+            )
             var durationSeconds = 0.0
             runCatching {
                 val retriever = MediaMetadataRetriever()
                 try {
                     retriever.setDataSource(video.absolutePath)
-                    if (frameCount <= 0) {
-                        frameCount = retriever.extractMetadata(
-                            MediaMetadataRetriever.METADATA_KEY_VIDEO_FRAME_COUNT
-                        )?.toIntOrNull() ?: 0
-                    }
+                    val containerFrameCount = retriever.extractMetadata(
+                        MediaMetadataRetriever.METADATA_KEY_VIDEO_FRAME_COUNT
+                    )?.toIntOrNull() ?: 0
+                    if (containerFrameCount > 0) frameCount = containerFrameCount
                     durationSeconds = retriever.extractMetadata(
                         MediaMetadataRetriever.METADATA_KEY_DURATION
                     )?.toLongOrNull()?.div(1_000.0) ?: 0.0
@@ -48,7 +51,26 @@ internal object Pure10Clip {
                     retriever.release()
                 }
             }
-            val timelineFrames = maxOf(frameCount, (durationSeconds * fps).toInt())
+            val reportedDroppedFrames = maxOf(
+                metadata.optInt("dropped_frames", 0),
+                metadata.optInt("encoder_drops", 0),
+                metadata.optInt("capture_failure_drops", 0)
+            ).coerceAtLeast(0)
+            val firstTimestampNs = metadata.optLong("encoder_first_timestamp_ns", 0L)
+            val lastTimestampNs = metadata.optLong("encoder_last_timestamp_ns", 0L)
+            val timestampTimelineFrames = if (
+                firstTimestampNs > 0L && lastTimestampNs >= firstTimestampNs
+            ) {
+                (((lastTimestampNs - firstTimestampNs).toDouble() * fps / 1_000_000_000.0)
+                    .roundToInt() + 1).coerceAtLeast(frameCount)
+            } else {
+                (durationSeconds * fps).roundToInt().coerceAtLeast(frameCount)
+            }
+            val timelineFrames = maxOf(
+                frameCount,
+                timestampTimelineFrames,
+                frameCount + reportedDroppedFrames
+            )
             val audio = runCatching {
                 val audioMetadata = JSONObject(File(directory, "audio.json").readText())
                 val audioFile = File(directory, audioMetadata.optString("file", "audio.wav"))
@@ -69,6 +91,11 @@ internal object Pure10Clip {
                 fps = fps,
                 frameCount = frameCount,
                 timelineFrameCount = timelineFrames,
+                lostFrameCount = FrameIntegrity.lostFrameCount(
+                    storedFrames = frameCount,
+                    timelineFrames = timelineFrames,
+                    reportedDroppedFrames = reportedDroppedFrames
+                ),
                 byteCount = directory.listFiles()?.sumOf { it.length() } ?: video.length(),
                 finalized = metadata.optBoolean("finalized", false),
                 audioDescription = audio,

@@ -7,6 +7,9 @@ import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Matrix
+import android.graphics.Rect
+import android.graphics.RenderEffect
+import android.graphics.Shader
 import android.graphics.SurfaceTexture
 import android.graphics.drawable.ClipDrawable
 import android.graphics.drawable.GradientDrawable
@@ -15,6 +18,7 @@ import android.graphics.drawable.StateListDrawable
 import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
 import android.os.Bundle
+import android.os.Build
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
@@ -22,9 +26,11 @@ import android.os.StatFs
 import android.os.SystemClock
 import android.util.Log
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.Surface
 import android.view.TextureView
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.animation.PathInterpolator
 import android.widget.FrameLayout
@@ -45,7 +51,6 @@ import java.util.Date
 import java.util.LinkedHashMap
 import java.util.Locale
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -54,21 +59,32 @@ class ReviewActivity : Activity() {
     private enum class PlaybackKind { NONE, PURE10, RAW10, DNG }
 
     private lateinit var titleView: TextView
+    private lateinit var subtitleView: TextView
     private lateinit var backButton: TextView
     private lateinit var selectButton: TextView
+    private lateinit var moreButton: TextView
     private lateinit var content: FrameLayout
+    private lateinit var selectionBar: LinearLayout
+    private lateinit var conversionSelectionButton: TextView
+    private lateinit var deleteSelectionButton: TextView
+    private lateinit var ambientBackground: ImageView
     private val worker = Executors.newSingleThreadExecutor()
+    private val sequenceWorker = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val generation = AtomicInteger()
-    private val decodeInFlight = AtomicBoolean(false)
     private val clipRepository = ClipRepository()
     private val uiTypeface by lazy { resources.getFont(R.font.open_sans) }
     private var galleryClips: List<ClipSummary> = emptyList()
     private var selectionMode = false
     private val selectedClipPaths = linkedSetOf<String>()
     private var galleryScrollView: ScrollView? = null
-    private var galleryScrollY = 0
     private var selectionAnchorPath: String? = null
+    private var ambientBitmap: Bitmap? = null
+    private val galleryBindings = linkedMapOf<String, GalleryCardBinding>()
+    private var dragSelectionActive = false
+    private var dragSelectionValue = true
+    private var dragLastPath: String? = null
+    private var selectionActionsAvailableAfterMs = 0L
     private val thumbnailCache = object : LinkedHashMap<String, Bitmap>(32, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Bitmap>?): Boolean {
             if (size <= THUMBNAIL_CACHE_SIZE || eldest == null) return false
@@ -84,15 +100,16 @@ class ReviewActivity : Activity() {
     private var activeFrameIndex = 0
     private var requestedFrameIndex = 0
     private var displayedBitmap: Bitmap? = null
-    private val frameCache = object : LinkedHashMap<Int, Bitmap>(8, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, Bitmap>?): Boolean {
-            if (size <= FRAME_CACHE_SIZE || eldest == null) return false
-            if (eldest.value !== displayedBitmap) eldest.value.recycle()
-            return true
-        }
+    private val frameBuffer = SequenceFrameBuffer<Bitmap>(FRAME_CACHE_SIZE) { bitmap ->
+        if (bitmap !== displayedBitmap && !bitmap.isRecycled) bitmap.recycle()
     }
-    private val thumbnailBitmaps = mutableListOf<Bitmap>()
-
+    private val pendingSequenceFrames = mutableSetOf<Int>()
+    @Volatile
+    private var sequenceDecodeEpoch = 0
+    private var sequenceBuffering = false
+    private var bufferingAnchorIndex = 0
+    private var bufferingTargetFrames = 0
+    private var bufferingResumePositionMs = 0
     private var videoPlayer: MediaPlayer? = null
     private var audioPlayer: PcmWavPlayer? = null
     private var videoPrepared = false
@@ -119,6 +136,13 @@ class ReviewActivity : Activity() {
     private var seekBar: SeekBar? = null
     private var playButton: ImageButton? = null
     private var audioButton: ImageButton? = null
+
+    private data class GalleryCardBinding(
+        val summary: ClipSummary,
+        val root: View,
+        val badge: TextView,
+        val selectionRail: View
+    )
 
     private val progressTick = object : Runnable {
         override fun run() {
@@ -160,6 +184,7 @@ class ReviewActivity : Activity() {
     override fun onDestroy() {
         clearPlayback()
         worker.shutdownNow()
+        sequenceWorker.shutdownNow()
         recycleThumbnails()
         super.onDestroy()
     }
@@ -176,17 +201,35 @@ class ReviewActivity : Activity() {
     }
 
     private fun buildShell() {
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+        val root = FrameLayout(this).apply { setBackgroundColor(RawLiteDesign.BLACK) }
+        ambientBackground = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            alpha = 0.18f
             setBackgroundColor(RawLiteDesign.BLACK)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                setRenderEffect(
+                    RenderEffect.createBlurEffect(54f, 54f, Shader.TileMode.CLAMP)
+                )
+            }
+        }
+        root.addView(
+            ambientBackground,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+        val chrome = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable().apply { setColor(0xD9000000.toInt()) }
         }
         val toolbar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(8), dp(4), dp(16), dp(4))
-            setBackgroundColor(RawLiteDesign.BLACK)
+            setPadding(dp(8), dp(6), dp(8), dp(6))
+            setBackgroundColor(0xE6000000.toInt())
             setOnApplyWindowInsetsListener { view, insets ->
-                view.setPadding(dp(8), insets.systemWindowInsetTop + dp(4), dp(16), dp(4))
+                view.setPadding(dp(8), insets.systemWindowInsetTop + dp(6), dp(8), dp(6))
                 insets
             }
         }
@@ -200,13 +243,30 @@ class ReviewActivity : Activity() {
             tooltipText = "Volver"
             setOnClickListener { onBackPressed() }
         }
+        val titleBlock = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(4), 0, dp(4), 0)
+        }
         titleView = TextView(this).apply {
             text = "TOMAS"
-            textSize = 17f
+            textSize = 16f
             typeface = uiTypeface
-            gravity = Gravity.CENTER_VERTICAL
+            isSingleLine = true
+            ellipsize = TextUtils.TruncateAt.END
             setTextColor(RawLiteDesign.TEXT)
+            letterSpacing = 0.075f
         }
+        subtitleView = TextView(this).apply {
+            textSize = 9f
+            typeface = uiTypeface
+            isSingleLine = true
+            ellipsize = TextUtils.TruncateAt.END
+            setTextColor(RawLiteDesign.TEXT_MUTED)
+            letterSpacing = 0.08f
+        }
+        titleBlock.addView(titleView)
+        titleBlock.addView(subtitleView)
         selectButton = TextView(this).apply {
             text = "SEL"
             textSize = 12f
@@ -222,15 +282,42 @@ class ReviewActivity : Activity() {
                 if (galleryClips.isNotEmpty()) enterSelectionMode()
             }
         }
+        moreButton = TextView(this).apply {
+            text = "•••"
+            textSize = 13f
+            typeface = uiTypeface
+            gravity = Gravity.CENTER
+            setTextColor(RawLiteDesign.TEXT)
+            isClickable = true
+            isFocusable = true
+            background = selectableSurface()
+            contentDescription = "Más opciones"
+            tooltipText = "Más opciones"
+            setOnClickListener { showGalleryMenu() }
+        }
         toolbar.addView(backButton, LinearLayout.LayoutParams(dp(52), dp(52)))
-        toolbar.addView(titleView, LinearLayout.LayoutParams(0, dp(52), 1f))
-        toolbar.addView(selectButton, LinearLayout.LayoutParams(dp(112), dp(44)))
-        root.addView(toolbar)
-        root.addView(View(this).apply { setBackgroundColor(RawLiteDesign.DIVIDER) },
+        toolbar.addView(titleBlock, LinearLayout.LayoutParams(0, dp(52), 1f))
+        toolbar.addView(selectButton, LinearLayout.LayoutParams(dp(72), dp(44)))
+        toolbar.addView(moreButton, LinearLayout.LayoutParams(dp(48), dp(48)))
+        chrome.addView(toolbar)
+        chrome.addView(View(this).apply { setBackgroundColor(RawLiteDesign.DIVIDER) },
             LinearLayout.LayoutParams.MATCH_PARENT, dp(1))
 
-        content = FrameLayout(this).apply { setBackgroundColor(RawLiteDesign.BLACK) }
-        root.addView(content, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        selectionBar = buildSelectionBar().apply {
+            visibility = View.GONE
+            alpha = 0f
+        }
+        chrome.addView(selectionBar, LinearLayout.LayoutParams.MATCH_PARENT, dp(64))
+
+        content = FrameLayout(this).apply { setBackgroundColor(Color.TRANSPARENT) }
+        chrome.addView(content, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        root.addView(
+            chrome,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
         setContentView(root)
     }
 
@@ -241,8 +328,12 @@ class ReviewActivity : Activity() {
             galleryClips.none { it.directory.absolutePath == selected }
         }
         titleView.text = "TOMAS"
+        subtitleView.text = "LEYENDO BIBLIOTECA"
         backButton.contentDescription = "Volver a la cámara"
         selectButton.visibility = View.GONE
+        moreButton.visibility = View.GONE
+        selectionBar.visibility = View.GONE
+        selectionBar.alpha = 0f
         setContent(messageView("LEYENDO TOMAS"))
         worker.execute {
             val base = getExternalFilesDir(Environment.DIRECTORY_MOVIES)
@@ -265,46 +356,59 @@ class ReviewActivity : Activity() {
     private fun renderClipList(clips: List<ClipSummary>) {
         if (clips.isEmpty()) {
             selectButton.visibility = View.GONE
+            moreButton.visibility = View.GONE
+            subtitleView.text = "0 TOMAS"
             galleryScrollView = null
+            galleryBindings.clear()
             setContent(messageView("NO HAY TOMAS"))
             return
         }
-        val restoreScrollY = galleryScrollView?.scrollY ?: galleryScrollY
+        val restoreScrollY = galleryScrollView?.scrollY ?: 0
+        galleryBindings.clear()
         updateSelectionToolbar()
         val list = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), 0, dp(16), dp(28))
+            setPadding(dp(1), 0, dp(1), dp(40))
+            setBackgroundColor(RawLiteDesign.DIVIDER)
         }
-        if (selectionMode) {
-            list.addView(selectionActionBar(), LinearLayout.LayoutParams.MATCH_PARENT, dp(60))
+        val intro = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(18), 0, dp(18), 0)
+            setBackgroundColor(0xE6000000.toInt())
         }
-        list.addView(TextView(this).apply {
-            text = if (selectionMode) {
-                "${selectedClipPaths.size}/${clips.size} SELECCIONADAS   " +
-                    formatBytes(selectedClips().sumOf { it.byteCount })
-            } else {
-                "${clips.size} ${if (clips.size == 1) "TOMA" else "TOMAS"}   " +
-                    formatBytes(clips.sumOf { it.byteCount })
-            }
-            textSize = 11f
+        intro.addView(TextView(this).apply {
+            text = "CONTACTO / RECIENTES"
+            textSize = 9f
             typeface = uiTypeface
             gravity = Gravity.CENTER_VERTICAL
-            setTextColor(RawLiteDesign.ACCENT)
-        }, LinearLayout.LayoutParams.MATCH_PARENT, dp(44))
+            letterSpacing = 0.1f
+            setTextColor(RawLiteDesign.TEXT_MUTED)
+        }, LinearLayout.LayoutParams(0, dp(42), 1f))
+        intro.addView(TextView(this).apply {
+            text = "MANTÉN Y ARRASTRA PARA SELECCIONAR"
+            textSize = 9f
+            typeface = uiTypeface
+            gravity = Gravity.END or Gravity.CENTER_VERTICAL
+            letterSpacing = 0.08f
+            setTextColor(RawLiteDesign.TEXT_DISABLED)
+        }, LinearLayout.LayoutParams(0, dp(42), 1f))
+        list.addView(intro, LinearLayout.LayoutParams.MATCH_PARENT, dp(42))
         if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) {
             clips.chunked(2).forEachIndexed { rowIndex, pair ->
-                val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    setBackgroundColor(RawLiteDesign.DIVIDER)
+                }
                 pair.forEachIndexed { columnIndex, summary ->
-                    row.addView(clipRow(summary), LinearLayout.LayoutParams(0, dp(102), 1f))
+                    row.addView(contactClipCard(summary, compact = true), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
                     if (columnIndex == 0 && pair.size > 1) {
                         row.addView(View(this).apply { setBackgroundColor(RawLiteDesign.DIVIDER) },
-                            LinearLayout.LayoutParams(dp(1), dp(82)).apply {
-                                gravity = Gravity.CENTER_VERTICAL
-                            })
+                            LinearLayout.LayoutParams(dp(1), ViewGroup.LayoutParams.MATCH_PARENT))
                     }
                 }
                 if (pair.size == 1) row.addView(space(1), LinearLayout.LayoutParams(0, 1, 1f))
-                list.addView(row, LinearLayout.LayoutParams.MATCH_PARENT, dp(102))
+                list.addView(row, LinearLayout.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                 if (rowIndex != clips.chunked(2).lastIndex) {
                     list.addView(View(this).apply { setBackgroundColor(RawLiteDesign.DIVIDER) },
                         LinearLayout.LayoutParams.MATCH_PARENT, dp(1))
@@ -313,7 +417,7 @@ class ReviewActivity : Activity() {
         } else {
             clips.forEachIndexed { index, summary ->
                 list.addView(
-                    portraitClipCard(summary),
+                    contactClipCard(summary, compact = false),
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT
@@ -322,13 +426,7 @@ class ReviewActivity : Activity() {
                 if (index != clips.lastIndex) {
                     list.addView(
                         View(this).apply { setBackgroundColor(RawLiteDesign.DIVIDER) },
-                        LinearLayout.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            dp(1)
-                        ).apply {
-                            topMargin = dp(14)
-                            bottomMargin = dp(14)
-                        }
+                        LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1))
                     )
                 }
             }
@@ -344,71 +442,13 @@ class ReviewActivity : Activity() {
         scroll.post { scroll.scrollTo(0, restoreScrollY) }
     }
 
-    private fun clipRow(summary: ClipSummary): View {
-        val selected = isSelected(summary)
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(12), 0, dp(12))
-            isClickable = true
-            isFocusable = true
-            background = selectableSurface(selected)
-            setOnClickListener {
-                if (selectionMode) toggleSelection(summary) else openClip(summary)
-            }
-            setOnLongClickListener {
-                if (selectionMode) selectRangeTo(summary) else enterSelectionMode(summary)
-                true
-            }
-        }
-        if (selectionMode) {
-            row.addView(selectionBadge(selected), LinearLayout.LayoutParams(dp(36), dp(48)))
-        }
-        val thumbnail = ImageView(this).apply {
-            scaleType = ImageView.ScaleType.CENTER_CROP
-            setBackgroundColor(RawLiteDesign.SURFACE_RAISED)
-            clipToOutline = true
-            outlineProvider = roundedOutlineProvider(dp(RawLiteDesign.RADIUS_SMALL_DP).toFloat())
-            contentDescription = "Vista previa de la toma"
-        }
-        row.addView(thumbnail, LinearLayout.LayoutParams(dp(112), dp(78)))
-
-        val textColumn = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(14), 0, dp(8), 0)
-        }
-        textColumn.addView(labelText(galleryClipTitle(summary), 14f, RawLiteDesign.TEXT))
-        textColumn.addView(labelText(
-            "${summary.captureFormat}  ${summary.width}×${summary.height}  ${summary.fps} FPS",
-            11f,
-            RawLiteDesign.TEXT_MUTED
-        ))
-        textColumn.addView(labelText(
-            clipStatusLine(summary, separator = "  "),
-            11f,
-            clipStatusColor(summary)
-        ))
-        row.addView(textColumn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        if (!selectionMode) {
-            row.addView(ImageView(this).apply {
-                setImageResource(R.drawable.ic_transport_play)
-                setPadding(dp(14), dp(14), dp(14), dp(14))
-                background = transportControl(primary = false)
-                contentDescription = "Reproducir toma"
-            }, LinearLayout.LayoutParams(dp(48), dp(48)))
-        }
-        loadThumbnail(summary, thumbnail)
-        return row
-    }
-
-    private fun portraitClipCard(summary: ClipSummary): View {
-        val selected = isSelected(summary)
+    private fun contactClipCard(summary: ClipSummary, compact: Boolean): View {
+        val key = summary.directory.absolutePath
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             isClickable = true
             isFocusable = true
-            background = selectableSurface(selected)
+            setBackgroundColor(0xED020202.toInt())
             setOnClickListener {
                 if (selectionMode) toggleSelection(summary) else openClip(summary)
             }
@@ -417,102 +457,124 @@ class ReviewActivity : Activity() {
                 true
             }
         }
-        val imageStage = FrameLayout(this).apply {
-            setBackgroundColor(RawLiteDesign.SURFACE_RAISED)
-            clipToOutline = true
-            outlineProvider = roundedOutlineProvider(dp(RawLiteDesign.RADIUS_SMALL_DP).toFloat())
-        }
+        val imageStage = FrameLayout(this).apply { setBackgroundColor(RawLiteDesign.SURFACE_RAISED) }
         val thumbnail = ImageView(this).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
             setBackgroundColor(RawLiteDesign.SURFACE_RAISED)
-            contentDescription = "Vista previa de la toma"
+            contentDescription = "Vista previa de ${galleryClipTitle(summary)}"
         }
-        imageStage.addView(
-            thumbnail,
-            FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-        )
-        imageStage.addView(TextView(this).apply {
-            text = summary.captureFormat.uppercase(Locale.getDefault())
-            textSize = 10f
-            typeface = uiTypeface
-            gravity = Gravity.CENTER
-            setTextColor(RawLiteDesign.ACCENT)
-            setPadding(dp(10), dp(5), dp(10), dp(5))
-            background = roundRect(0xD9000000.toInt(), dp(3))
-        }, FrameLayout.LayoutParams(
+        imageStage.addView(thumbnail, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+        imageStage.addView(formatFlag(summary), FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
+            dp(28),
             Gravity.START or Gravity.TOP
         ).apply {
             marginStart = dp(12)
             topMargin = dp(12)
         })
-        if (selectionMode) {
-            imageStage.addView(selectionBadge(selected), FrameLayout.LayoutParams(
-                dp(40),
-                dp(40),
-                Gravity.END or Gravity.TOP
-            ).apply {
-                marginEnd = dp(12)
-                topMargin = dp(12)
-            })
-        } else {
-            imageStage.addView(ImageView(this).apply {
-                setImageResource(R.drawable.ic_transport_play)
-                setColorFilter(RawLiteDesign.BLACK)
-                setPadding(dp(17), dp(17), dp(17), dp(17))
-                background = transportControl(primary = true)
-                contentDescription = "Reproducir toma"
-            }, FrameLayout.LayoutParams(dp(56), dp(56), Gravity.END or Gravity.BOTTOM).apply {
-                marginEnd = dp(12)
-                bottomMargin = dp(12)
-            })
+        imageStage.addView(TextView(this).apply {
+            text = formatDuration(summary.durationSeconds).substringBeforeLast('.')
+            textSize = 10f
+            typeface = uiTypeface
+            gravity = Gravity.CENTER
+            setTextColor(RawLiteDesign.TEXT)
+            setPadding(dp(8), 0, dp(8), 0)
+            background = roundRect(0xD9000000.toInt(), dp(3))
+        }, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            dp(26),
+            Gravity.END or Gravity.BOTTOM
+        ).apply {
+            marginEnd = dp(12)
+            bottomMargin = dp(12)
+        })
+        val selectionRail = View(this).apply {
+            setBackgroundColor(RawLiteDesign.ACCENT)
+            visibility = if (isSelected(summary)) View.VISIBLE else View.INVISIBLE
         }
-        card.addView(imageStage, LinearLayout.LayoutParams.MATCH_PARENT, dp(188))
+        imageStage.addView(selectionRail, FrameLayout.LayoutParams(dp(4), FrameLayout.LayoutParams.MATCH_PARENT, Gravity.START))
+        val badge = selectionBadge(isSelected(summary)).apply {
+            visibility = if (selectionMode) View.VISIBLE else View.INVISIBLE
+        }
+        imageStage.addView(badge, FrameLayout.LayoutParams(dp(36), dp(36), Gravity.END or Gravity.TOP).apply {
+            marginEnd = dp(12)
+            topMargin = dp(12)
+        })
+        card.addView(imageStage, LinearLayout.LayoutParams.MATCH_PARENT, dp(if (compact) 174 else 214))
 
         val metadata = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(0, dp(12), 0, dp(14))
+            setPadding(dp(16), dp(12), dp(16), dp(14))
+            setBackgroundColor(0xE60A0A0A.toInt())
         }
-        metadata.addView(labelText(galleryClipTitle(summary), 15f, RawLiteDesign.TEXT))
+        val titleRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        titleRow.addView(labelText(galleryClipTitle(summary), 14f, RawLiteDesign.TEXT), LinearLayout.LayoutParams(0, dp(26), 1f))
+        titleRow.addView(labelText(String.format(Locale.US, "%02d", galleryClips.indexOf(summary) + 1), 10f, RawLiteDesign.TEXT_DISABLED), LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(26)))
+        metadata.addView(titleRow)
         metadata.addView(labelText(
-            "${summary.width}×${summary.height}   ${summary.fps} FPS   ${summary.camera}",
-            12f,
+            "${summary.width}×${summary.height} · ${summary.fps} FPS · ${summary.camera} · ${formatLongName(summary)}",
+            10f,
             RawLiteDesign.TEXT_MUTED
         ))
-        metadata.addView(labelText(
-            clipStatusLine(summary, separator = "   "),
-            12f,
-            clipStatusColor(summary)
-        ))
+        val status = labelText(contactStatusLine(summary), 10f, clipStatusColor(summary)).apply {
+            setPadding(0, dp(7), 0, 0)
+        }
+        metadata.addView(status)
         card.addView(metadata)
+        galleryBindings[key] = GalleryCardBinding(summary, card, badge, selectionRail)
+        attachDragSelection(card, summary)
         loadThumbnail(summary, thumbnail)
         return card
     }
 
-    private fun clipStatusLine(summary: ClipSummary, separator: String): String {
+    private fun formatFlag(summary: ClipSummary): TextView = TextView(this).apply {
+        text = summary.captureFormat.uppercase(Locale.getDefault())
+        textSize = 9f
+        typeface = uiTypeface
+        gravity = Gravity.CENTER
+        letterSpacing = 0.08f
+        setTextColor(RawLiteDesign.ACCENT)
+        setPadding(dp(11), 0, dp(11), 0)
+        background = GradientDrawable().apply {
+            setColor(0xE6000000.toInt())
+            setStroke(dp(1), RawLiteDesign.ACCENT_DIM)
+        }
+    }
+
+    private fun formatLongName(summary: ClipSummary): String = when (summary.captureFormat) {
+        "PURE 10" -> "HEVC MAIN10 HLG"
+        "CinemaDNG" -> "SECUENCIA DNG"
+        else -> "BAYER RAW10C"
+    }
+
+    private fun contactStatusLine(summary: ClipSummary): String {
+        val integrity = when {
+            !summary.finalized -> "INCOMPLETA"
+            summary.lostFrameCount > 0 -> lostFramesLabel(summary.lostFrameCount)
+            summary.captureFormat == "CinemaDNG" -> "${summary.frameCount} DNG"
+            else -> "ÍNTEGRA"
+        }
         val audio = when {
             summary.postProcessing -> "PROCESANDO AUDIO"
-            summary.audioDescription != null -> "AUDIO"
+            summary.audioDescription != null || summary.integratedAudio -> "AUDIO"
             else -> "SIN AUDIO"
         }
-        return "${formatDuration(summary.durationSeconds)}${separator}${formatBytes(summary.byteCount)}$separator$audio"
+        return "$integrity   ${formatBytes(summary.byteCount)}   $audio"
     }
 
     private fun galleryClipTitle(summary: ClipSummary): String {
-        val name = CaptureStorage.displayName(summary.directory.name)
-            .replace('_', ' ')
-            .trim()
-        return if (name.isBlank()) {
-            SimpleDateFormat("dd MMM  HH:mm", Locale.getDefault())
-                .format(Date(summary.directory.lastModified()))
-        } else {
-            name
-        }
+        val format = if (summary.captureFormat == "PURE 10") "PURE10" else summary.captureFormat.uppercase(Locale.getDefault())
+        val captured = SimpleDateFormat("dd MMM · HH:mm", Locale("es", "EC"))
+            .format(Date(CaptureStorage.captureTimeMillis(summary.directory)))
+            .uppercase(Locale("es", "EC"))
+        return "$format · $captured"
     }
+
+    private fun lostFramesLabel(count: Int): String =
+        if (count == 1) "1 PERDIDO" else "$count PERDIDOS"
 
     private fun clipStatusColor(summary: ClipSummary): Int = when {
         summary.postProcessing -> RawLiteDesign.ACCENT
@@ -525,6 +587,9 @@ class ReviewActivity : Activity() {
         val key = summary.directory.absolutePath
         thumbnailCache[key]?.takeIf { !it.isRecycled }?.let {
             target.setImageBitmap(it)
+            if (galleryClips.firstOrNull()?.directory?.absolutePath == key) {
+                updateAmbientBackground(it)
+            }
             return
         }
         worker.execute {
@@ -537,8 +602,20 @@ class ReviewActivity : Activity() {
                 thumbnailCache[key]?.takeIf { it !== bitmap && !it.isRecycled }?.recycle()
                 thumbnailCache[key] = bitmap
                 if (target.windowToken != null) target.setImageBitmap(bitmap)
+                if (galleryClips.firstOrNull()?.directory?.absolutePath == key) {
+                    updateAmbientBackground(bitmap)
+                }
             }
         }
+    }
+
+    private fun updateAmbientBackground(source: Bitmap) {
+        if (!::ambientBackground.isInitialized || source.isRecycled) return
+        val scaled = runCatching { Bitmap.createScaledBitmap(source, 96, 96, true) }.getOrNull() ?: return
+        ambientBitmap?.takeIf { it !== scaled && !it.isRecycled }?.recycle()
+        ambientBitmap = scaled
+        ambientBackground.setImageBitmap(scaled)
+        ambientBackground.animate().alpha(0.18f).setDuration(220L).start()
     }
 
     private fun decodeThumbnail(summary: ClipSummary): Bitmap? {
@@ -564,8 +641,11 @@ class ReviewActivity : Activity() {
     private fun openClip(summary: ClipSummary) {
         clearPlayback()
         selectButton.visibility = View.GONE
+        moreButton.visibility = View.VISIBLE
+        moreButton.setOnClickListener { showClipMenu(summary) }
         activeSummary = summary
-        titleView.text = CaptureStorage.displayName(summary.directory.name)
+        titleView.text = galleryClipTitle(summary)
+        subtitleView.text = "${formatLongName(summary)} · ${summary.width}×${summary.height} · ${summary.fps} FPS"
         backButton.contentDescription = "Volver a tomas"
         when (summary.captureFormat) {
             "PURE 10" -> buildPure10Player(summary)
@@ -576,7 +656,7 @@ class ReviewActivity : Activity() {
 
     private fun buildPure10Player(summary: ClipSummary) {
         playbackKind = PlaybackKind.PURE10
-        val playerUi = buildPlayerShell(summary, usesFrames = false)
+        val playerUi = buildPlayerShell(summary)
         val video = AspectRatioTextureView(this).apply {
             val rotation = readRotation(summary.directory)
             setVideoGeometry(
@@ -692,7 +772,7 @@ class ReviewActivity : Activity() {
             runOnUiThread {
                 if (generation.get() != currentGeneration || isFinishing) return@runOnUiThread
                 result.onSuccess {
-                    val playerUi = buildPlayerShell(summary, usesFrames = true)
+                    val playerUi = buildPlayerShell(summary)
                     val image = ImageView(this).apply {
                         scaleType = ImageView.ScaleType.FIT_CENTER
                         setBackgroundColor(RawLiteDesign.BLACK)
@@ -728,10 +808,7 @@ class ReviewActivity : Activity() {
         }
     }
 
-    private fun buildPlayerShell(
-        summary: ClipSummary,
-        usesFrames: Boolean
-    ): Pair<FrameLayout, LinearLayout> {
+    private fun buildPlayerShell(summary: ClipSummary): Pair<FrameLayout, LinearLayout> {
         val landscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         val root = LinearLayout(this).apply {
             orientation = if (landscape) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
@@ -774,6 +851,28 @@ class ReviewActivity : Activity() {
                 insets
             }
         }
+        val metricRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        metricRow.addView(
+            transportMetric("FORMATO", summary.captureFormat.uppercase(Locale.getDefault()), RawLiteDesign.ACCENT),
+            LinearLayout.LayoutParams(0, dp(52), 1f)
+        )
+        metricRow.addView(
+            transportMetric("CADENCIA", "${summary.fps} FPS", RawLiteDesign.TEXT),
+            LinearLayout.LayoutParams(0, dp(52), 1f)
+        )
+        metricRow.addView(
+            transportMetric(
+                "AUDIO",
+                if (summary.audioDescription != null || summary.integratedAudio) "DISPONIBLE" else "SIN AUDIO",
+                if (summary.audioDescription != null || summary.integratedAudio) RawLiteDesign.AUTO else RawLiteDesign.TEXT_MUTED
+            ),
+            LinearLayout.LayoutParams(0, dp(52), 1f)
+        )
+        transport.addView(metricRow, LinearLayout.LayoutParams.MATCH_PARENT, dp(52))
+        transport.addView(View(this).apply { setBackgroundColor(RawLiteDesign.DIVIDER) }, LinearLayout.LayoutParams.MATCH_PARENT, dp(1))
         val detailRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -789,25 +888,20 @@ class ReviewActivity : Activity() {
             setTextColor(RawLiteDesign.ACCENT)
         }
         detailRow.addView(detailView, LinearLayout.LayoutParams(0, dp(26), 1f))
-        if (usesFrames) {
-            detailRow.addView(TextView(this).apply {
-                text = "PERD. ${summary.lostFrameCount}"
-                textSize = 10f
-                typeface = uiTypeface
-                gravity = Gravity.END or Gravity.CENTER_VERTICAL
-                isSingleLine = true
-                setTextColor(
-                    if (summary.lostFrameCount > 0) RawLiteDesign.RECORD
-                    else RawLiteDesign.TEXT_MUTED
-                )
-                contentDescription = if (summary.lostFrameCount > 0) {
-                    "${summary.lostFrameCount} fotogramas perdidos en la captura"
-                } else {
-                    "Sin fotogramas perdidos en la captura"
-                }
-                tooltipText = contentDescription
-            }, LinearLayout.LayoutParams(dp(76), dp(26)))
-        }
+        val diagnostics = PlaybackDiagnostics.from(summary)
+        detailRow.addView(TextView(this).apply {
+            text = PlaybackDiagnostics.lossLabel(diagnostics)
+            textSize = 10f
+            typeface = uiTypeface
+            gravity = Gravity.END or Gravity.CENTER_VERTICAL
+            isSingleLine = true
+            setTextColor(
+                if (diagnostics.hasLosses) RawLiteDesign.RECORD
+                else RawLiteDesign.TEXT_MUTED
+            )
+            contentDescription = PlaybackDiagnostics.lossDescription(diagnostics)
+            tooltipText = contentDescription
+        }, LinearLayout.LayoutParams(dp(76), dp(26)))
         transport.addView(detailRow, LinearLayout.LayoutParams.MATCH_PARENT, dp(26))
 
         seekBar = SeekBar(this).apply {
@@ -832,7 +926,7 @@ class ReviewActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
         }
         positionView = transportText("00:00.000", Gravity.START)
-        frameView = transportText(if (usesFrames) "FOT. 1/1" else "10 BIT", Gravity.CENTER)
+        frameView = transportText(PlaybackDiagnostics.progressLabel(diagnostics), Gravity.CENTER)
         durationView = transportText("00:00.000", Gravity.END)
         timeRow.addView(positionView, LinearLayout.LayoutParams(0, dp(24), 1f))
         timeRow.addView(frameView, LinearLayout.LayoutParams(0, dp(24), 1f))
@@ -871,6 +965,26 @@ class ReviewActivity : Activity() {
             confirmDelete(summary)
         }.apply { setColorFilter(RawLiteDesign.RECORD) }, LinearLayout.LayoutParams(dp(52), dp(52)))
         transport.addView(controls, LinearLayout.LayoutParams.MATCH_PARENT, dp(68))
+        if (landscape) {
+            transport.addView(View(this).apply { setBackgroundColor(RawLiteDesign.DIVIDER) }, LinearLayout.LayoutParams.MATCH_PARENT, dp(1))
+            transport.addView(labelText("HERRAMIENTAS DE FORMATO", 9f, RawLiteDesign.TEXT_MUTED).apply {
+                letterSpacing = 0.08f
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(4), 0, 0, 0)
+            }, LinearLayout.LayoutParams.MATCH_PARENT, dp(34))
+            if (summary.captureFormat == "RAW10") {
+                transport.addView(playerDeckAction(
+                    "RAW10 → CINEMADNG",
+                    "CREAR COPIA EDITABLE",
+                    RawLiteDesign.ACCENT
+                ) { showConversionWarning(listOf(summary)) }, LinearLayout.LayoutParams.MATCH_PARENT, dp(54))
+            }
+            transport.addView(playerDeckAction(
+                "VERIFICAR INTEGRIDAD",
+                "FRAMES · AUDIO · TIMESTAMPS",
+                RawLiteDesign.TEXT
+            ) { showClipIntegrity(summary) }, LinearLayout.LayoutParams.MATCH_PARENT, dp(54))
+        }
         root.addView(
             transport,
             if (landscape) {
@@ -885,6 +999,33 @@ class ReviewActivity : Activity() {
         setContent(root)
         updateAudioButton()
         return mediaStage to transport
+    }
+
+    private fun transportMetric(label: String, value: String, color: Int): View {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(4), 0, dp(4), 0)
+            addView(labelText(label, 8f, RawLiteDesign.TEXT_MUTED).apply { letterSpacing = 0.08f })
+            addView(labelText(value, 10f, color).apply { letterSpacing = 0.04f })
+        }
+    }
+
+    private fun playerDeckAction(
+        title: String,
+        detail: String,
+        color: Int,
+        action: () -> Unit
+    ): View = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(12), 0, dp(12), 0)
+        isClickable = true
+        isFocusable = true
+        background = selectableSurface()
+        addView(labelText(title, 10f, color).apply { letterSpacing = 0.05f })
+        addView(labelText(detail, 8f, RawLiteDesign.TEXT_MUTED).apply { letterSpacing = 0.04f })
+        setOnClickListener { action() }
     }
 
     private fun togglePlayback() {
@@ -907,28 +1048,35 @@ class ReviewActivity : Activity() {
                 if (activeFrameIndex >= sequenceFrameCount() - 1) {
                     activeFrameIndex = 0
                     requestedFrameIndex = 0
-                    requestSequenceFrame(0)
                 }
                 if (summary.frameCount <= 0) return
-                sequencePositionMs(activeFrameIndex)
+                val sequencePosition = sequencePositionMs(activeFrameIndex)
+                if (!isSequenceBufferReady(activeFrameIndex)) {
+                    beginSequenceBuffering(
+                        anchorIndex = activeFrameIndex,
+                        resumePositionMs = sequencePosition,
+                        autoStart = true
+                    )
+                    return
+                }
+                sequencePosition
             }
             PlaybackKind.NONE -> return
         }
 
-        val audio = audioPlayer
-        if (audio != null) {
-            val expected = audioTargetMs(audio, positionMs)
-            val target = audioSeekTargetMs(audio, positionMs)
-            if (abs(audio.currentPosition - expected) > AUDIO_RESUME_TOLERANCE_MS) {
-                audio.seekTo(target)
-            }
-            audio.setVolume(if (muted) 0f else 1f)
-            if (target < audio.duration - 10) {
-                audio.play()
-            }
-        }
-
+        prepareAudioForPlayback(positionMs)
         startVisualPlayback(positionMs)
+    }
+
+    private fun prepareAudioForPlayback(positionMs: Int) {
+        val audio = audioPlayer ?: return
+        val expected = audioTargetMs(audio, positionMs)
+        val target = audioSeekTargetMs(audio, positionMs)
+        if (abs(audio.currentPosition - expected) > AUDIO_RESUME_TOLERANCE_MS) {
+            audio.seekTo(target)
+        }
+        audio.setVolume(if (muted) 0f else 1f)
+        if (target < audio.duration - 10) audio.play()
     }
 
     private fun startVisualPlayback(positionMs: Int) {
@@ -956,9 +1104,11 @@ class ReviewActivity : Activity() {
     private fun pausePlayback() {
         playWhenReady = false
         playing = false
+        sequenceBuffering = false
         runCatching { audioPlayer?.pause() }
         runCatching { if (videoPlayer?.isPlaying == true) videoPlayer?.pause() }
         mainHandler.removeCallbacks(progressTick)
+        if (displayedBitmap != null) stageStatus?.visibility = View.GONE
         playButton?.setImageResource(R.drawable.ic_transport_play)
         playButton?.contentDescription = "Reproducir"
     }
@@ -1011,7 +1161,12 @@ class ReviewActivity : Activity() {
             return
         }
         val targetIndex = sequenceIndexForTimeline(targetTimeline)
+        if (frameBuffer[targetIndex] == null) {
+            suspendSequenceForBuffering(targetIndex, sequencePositionMs(targetIndex))
+            return
+        }
         if (targetIndex != requestedFrameIndex) requestSequenceFrame(targetIndex)
+        prefetchSequenceFrames(targetIndex)
         seekBar?.progress = position.coerceIn(0, seekBar?.max ?: position)
         updateTimeLabels(position)
         keepAudioSynchronized(position)
@@ -1028,6 +1183,7 @@ class ReviewActivity : Activity() {
             PlaybackKind.RAW10, PlaybackKind.DNG -> {
                 val fps = activeSummary?.fps ?: return
                 val targetTimeline = sequenceTimelineAt(0) + (bounded * fps / 1000L).toInt()
+                resetSequenceDecodeQueue()
                 requestSequenceFrame(sequenceIndexForTimeline(targetTimeline))
                 seekAudio(bounded)
             }
@@ -1045,6 +1201,7 @@ class ReviewActivity : Activity() {
                 seekToPosition((videoPlayer?.currentPosition ?: 0) + direction * frameMs)
             }
             PlaybackKind.RAW10, PlaybackKind.DNG -> {
+                resetSequenceDecodeQueue()
                 requestSequenceFrame((activeFrameIndex + direction).coerceIn(0, sequenceFrameCount() - 1))
             }
             PlaybackKind.NONE -> Unit
@@ -1055,46 +1212,146 @@ class ReviewActivity : Activity() {
         val count = sequenceFrameCount()
         if (count <= 0) return
         requestedFrameIndex = index.coerceIn(0, count - 1)
-        frameCache[requestedFrameIndex]?.let {
-            displaySequenceFrame(requestedFrameIndex, it)
-            if (autoStart && playWhenReady) startPlayback()
+        if (autoStart) {
+            beginSequenceBuffering(
+                anchorIndex = requestedFrameIndex,
+                resumePositionMs = sequencePositionMs(requestedFrameIndex),
+                autoStart = true
+            )
             return
         }
-        if (!decodeInFlight.compareAndSet(false, true)) return
-        val decodeIndex = requestedFrameIndex
-        val currentGeneration = generation.get()
-        if (displayedBitmap == null) {
-            stageStatus?.apply {
-                text = if (playbackKind == PlaybackKind.DNG) "REVELANDO DNG" else "REVELANDO RAW10"
-                visibility = View.VISIBLE
-            }
+        frameBuffer[requestedFrameIndex]?.let {
+            displaySequenceFrame(requestedFrameIndex, it)
+            prefetchSequenceFrames(requestedFrameIndex)
+            return
         }
-        worker.execute {
-            val result = runCatching { decodeSequenceFrame(decodeIndex) }
+        stageStatus?.apply {
+            text = if (playbackKind == PlaybackKind.DNG) "REVELANDO DNG" else "REVELANDO RAW10"
+            setTextColor(RawLiteDesign.TEXT_MUTED)
+            visibility = View.VISIBLE
+        }
+        enqueueSequenceFrame(requestedFrameIndex)
+    }
+
+    private fun beginSequenceBuffering(
+        anchorIndex: Int,
+        resumePositionMs: Int,
+        autoStart: Boolean
+    ) {
+        val count = sequenceFrameCount()
+        if (count <= 0) return
+        bufferingAnchorIndex = anchorIndex.coerceIn(0, count - 1)
+        requestedFrameIndex = bufferingAnchorIndex
+        bufferingResumePositionMs = resumePositionMs.coerceAtLeast(0)
+        bufferingTargetFrames = sequenceBufferTarget(bufferingAnchorIndex)
+        sequenceBuffering = true
+        if (autoStart) {
+            playWhenReady = true
+            playButton?.setImageResource(R.drawable.ic_transport_pause)
+            playButton?.contentDescription = "Cancelar reproducción"
+        }
+        updateSequenceBufferingState()
+        prefetchSequenceFrames(bufferingAnchorIndex, bufferingTargetFrames)
+    }
+
+    private fun suspendSequenceForBuffering(index: Int, positionMs: Int) {
+        playing = false
+        playWhenReady = true
+        runCatching { audioPlayer?.pause() }
+        mainHandler.removeCallbacks(progressTick)
+        resetSequenceDecodeQueue(keepBufferingState = true)
+        beginSequenceBuffering(index, positionMs, autoStart = true)
+    }
+
+    private fun prefetchSequenceFrames(
+        anchorIndex: Int,
+        targetFrames: Int = sequenceBufferTarget(anchorIndex)
+    ) {
+        frameBuffer.missingWindow(anchorIndex, targetFrames, sequenceFrameCount())
+            .forEach(::enqueueSequenceFrame)
+    }
+
+    private fun enqueueSequenceFrame(index: Int) {
+        val count = sequenceFrameCount()
+        if (index !in 0 until count || frameBuffer.contains(index) || !pendingSequenceFrames.add(index)) {
+            return
+        }
+        val currentGeneration = generation.get()
+        val currentEpoch = sequenceDecodeEpoch
+        sequenceWorker.execute {
+            if (generation.get() != currentGeneration || sequenceDecodeEpoch != currentEpoch) return@execute
+            val result = runCatching { decodeSequenceFrame(index) }
             runOnUiThread {
-                decodeInFlight.set(false)
-                if (generation.get() != currentGeneration || playbackKind == PlaybackKind.NONE) {
+                if (currentEpoch == sequenceDecodeEpoch) pendingSequenceFrames.remove(index)
+                if (generation.get() != currentGeneration ||
+                    sequenceDecodeEpoch != currentEpoch ||
+                    playbackKind == PlaybackKind.NONE
+                ) {
                     result.getOrNull()?.recycle()
                     return@runOnUiThread
                 }
                 result.onSuccess { bitmap ->
-                    frameCache[decodeIndex] = bitmap
-                    if (decodeIndex == requestedFrameIndex || playing) {
-                        displaySequenceFrame(decodeIndex, bitmap)
+                    frameBuffer.put(index, bitmap, displayedBitmap)
+                    if (index == requestedFrameIndex && (!playing || sequenceBuffering)) {
+                        displaySequenceFrame(index, bitmap)
                     }
-                    if (autoStart && playWhenReady) startPlayback()
+                    if (sequenceBuffering) updateSequenceBufferingState()
                 }.onFailure {
+                    sequenceBuffering = false
+                    playWhenReady = false
                     stageStatus?.apply {
                         text = it.message ?: "NO SE PUDO REVELAR EL FOTOGRAMA"
                         setTextColor(RawLiteDesign.RECORD)
                         visibility = View.VISIBLE
                     }
                 }
-                if (requestedFrameIndex != decodeIndex && frameCache[requestedFrameIndex] == null) {
-                    requestSequenceFrame(requestedFrameIndex)
-                }
             }
         }
+    }
+
+    private fun updateSequenceBufferingState() {
+        if (!sequenceBuffering) return
+        val ready = frameBuffer.contiguousReadyCount(bufferingAnchorIndex, sequenceFrameCount())
+        stageStatus?.apply {
+            text = "CARGANDO $ready/$bufferingTargetFrames"
+            setTextColor(RawLiteDesign.TEXT_MUTED)
+            visibility = View.VISIBLE
+        }
+        frameBuffer[bufferingAnchorIndex]?.let { displaySequenceFrame(bufferingAnchorIndex, it) }
+        if (ready < bufferingTargetFrames) return
+        val shouldResume = playWhenReady
+        sequenceBuffering = false
+        stageStatus?.visibility = View.GONE
+        if (shouldResume) {
+            if (bufferingAnchorIndex >= sequenceFrameCount() - 1) {
+                pausePlayback()
+                return
+            }
+            prepareAudioForPlayback(bufferingResumePositionMs)
+            startVisualPlayback(bufferingResumePositionMs)
+        }
+    }
+
+    private fun isSequenceBufferReady(anchorIndex: Int): Boolean {
+        val target = sequenceBufferTarget(anchorIndex)
+        return frameBuffer.contiguousReadyCount(anchorIndex, sequenceFrameCount()) >= target
+    }
+
+    private fun sequenceBufferTarget(anchorIndex: Int): Int {
+        val count = sequenceFrameCount()
+        if (count <= 0) return 0
+        val remaining = count - anchorIndex.coerceIn(0, count - 1)
+        val fps = activeSummary?.fps?.coerceAtLeast(1) ?: 1
+        val desired = ((fps * SEQUENCE_BUFFER_TARGET_MS + 999L) / 1_000L)
+            .toInt()
+            .coerceIn(1, FRAME_CACHE_SIZE)
+        return minOf(remaining, desired)
+    }
+
+    private fun resetSequenceDecodeQueue(keepBufferingState: Boolean = false) {
+        sequenceDecodeEpoch++
+        pendingSequenceFrames.clear()
+        if (!keepBufferingState) sequenceBuffering = false
     }
 
     private fun decodeSequenceFrame(index: Int): Bitmap {
@@ -1113,26 +1370,26 @@ class ReviewActivity : Activity() {
         activeFrameIndex = index
         displayedBitmap = bitmap
         sequenceView?.setImageBitmap(bitmap)
-        stageStatus?.visibility = View.GONE
+        if (!sequenceBuffering) stageStatus?.visibility = View.GONE
         val position = sequencePositionMs(index)
         if (!playing) {
             seekBar?.progress = position.coerceIn(0, seekBar?.max ?: position)
             updateTimeLabels(position)
         }
         val timelineFrame = sequenceTimelineAt(index) + 1
-        val timelineCount = activeSummary?.timelineFrameCount ?: sequenceFrameCount()
-        frameView?.text = if (timelineCount > sequenceFrameCount()) {
-            "FOT. ${index + 1}/${sequenceFrameCount()}  TL $timelineFrame/$timelineCount"
-        } else {
-            "FOT. ${index + 1}/${sequenceFrameCount()}"
-        }
+        val summary = activeSummary ?: return
+        val diagnostics = PlaybackDiagnostics.from(summary)
+        frameView?.text = PlaybackDiagnostics.progressLabel(
+            diagnostics,
+            storedFrame = index + 1,
+            timelineFrame = timelineFrame
+        )
         frameView?.contentDescription = buildString {
             append("Fotograma almacenado ${index + 1} de ${sequenceFrameCount()}")
-            if (timelineCount > sequenceFrameCount()) {
-                append(", posición temporal $timelineFrame de $timelineCount")
+            if (diagnostics.timelineFrames > diagnostics.storedFrames) {
+                append(", posición temporal $timelineFrame de ${diagnostics.timelineFrames}")
             }
-            val lost = activeSummary?.lostFrameCount ?: 0
-            append(", $lost fotogramas perdidos en la captura")
+            append(", ${PlaybackDiagnostics.lossDescription(diagnostics).lowercase(Locale.getDefault())}")
         }
     }
 
@@ -1278,7 +1535,24 @@ class ReviewActivity : Activity() {
 
     private fun updateTimeLabels(positionMs: Int) {
         positionView?.text = formatTimecode(positionMs)
-        if (playbackKind == PlaybackKind.PURE10) frameView?.text = "10 BIT"
+        if (playbackKind == PlaybackKind.PURE10) {
+            val summary = activeSummary ?: return
+            val diagnostics = PlaybackDiagnostics.from(summary)
+            val timelineFrame = PlaybackDiagnostics.pure10TimelineFrame(
+                positionMs = positionMs,
+                fps = summary.fps,
+                timelineFrames = diagnostics.timelineFrames
+            )
+            frameView?.text = PlaybackDiagnostics.progressLabel(
+                diagnostics,
+                timelineFrame = timelineFrame
+            )
+            frameView?.contentDescription = buildString {
+                append("Posición temporal $timelineFrame de ${diagnostics.timelineFrames}")
+                append(", ${diagnostics.storedFrames} fotogramas codificados")
+                append(", ${PlaybackDiagnostics.lossDescription(diagnostics).lowercase(Locale.getDefault())}")
+            }
+        }
     }
 
     private fun updateAudioButton() {
@@ -1329,26 +1603,27 @@ class ReviewActivity : Activity() {
     }
 
     private fun enterSelectionMode(initial: ClipSummary? = null) {
-        galleryScrollY = galleryScrollView?.scrollY ?: galleryScrollY
         selectionMode = true
+        disarmSelectionActions()
         initial?.let {
             val key = it.directory.absolutePath
             selectedClipPaths += key
             selectionAnchorPath = key
         }
-        renderClipList(galleryClips)
+        updateSelectionUiInPlace()
     }
 
     private fun exitSelectionMode() {
-        galleryScrollY = galleryScrollView?.scrollY ?: galleryScrollY
         selectionMode = false
         selectedClipPaths.clear()
         selectionAnchorPath = null
-        renderClipList(galleryClips)
+        dragSelectionActive = false
+        dragLastPath = null
+        updateSelectionUiInPlace()
     }
 
     private fun toggleSelection(summary: ClipSummary) {
-        galleryScrollY = galleryScrollView?.scrollY ?: galleryScrollY
+        disarmSelectionActions()
         val key = summary.directory.absolutePath
         if (!selectedClipPaths.add(key)) selectedClipPaths.remove(key)
         selectionAnchorPath = key
@@ -1356,11 +1631,11 @@ class ReviewActivity : Activity() {
             selectionMode = false
             selectionAnchorPath = null
         }
-        renderClipList(galleryClips)
+        updateSelectionUiInPlace()
     }
 
     private fun selectRangeTo(summary: ClipSummary) {
-        galleryScrollY = galleryScrollView?.scrollY ?: galleryScrollY
+        disarmSelectionActions()
         val target = summary.directory.absolutePath
         val anchor = selectionAnchorPath ?: selectedClipPaths.lastOrNull() ?: target
         val start = galleryClips.indexOfFirst { it.directory.absolutePath == anchor }
@@ -1368,14 +1643,14 @@ class ReviewActivity : Activity() {
         if (start < 0 || end < 0) {
             selectedClipPaths += target
             selectionAnchorPath = target
-            renderClipList(galleryClips)
+            updateSelectionUiInPlace()
             return
         }
         val range = if (start <= end) start..end else end..start
         range.forEach { index -> selectedClipPaths += galleryClips[index].directory.absolutePath }
         selectionAnchorPath = target
         selectionMode = selectedClipPaths.isNotEmpty()
-        renderClipList(galleryClips)
+        updateSelectionUiInPlace()
     }
 
     private fun selectedClips(): List<ClipSummary> =
@@ -1390,30 +1665,44 @@ class ReviewActivity : Activity() {
         } else {
             View.GONE
         }
-        selectButton.text = if (selectionMode) "CANCELAR" else "SEL"
+        moreButton.visibility = if (playbackKind == PlaybackKind.NONE && galleryClips.isNotEmpty()) {
+            View.VISIBLE
+        } else {
+            View.GONE
+        }
+        moreButton.setOnClickListener { showGalleryMenu() }
+        selectButton.text = if (selectionMode) "CERRAR" else "SEL"
         selectButton.contentDescription = if (selectionMode) "Cancelar selección" else "Seleccionar tomas"
         selectButton.setOnClickListener {
             if (selectionMode) exitSelectionMode() else enterSelectionMode()
         }
         titleView.text = if (selectionMode) "SELECCIÓN" else "TOMAS"
+        subtitleView.text = if (selectionMode) {
+            "${selectedClipPaths.size} SELECCIONADAS · ${formatBytes(selectedClips().sumOf { it.byteCount })}"
+        } else {
+            "${galleryClips.size} ${if (galleryClips.size == 1) "TOMA" else "TOMAS"} · ${formatBytes(galleryClips.sumOf { it.byteCount })}"
+        }
     }
 
-    private fun selectionActionBar(): View {
+    private fun buildSelectionBar(): LinearLayout {
         return LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(6), 0, dp(6))
-            addView(selectionActionButton("CONVERTIR", RawLiteDesign.ACCENT) {
+            setPadding(dp(8), dp(6), dp(8), dp(6))
+            setBackgroundColor(0xF20A0A0A.toInt())
+            addView(selectionActionButton("TODO", RawLiteDesign.TEXT) {
+                selectAllClips()
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 0.9f))
+            addView(space(dp(1)).apply { setBackgroundColor(RawLiteDesign.DIVIDER) }, LinearLayout.LayoutParams(dp(1), dp(36)))
+            conversionSelectionButton = selectionActionButton("CONVERTIR", RawLiteDesign.ACCENT) {
                 showConversionWarning(selectedClips())
-            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
-            addView(space(dp(8)))
-            addView(selectionActionButton("BORRAR", RawLiteDesign.RECORD) {
+            }
+            addView(conversionSelectionButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1.35f))
+            addView(space(dp(1)).apply { setBackgroundColor(RawLiteDesign.DIVIDER) }, LinearLayout.LayoutParams(dp(1), dp(36)))
+            deleteSelectionButton = selectionActionButton("BORRAR", RawLiteDesign.RECORD) {
                 confirmDeleteSelected(selectedClips())
-            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
-            addView(space(dp(8)))
-            addView(selectionActionButton("CANCELAR", RawLiteDesign.TEXT) {
-                exitSelectionMode()
-            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
+            }
+            addView(deleteSelectionButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 0.9f))
         }
     }
 
@@ -1428,9 +1717,215 @@ class ReviewActivity : Activity() {
             setTextColor(color)
             isClickable = true
             isFocusable = true
-            background = roundRect(RawLiteDesign.SURFACE_RAISED, dp(RawLiteDesign.RADIUS_SMALL_DP))
-            setOnClickListener { if (selectedClipPaths.isNotEmpty() || label == "CANCELAR") action() }
+            background = selectableSurface()
+            setOnClickListener {
+                if (SystemClock.uptimeMillis() >= selectionActionsAvailableAfterMs) action()
+            }
         }
+
+    private fun selectAllClips() {
+        disarmSelectionActions()
+        selectionMode = true
+        selectedClipPaths.clear()
+        galleryClips.forEach { selectedClipPaths += it.directory.absolutePath }
+        selectionAnchorPath = galleryClips.lastOrNull()?.directory?.absolutePath
+        updateSelectionUiInPlace()
+    }
+
+    private fun updateSelectionUiInPlace() {
+        updateSelectionToolbar()
+        if (selectionMode) {
+            if (selectionBar.visibility != View.VISIBLE) {
+                selectionBar.visibility = View.VISIBLE
+                selectionBar.translationY = -dp(12).toFloat()
+                selectionBar.animate().alpha(1f).translationY(0f).setDuration(180L).start()
+            }
+        } else if (selectionBar.visibility == View.VISIBLE) {
+            selectionBar.animate().alpha(0f).translationY(-dp(8).toFloat()).setDuration(140L)
+                .withEndAction { selectionBar.visibility = View.GONE }
+                .start()
+        }
+        galleryBindings.forEach { (path, binding) ->
+            val selected = selectedClipPaths.contains(path)
+            binding.badge.visibility = if (selectionMode) View.VISIBLE else View.INVISIBLE
+            binding.badge.text = if (selected) "✓" else "○"
+            binding.badge.setTextColor(if (selected) RawLiteDesign.BLACK else RawLiteDesign.TEXT)
+            binding.badge.background = roundRect(
+                if (selected) RawLiteDesign.ACCENT else 0xB3000000.toInt(),
+                dp(18)
+            )
+            binding.badge.contentDescription = if (selected) "Seleccionada" else "No seleccionada"
+            binding.selectionRail.visibility = if (selected) View.VISIBLE else View.INVISIBLE
+            binding.root.setBackgroundColor(
+                if (selected) 0xF21A1608.toInt() else 0xED020202.toInt()
+            )
+        }
+        if (::conversionSelectionButton.isInitialized) {
+            val count = selectedClipPaths.size
+            val rawCount = selectedClips().count { it.captureFormat == "RAW10" }
+            conversionSelectionButton.text = if (rawCount > 0) "CONVERTIR $rawCount" else "SIN RAW10"
+            conversionSelectionButton.isEnabled = rawCount > 0
+            conversionSelectionButton.alpha = if (rawCount > 0) 1f else 0.42f
+            deleteSelectionButton.isEnabled = count > 0
+            deleteSelectionButton.alpha = if (count > 0) 1f else 0.42f
+        }
+    }
+
+    private fun showGalleryMenu() {
+        val options = if (selectionMode) {
+            arrayOf("SELECCIONAR TODO", "CANCELAR SELECCIÓN")
+        } else {
+            arrayOf("SELECCIONAR TODO")
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("TOMAS")
+            .setItems(options) { _, which ->
+                when (options[which]) {
+                    "SELECCIONAR TODO" -> selectAllClips()
+                    else -> exitSelectionMode()
+                }
+            }
+            .create()
+        dialog.setOnShowListener {
+            dialog.window?.setBackgroundDrawable(roundRect(RawLiteDesign.SURFACE_RAISED, dp(4)))
+        }
+        dialog.show()
+    }
+
+    private fun showClipMenu(summary: ClipSummary) {
+        val options = buildList {
+            if (summary.captureFormat == "RAW10") add("CONVERTIR A CINEMADNG")
+            add("VERIFICAR INTEGRIDAD")
+            add("BORRAR TOMA")
+        }.toTypedArray()
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(galleryClipTitle(summary))
+            .setItems(options) { _, which ->
+                when (options[which]) {
+                    "CONVERTIR A CINEMADNG" -> showConversionWarning(listOf(summary))
+                    "VERIFICAR INTEGRIDAD" -> showClipIntegrity(summary)
+                    "BORRAR TOMA" -> confirmDelete(summary)
+                }
+            }
+            .create()
+        dialog.setOnShowListener {
+            dialog.window?.setBackgroundDrawable(roundRect(RawLiteDesign.SURFACE_RAISED, dp(4)))
+        }
+        dialog.show()
+    }
+
+    private fun showClipIntegrity(summary: ClipSummary) {
+        val status = when {
+            !summary.finalized -> "INCOMPLETA"
+            summary.lostFrameCount > 0 -> "CON PÉRDIDAS"
+            else -> "ÍNTEGRA"
+        }
+        val message = buildString {
+            append("Estado: $status\n")
+            append("Guardados: ${summary.frameCount} fotogramas\n")
+            append("Timeline: ${summary.timelineFrameCount} fotogramas\n")
+            append("Perdidos: ${summary.lostFrameCount}\n")
+            append("Cadencia: ${summary.fps} FPS\n")
+            append("Audio: ${if (summary.audioDescription != null || summary.integratedAudio) "DISPONIBLE" else "NO DISPONIBLE"}\n")
+            append("Tamaño: ${formatBytes(summary.byteCount)}")
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("INTEGRIDAD DE TOMA")
+            .setMessage(message)
+            .setPositiveButton("ENTENDIDO", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.window?.setBackgroundDrawable(roundRect(RawLiteDesign.SURFACE_RAISED, dp(4)))
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(RawLiteDesign.ACCENT)
+        }
+        dialog.show()
+    }
+
+    private fun attachDragSelection(view: View, summary: ClipSummary) {
+        val touchSlop = ViewConfiguration.get(this).scaledTouchSlop
+        var downX = 0f
+        var downY = 0f
+        view.setOnTouchListener { _, event ->
+            if (!selectionMode) return@setOnTouchListener false
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = event.rawX
+                    downY = event.rawY
+                    dragSelectionActive = false
+                    dragSelectionValue = !isSelected(summary)
+                    dragLastPath = null
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (!dragSelectionActive &&
+                        (abs(event.rawX - downX) > touchSlop || abs(event.rawY - downY) > touchSlop)
+                    ) {
+                        dragSelectionActive = true
+                        view.parent?.requestDisallowInterceptTouchEvent(true)
+                        applyDragSelectionAt(downX, downY)
+                    }
+                    if (dragSelectionActive) {
+                        applyDragSelectionAt(event.rawX, event.rawY)
+                        autoScrollGallery(event.rawY)
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (dragSelectionActive) {
+                        applyDragSelectionAt(event.rawX, event.rawY)
+                    } else {
+                        setSelectionState(summary, dragSelectionValue)
+                    }
+                    dragSelectionActive = false
+                    dragLastPath = null
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    dragSelectionActive = false
+                    dragLastPath = null
+                    true
+                }
+                else -> true
+            }
+        }
+    }
+
+    private fun applyDragSelectionAt(rawX: Float, rawY: Float) {
+        val hit = Rect()
+        val binding = galleryBindings.values.firstOrNull {
+            it.root.getGlobalVisibleRect(hit) && hit.contains(rawX.toInt(), rawY.toInt())
+        } ?: return
+        val path = binding.summary.directory.absolutePath
+        if (dragLastPath == path) return
+        dragLastPath = path
+        setSelectionState(binding.summary, dragSelectionValue)
+    }
+
+    private fun setSelectionState(summary: ClipSummary, selected: Boolean) {
+        disarmSelectionActions()
+        val path = summary.directory.absolutePath
+        if (selected) selectedClipPaths += path else selectedClipPaths.remove(path)
+        selectionAnchorPath = path
+        selectionMode = true
+        updateSelectionUiInPlace()
+    }
+
+    private fun disarmSelectionActions() {
+        selectionActionsAvailableAfterMs = SystemClock.uptimeMillis() + SELECTION_ACTION_ARM_DELAY_MS
+    }
+
+    private fun autoScrollGallery(rawY: Float) {
+        val scroll = galleryScrollView ?: return
+        val location = IntArray(2)
+        scroll.getLocationOnScreen(location)
+        val top = location[1].toFloat()
+        val bottom = top + scroll.height
+        val edge = dp(56)
+        when {
+            rawY < top + edge -> scroll.scrollBy(0, -dp(18))
+            rawY > bottom - edge -> scroll.scrollBy(0, dp(18))
+        }
+    }
 
     private fun showConversionWarning(clips: List<ClipSummary>) {
         if (clips.isEmpty()) return
@@ -1617,11 +2112,13 @@ class ReviewActivity : Activity() {
         activeDngClip = null
         activeFrameIndex = 0
         requestedFrameIndex = 0
-        decodeInFlight.set(false)
+        resetSequenceDecodeQueue()
+        bufferingAnchorIndex = 0
+        bufferingTargetFrames = 0
+        bufferingResumePositionMs = 0
         sequenceView?.setImageDrawable(null)
         displayedBitmap = null
-        frameCache.values.distinct().forEach { if (!it.isRecycled) it.recycle() }
-        frameCache.clear()
+        frameBuffer.clear()
         textureView = null
         sequenceView = null
         stage = null
@@ -1750,7 +2247,7 @@ class ReviewActivity : Activity() {
         bar.thumbOffset = 0
     }
 
-    private fun selectableSurface(selected: Boolean = false): android.graphics.drawable.StateListDrawable {
+    private fun selectableSurface(): android.graphics.drawable.StateListDrawable {
         return android.graphics.drawable.StateListDrawable().apply {
             addState(
                 intArrayOf(android.R.attr.state_pressed),
@@ -1758,19 +2255,8 @@ class ReviewActivity : Activity() {
             )
             addState(
                 intArrayOf(),
-                roundRect(
-                    if (selected) RawLiteDesign.ACCENT_SURFACE else RawLiteDesign.BLACK,
-                    dp(RawLiteDesign.RADIUS_SMALL_DP)
-                )
+                roundRect(RawLiteDesign.BLACK, dp(RawLiteDesign.RADIUS_SMALL_DP))
             )
-        }
-    }
-
-    private fun roundedOutlineProvider(radius: Float): android.view.ViewOutlineProvider {
-        return object : android.view.ViewOutlineProvider() {
-            override fun getOutline(view: View, outline: android.graphics.Outline) {
-                outline.setRoundRect(0, 0, view.width, view.height, radius)
-            }
         }
     }
 
@@ -1780,10 +2266,11 @@ class ReviewActivity : Activity() {
     }
 
     private fun recycleThumbnails() {
+        ambientBackground.setImageDrawable(null)
+        ambientBitmap?.takeIf { !it.isRecycled }?.recycle()
+        ambientBitmap = null
         thumbnailCache.values.distinct().forEach { if (!it.isRecycled) it.recycle() }
         thumbnailCache.clear()
-        thumbnailBitmaps.distinct().forEach { if (!it.isRecycled) it.recycle() }
-        thumbnailBitmaps.clear()
     }
 
     private fun pruneThumbnailCache(clips: List<ClipSummary>) {
@@ -1821,7 +2308,8 @@ class ReviewActivity : Activity() {
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).roundToInt()
 
     companion object {
-        private const val FRAME_CACHE_SIZE = 6
+        private const val FRAME_CACHE_SIZE = 20
+        private const val SEQUENCE_BUFFER_TARGET_MS = 750L
         private const val THUMBNAIL_CACHE_SIZE = 32
         private const val DNG_PREVIEW_MAX_WIDTH = 960
         private const val DNG_PREVIEW_MAX_HEIGHT = 540
@@ -1833,5 +2321,6 @@ class ReviewActivity : Activity() {
         private const val VIDEO_CLOCK_BACKWARD_TOLERANCE_MS = 250
         private const val AUDIO_SYNC_TAG = "RawLiteAudioSync"
         private const val CONTENT_TRANSITION_MS = 240L
+        private const val SELECTION_ACTION_ARM_DELAY_MS = 650L
     }
 }

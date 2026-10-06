@@ -104,6 +104,7 @@ internal class Pure10Encoder(
         }
         cropX = ((sourceSize.width - outputSize.width) / 2) and -2
         cropY = ((sourceSize.height - outputSize.height) / 2) and -2
+        NativeTenBitConverter.resetP010HlgCaches()
         val localCodec = MediaCodec.createByCodecName(codecName)
         val format = MediaFormat.createVideoFormat(
             MediaFormat.MIMETYPE_VIDEO_HEVC,
@@ -184,10 +185,12 @@ internal class Pure10Encoder(
             }
             val plane = image.planes[0]
             val raw = plane.buffer
-            if (captureLensShading == null && lensShading != null) {
+            val lensShadingUpdate = if (captureLensShading == null && lensShading != null) {
                 captureLensShading = lensShading
+                lensShading
+            } else {
+                null
             }
-            val stableLensShading = captureLensShading
             updateColorTransform(redGain, greenEvenGain, greenOddGain, blueGain)
             output.clear()
             val conversionNs = NativeTenBitConverter.raw10ToP010Hlg(
@@ -213,9 +216,9 @@ internal class Pure10Encoder(
                 greenOddGain = greenOddGain,
                 blueGain = blueGain,
                 cameraRgbToRec2020 = cameraRgbToRec2020,
-                lensShadingGains = stableLensShading?.gains,
-                lensShadingRows = stableLensShading?.rows ?: 0,
-                lensShadingColumns = stableLensShading?.columns ?: 0
+                lensShadingGains = lensShadingUpdate?.gains,
+                lensShadingRows = lensShadingUpdate?.rows ?: 0,
+                lensShadingColumns = lensShadingUpdate?.columns ?: 0
             )
             if (conversionNs < 0L) {
                 localCodec.queueInputBuffer(inputIndex, 0, 0, 0L, 0)

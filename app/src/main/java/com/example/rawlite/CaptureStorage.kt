@@ -3,6 +3,8 @@ package com.example.rawlite
 import com.example.rawlite.core.model.CaptureOutput
 import java.io.File
 import java.io.IOException
+import java.text.SimpleDateFormat
+import java.util.Locale
 
 /** Creates capture directories without ever reusing an existing take. */
 internal object CaptureStorage {
@@ -23,6 +25,17 @@ internal object CaptureStorage {
         return prefixes.firstOrNull { directoryName.startsWith(it) }
             ?.let { directoryName.removePrefix(it) }
             ?: directoryName
+    }
+
+    /** Stable capture time derived from the take name, unaffected by thumbnail/cache writes. */
+    fun captureTimeMillis(directory: File): Long {
+        val timestamp = displayName(directory.name).take(15)
+        if (!timestamp.matches(Regex("\\d{8}_\\d{6}"))) return directory.lastModified()
+        return runCatching {
+            SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).apply {
+                isLenient = false
+            }.parse(timestamp)?.time
+        }.getOrNull() ?: directory.lastModified()
     }
 
     fun createUniqueDirectory(base: File, stem: String): File {

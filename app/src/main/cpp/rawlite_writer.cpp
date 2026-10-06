@@ -13,6 +13,7 @@
 #include <cstring>
 #include <deque>
 #include <fcntl.h>
+#include <functional>
 #include <mutex>
 #include <memory>
 #include <numeric>
@@ -58,10 +59,17 @@ struct LensShadingCorrection {
     std::vector<uint16_t> site_gains_q12;
 };
 
-std::mutex lens_shading_cache_mutex;
-std::shared_ptr<const LensShadingCorrection> lens_shading_cache;
+struct LensShadingCache {
+    std::mutex mutex;
+    std::shared_ptr<const LensShadingCorrection> correction;
+};
+
+LensShadingCache p010_hlg_lens_shading_cache;
+LensShadingCache argb_preview_lens_shading_cache;
 
 std::shared_ptr<const LensShadingCorrection> lens_shading_correction(
+    LensShadingCache& cache,
+    bool reuse_if_missing,
     JNIEnv* env,
     jfloatArray gains_array,
     int map_rows,
@@ -75,6 +83,16 @@ std::shared_ptr<const LensShadingCorrection> lens_shading_correction(
     int cell_step,
     int cfa
 ) {
+    if (gains_array == nullptr && reuse_if_missing) {
+        std::lock_guard<std::mutex> lock(cache.mutex);
+        const auto cached = cache.correction;
+        const bool geometry_matches = cached != nullptr &&
+            cached->source_width == source_width && cached->source_height == source_height &&
+            cached->origin_x == origin_x && cached->origin_y == origin_y &&
+            cached->cell_width == cell_width && cached->cell_height == cell_height &&
+            cached->cell_step == cell_step && cached->cfa == cfa;
+        return geometry_matches ? cached : nullptr;
+    }
     const int gain_count = map_rows * map_columns * 4;
     if (gains_array == nullptr || map_rows < 2 || map_columns < 2 ||
         gain_count <= 0 || env->GetArrayLength(gains_array) != gain_count ||
@@ -89,8 +107,8 @@ std::shared_ptr<const LensShadingCorrection> lens_shading_correction(
         return !std::isfinite(gain) || gain < 1.0f;
     })) return nullptr;
 
-    std::lock_guard<std::mutex> lock(lens_shading_cache_mutex);
-    const auto cached = lens_shading_cache;
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    const auto cached = cache.correction;
     bool reusable = cached != nullptr &&
         cached->source_width == source_width && cached->source_height == source_height &&
         cached->origin_x == origin_x && cached->origin_y == origin_y &&
@@ -169,8 +187,190 @@ std::shared_ptr<const LensShadingCorrection> lens_shading_correction(
             }
         }
     }
-    lens_shading_cache = correction;
+    cache.correction = correction;
     return correction;
+}
+
+struct P010HlgLookupTables {
+    int black_level = 0;
+    int white_level = 0;
+    float exposure_gain = 1.0f;
+    float red_gain = 1.0f;
+    float green_even_gain = 1.0f;
+    float green_odd_gain = 1.0f;
+    float blue_gain = 1.0f;
+    std::array<int, 1024> red{};
+    std::array<int, 1024> green_even{};
+    std::array<int, 1024> green_odd{};
+    std::array<int, 1024> blue{};
+    std::array<uint16_t, 4097> hlg{};
+};
+
+std::mutex p010_hlg_lookup_mutex;
+std::shared_ptr<const P010HlgLookupTables> p010_hlg_lookup_cache;
+
+std::shared_ptr<const P010HlgLookupTables> p010_hlg_lookup_tables(
+    int black_level,
+    int white_level,
+    float exposure_gain,
+    float red_gain,
+    float green_even_gain,
+    float green_odd_gain,
+    float blue_gain
+) {
+    std::lock_guard<std::mutex> lock(p010_hlg_lookup_mutex);
+    const auto cached = p010_hlg_lookup_cache;
+    if (cached != nullptr && cached->black_level == black_level &&
+        cached->white_level == white_level && cached->exposure_gain == exposure_gain &&
+        cached->red_gain == red_gain && cached->green_even_gain == green_even_gain &&
+        cached->green_odd_gain == green_odd_gain && cached->blue_gain == blue_gain) {
+        return cached;
+    }
+
+    constexpr int kLinearScale = 4096;
+    auto tables = std::make_shared<P010HlgLookupTables>();
+    tables->black_level = black_level;
+    tables->white_level = white_level;
+    tables->exposure_gain = exposure_gain;
+    tables->red_gain = red_gain;
+    tables->green_even_gain = green_even_gain;
+    tables->green_odd_gain = green_odd_gain;
+    tables->blue_gain = blue_gain;
+    const auto normalized_linear = [black_level, white_level](int value, float gain) -> int {
+        const float linear = std::clamp(
+            (value - black_level) / static_cast<float>(white_level - black_level),
+            0.0f,
+            1.0f
+        );
+        return static_cast<int>(
+            std::lround(std::clamp(linear * gain, 0.0f, 1.0f) * kLinearScale)
+        );
+    };
+    for (int value = 0; value <= kLinearScale; ++value) {
+        const float linear = std::clamp(
+            exposure_gain * static_cast<float>(value) / kLinearScale,
+            0.0f,
+            1.0f
+        );
+        constexpr float a = 0.17883277f;
+        constexpr float b = 0.28466892f;
+        constexpr float c = 0.55991073f;
+        const float encoded = linear <= (1.0f / 12.0f)
+            ? std::sqrt(3.0f * linear)
+            : a * std::log(12.0f * linear - b) + c;
+        tables->hlg[value] = static_cast<uint16_t>(
+            std::clamp(64.0f + encoded * 876.0f, 64.0f, 940.0f)
+        );
+    }
+    for (int value = 0; value < 1024; ++value) {
+        tables->red[value] = normalized_linear(value, red_gain);
+        tables->green_even[value] = normalized_linear(value, green_even_gain);
+        tables->green_odd[value] = normalized_linear(value, green_odd_gain);
+        tables->blue[value] = normalized_linear(value, blue_gain);
+    }
+    p010_hlg_lookup_cache = tables;
+    return tables;
+}
+
+class P010RowWorkerPool {
+public:
+    P010RowWorkerPool() {
+        try {
+            for (int index = 0; index < 2; ++index) {
+                workers_[index] = std::thread([this, index] { worker_loop(index); });
+            }
+        } catch (...) {
+            {
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                stopping_ = true;
+                ++generation_;
+            }
+            task_ready_.notify_all();
+            for (auto& worker : workers_) {
+                if (worker.joinable()) worker.join();
+            }
+            throw;
+        }
+    }
+
+    ~P010RowWorkerPool() {
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            stopping_ = true;
+            ++generation_;
+        }
+        task_ready_.notify_all();
+        for (auto& worker : workers_) {
+            if (worker.joinable()) worker.join();
+        }
+    }
+
+    void run(
+        const std::function<void(int, int)>& task,
+        std::array<std::pair<int, int>, 2> worker_ranges,
+        std::pair<int, int> caller_range
+    ) {
+        std::lock_guard<std::mutex> run_lock(run_mutex_);
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            task_ = task;
+            worker_ranges_ = worker_ranges;
+            completed_ = 0;
+            ++generation_;
+        }
+        task_ready_.notify_all();
+        task(caller_range.first, caller_range.second);
+        std::unique_lock<std::mutex> lock(state_mutex_);
+        task_complete_.wait(lock, [this] { return completed_ == 2; });
+        task_ = nullptr;
+    }
+
+private:
+    void worker_loop(int index) {
+        uint64_t observed_generation = 0;
+        while (true) {
+            std::function<void(int, int)> task;
+            std::pair<int, int> range;
+            {
+                std::unique_lock<std::mutex> lock(state_mutex_);
+                task_ready_.wait(lock, [this, observed_generation] {
+                    return stopping_ || generation_ != observed_generation;
+                });
+                if (stopping_) return;
+                observed_generation = generation_;
+                task = task_;
+                range = worker_ranges_[index];
+            }
+            task(range.first, range.second);
+            {
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                ++completed_;
+            }
+            task_complete_.notify_one();
+        }
+    }
+
+    std::mutex run_mutex_;
+    std::mutex state_mutex_;
+    std::condition_variable task_ready_;
+    std::condition_variable task_complete_;
+    bool stopping_ = false;
+    uint64_t generation_ = 0;
+    int completed_ = 0;
+    std::function<void(int, int)> task_;
+    std::array<std::pair<int, int>, 2> worker_ranges_{};
+    std::array<std::thread, 2> workers_;
+};
+
+P010RowWorkerPool* p010_row_workers() {
+    static std::unique_ptr<P010RowWorkerPool> workers = [] {
+        try {
+            return std::make_unique<P010RowWorkerPool>();
+        } catch (const std::system_error&) {
+            return std::unique_ptr<P010RowWorkerPool>();
+        }
+    }();
+    return workers.get();
 }
 
 void set_error(const std::string& message) {
@@ -1203,6 +1403,21 @@ Java_com_example_rawlite_NativeRawCompression_decodeFrame(
     return 0;
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_example_rawlite_NativeTenBitConverter_resetP010HlgCaches(
+    JNIEnv*,
+    jobject
+) {
+    {
+        std::lock_guard<std::mutex> lock(p010_hlg_lens_shading_cache.mutex);
+        p010_hlg_lens_shading_cache.correction.reset();
+    }
+    {
+        std::lock_guard<std::mutex> lock(p010_hlg_lookup_mutex);
+        p010_hlg_lookup_cache.reset();
+    }
+}
+
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
     JNIEnv* env,
@@ -1282,6 +1497,8 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
     const float safe_green_odd_gain = safe_gain(green_odd_gain);
     const float safe_blue_gain = safe_gain(blue_gain);
     const auto lens_shading = lens_shading_correction(
+        p010_hlg_lens_shading_cache,
+        true,
         env,
         lens_shading_gains_array,
         lens_shading_rows,
@@ -1305,68 +1522,21 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
         );
     }
 
-    std::array<int, 1024> red_lut{};
-    std::array<int, 1024> green_even_lut{};
-    std::array<int, 1024> green_odd_lut{};
-    std::array<int, 1024> blue_lut{};
     const float safe_exposure_gain = std::clamp(exposure_gain, 0.25f, 8.0f);
-    const auto normalized_linear = [
+    const auto lookup_tables = p010_hlg_lookup_tables(
         black_level,
-        white_level
-    ](
-        int value,
-        float gain
-    ) -> int {
-        const float linear = std::clamp(
-            (value - black_level) /
-                static_cast<float>(white_level - black_level),
-            0.0f,
-            1.0f
-        );
-        return static_cast<int>(
-            std::lround(std::clamp(linear * gain, 0.0f, 1.0f) * kLinearScale)
-        );
-    };
-    std::array<uint16_t, kLinearScale + 1> hlg_lut{};
-    for (int value = 0; value <= kLinearScale; ++value) {
-        const float linear = std::clamp(
-            safe_exposure_gain * static_cast<float>(value) / kLinearScale,
-            0.0f,
-            1.0f
-        );
-        constexpr float a = 0.17883277f;
-        constexpr float b = 0.28466892f;
-        constexpr float c = 0.55991073f;
-        const float encoded = linear <= (1.0f / 12.0f)
-            ? std::sqrt(3.0f * linear)
-            : a * std::log(12.0f * linear - b) + c;
-        hlg_lut[value] = static_cast<uint16_t>(
-            std::clamp(64.0f + encoded * 876.0f, 64.0f, 940.0f)
-        );
-    }
-    for (int value = 0; value < 1024; ++value) {
-        red_lut[value] = normalized_linear(value, safe_red_gain);
-        green_even_lut[value] = normalized_linear(value, safe_green_even_gain);
-        green_odd_lut[value] = normalized_linear(value, safe_green_odd_gain);
-        blue_lut[value] = normalized_linear(value, safe_blue_gain);
-    }
-
-    const auto raw10_at = [
-        raw_base,
-        raw_offset,
-        raw_row_stride,
-        crop_x,
-        crop_y
-    ](int x, int y) -> int {
-        const int source_x = crop_x + x;
-        const int source_y = crop_y + y;
-        const uint8_t* row = raw_base + raw_offset + static_cast<size_t>(source_y) * raw_row_stride;
-        const int group = source_x >> 2;
-        const int lane = source_x & 3;
-        const uint8_t* packed = row + group * 5;
-        return (static_cast<int>(packed[lane]) << 2) |
-            ((packed[4] >> (lane * 2)) & 0x03);
-    };
+        white_level,
+        safe_exposure_gain,
+        safe_red_gain,
+        safe_green_even_gain,
+        safe_green_odd_gain,
+        safe_blue_gain
+    );
+    const auto& red_lut = lookup_tables->red;
+    const auto& green_even_lut = lookup_tables->green_even;
+    const auto& green_odd_lut = lookup_tables->green_odd;
+    const auto& blue_lut = lookup_tables->blue;
+    const auto& hlg_lut = lookup_tables->hlg;
 
     const int output_stride_pixels = output_row_stride_bytes / 2;
     auto* y_plane = reinterpret_cast<uint16_t*>(output_base);
@@ -1385,11 +1555,24 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
 
     const auto convert_rows = [&](int first_y, int end_y) {
         for (int y = first_y; y < end_y; y += 2) {
+            const int source_y = crop_y + y;
+            const uint8_t* top_row = raw_base + raw_offset +
+                static_cast<size_t>(source_y) * raw_row_stride;
+            const uint8_t* bottom_row = top_row + raw_row_stride;
             for (int x = 0; x < output_width; x += 2) {
-            int p00 = raw10_at(x, y);
-            int p01 = raw10_at(x + 1, y);
-            int p10 = raw10_at(x, y + 1);
-            int p11 = raw10_at(x + 1, y + 1);
+            const int source_x = crop_x + x;
+            const int group = source_x >> 2;
+            const int lane = source_x & 3;
+            const uint8_t* top_packed = top_row + group * 5;
+            const uint8_t* bottom_packed = bottom_row + group * 5;
+            const int p00 = (static_cast<int>(top_packed[lane]) << 2) |
+                ((top_packed[4] >> (lane * 2)) & 0x03);
+            const int p01 = (static_cast<int>(top_packed[lane + 1]) << 2) |
+                ((top_packed[4] >> ((lane + 1) * 2)) & 0x03);
+            const int p10 = (static_cast<int>(bottom_packed[lane]) << 2) |
+                ((bottom_packed[4] >> (lane * 2)) & 0x03);
+            const int p11 = (static_cast<int>(bottom_packed[lane + 1]) << 2) |
+                ((bottom_packed[4] >> ((lane + 1) * 2)) & 0x03);
             int r = 0;
             int b_value = 0;
             int g0 = 0;
@@ -1445,20 +1628,25 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
                 }
             }
             const int gf = (gf0 + gf1) >> 1;
+            const std::array<int64_t, 3> red_blue_contribution = {
+                static_cast<int64_t>(camera_to_rec2020_q[0]) * rf +
+                    static_cast<int64_t>(camera_to_rec2020_q[2]) * bf,
+                static_cast<int64_t>(camera_to_rec2020_q[3]) * rf +
+                    static_cast<int64_t>(camera_to_rec2020_q[5]) * bf,
+                static_cast<int64_t>(camera_to_rec2020_q[6]) * rf +
+                    static_cast<int64_t>(camera_to_rec2020_q[8]) * bf
+            };
             const auto rec2020_hlg = [
                 &camera_to_rec2020_q,
+                &red_blue_contribution,
                 &hlg_lut,
                 kLinearScale
             ](
-                int camera_r,
-                int camera_g,
-                int camera_b
+                int camera_g
             ) -> std::array<uint16_t, 3> {
                 const auto channel = [&](int row) -> int {
-                    const int64_t value =
-                        static_cast<int64_t>(camera_to_rec2020_q[row]) * camera_r +
-                        static_cast<int64_t>(camera_to_rec2020_q[row + 1]) * camera_g +
-                        static_cast<int64_t>(camera_to_rec2020_q[row + 2]) * camera_b;
+                    const int64_t value = red_blue_contribution[row / 3] +
+                        static_cast<int64_t>(camera_to_rec2020_q[row + 1]) * camera_g;
                     return std::clamp(
                         static_cast<int>((value + (kMatrixScale >> 1)) / kMatrixScale),
                         0,
@@ -1471,9 +1659,9 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
                     hlg_lut[channel(6)]
                 };
             };
-            const auto rgb0 = rec2020_hlg(rf, gf, bf);
-            const auto rgb1 = rec2020_hlg(rf, gf0, bf);
-            const auto rgb2 = rec2020_hlg(rf, gf1, bf);
+            const auto rgb0 = rec2020_hlg(gf);
+            const auto rgb1 = rec2020_hlg(gf0);
+            const auto rgb2 = rec2020_hlg(gf1);
             const auto rgb3 = rgb0;
             const auto luma = [](const std::array<uint16_t, 3>& rgb) -> uint16_t {
                 return static_cast<uint16_t>(std::clamp(
@@ -1521,24 +1709,18 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
         }
     };
 
-    // PURE 10 spends its frame budget in Bayer -> P010 conversion. Three independent
-    // row bands keep lens-shading correction inside the 30 FPS budget on Tensor-class SoCs.
+    // PURE 10 spends its frame budget in Bayer -> P010 conversion. Reuse two persistent
+    // workers instead of creating and joining new threads for every camera frame.
     if (static_cast<int64_t>(output_width) * output_height >= 1920LL * 1080LL) {
         const int first_split_y = (output_height / 3) & ~1;
         const int second_split_y = ((output_height * 2) / 3) & ~1;
-        std::thread first_band;
-        std::thread second_band;
-        try {
-            first_band = std::thread([&] { convert_rows(0, first_split_y); });
-            second_band = std::thread([&] {
-                convert_rows(first_split_y, second_split_y);
-            });
-            convert_rows(second_split_y, output_height);
-            first_band.join();
-            second_band.join();
-        } catch (const std::system_error&) {
-            if (first_band.joinable()) first_band.join();
-            if (second_band.joinable()) second_band.join();
+        if (auto* workers = p010_row_workers()) {
+            workers->run(
+                convert_rows,
+                {{{0, first_split_y}, {first_split_y, second_split_y}}},
+                {second_split_y, output_height}
+            );
+        } else {
             convert_rows(0, output_height);
         }
     } else {
@@ -1642,6 +1824,8 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToArgbPreview(
     }
 
     const auto lens_shading = lens_shading_correction(
+        argb_preview_lens_shading_cache,
+        false,
         env,
         lens_shading_gains_array,
         lens_shading_rows,

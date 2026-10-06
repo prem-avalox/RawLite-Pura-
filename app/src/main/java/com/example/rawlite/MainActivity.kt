@@ -6,6 +6,7 @@ import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.content.res.ColorStateList
@@ -58,7 +59,9 @@ import android.view.Surface
 import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
 import android.view.WindowInsets
+import android.view.WindowManager
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Button
@@ -68,6 +71,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.Spinner
+import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
 import com.example.rawlite.camera.CameraCatalog
@@ -77,8 +81,12 @@ import com.example.rawlite.capture.CaptureCadencePolicy
 import com.example.rawlite.capture.IsoStepPolicy
 import com.example.rawlite.capture.audio.AvSyncContext
 import com.example.rawlite.capture.audio.AvSyncMetadataFactory
+import com.example.rawlite.capture.audio.AudioInputDevice
+import com.example.rawlite.capture.audio.AudioInputMonitor
+import com.example.rawlite.capture.audio.inputDescription
 import com.example.rawlite.capture.metadata.CaptureMetadataContext
 import com.example.rawlite.capture.metadata.CaptureMetadataFactory
+import com.example.rawlite.core.config.Hlg10OutputProfile
 import com.example.rawlite.core.config.Pixel6ReferenceProfile
 import com.example.rawlite.core.model.CameraParameter
 import com.example.rawlite.core.model.CaptureFormatPolicy
@@ -278,6 +286,7 @@ class MainActivity : Activity() {
     private var appliedContentRotation = 0f
     private var detectedDeviceOrientationDegrees = 0
     private var recordingDisplayRotationDegrees = 0
+    private var rotationPreDrawListener: ViewTreeObserver.OnPreDrawListener? = null
     private val stabilizerGravity = FloatArray(3)
     private var stabilizerGravityInitialized = false
     private val stabilizerListener = object : SensorEventListener {
@@ -304,6 +313,7 @@ class MainActivity : Activity() {
     private lateinit var deviceCapabilities: DeviceCapabilitiesGateway
     private var selectedCameraIndex = 0
     private var selectedRawIndex = 1
+    private var selectedHlg10Index = 1
     private var selectedPreviewIndex = 1
     private var selectedFps = 15
     private var captureMode = CaptureMode.RAW
@@ -339,6 +349,7 @@ class MainActivity : Activity() {
     private var nativeWriterHandle = 0L
     private var lensShadingWriter: LensShadingMetadataWriter? = null
     private var pure10Encoder: Pure10Encoder? = null
+    private var pure10LensShading: LensShadingSample? = null
     private var telemetryStream: FileOutputStream? = null
     private var sessionStartElapsedMs = 0L
     private var packedRawRecording = false
@@ -382,6 +393,12 @@ class MainActivity : Activity() {
     private var lastSensorTimestampNs = 0L
     @Volatile
     private var audioRecorder: PcmAudioRecorder? = null
+    private lateinit var audioInputMonitor: AudioInputMonitor
+    private var availableAudioInput: AudioInputDevice? = null
+    private var activeAudioInput: AudioInputDevice? = null
+    @Volatile private var audioCaptureToken: Any? = null
+    private var audioCaptureError = false
+    private var audioInputStatusText: TextView? = null
     private var audioEnabled = true
     private var audioPeak = 0f
     private var analysisFrameCounter = 0
@@ -432,19 +449,30 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val windowAttributes = window.attributes
+        windowAttributes.rotationAnimation =
+            WindowManager.LayoutParams.ROTATION_ANIMATION_SEAMLESS
+        window.attributes = windowAttributes
         loadUserPreferences()
         buildUi()
+        audioInputMonitor = AudioInputMonitor(this) { device ->
+            val previous = availableAudioInput
+            availableAudioInput = device?.inputDescription()
+            if (previous != availableAudioInput && !recording) {
+                if (availableAudioInput?.isExternal == true) {
+                    cameraChrome.showStatusPopup("MIC EXTERNO")
+                } else if (previous?.isExternal == true) {
+                    cameraChrome.showStatusPopup("MIC DESCONECTADO")
+                }
+            }
+            updateMicrophoneUi()
+        }
         baseContentOrientation = currentDisplayRotationDegrees()
         contentOrientationListener = object : OrientationEventListener(this) {
             override fun onOrientationChanged(orientation: Int) {
                 if (orientation == ORIENTATION_UNKNOWN || !::cameraChrome.isInitialized) return
                 val compensation = orientationCompensationWithHysteresis(orientation) ?: return
                 detectedDeviceOrientationDegrees = compensation
-                val base = currentDisplayRotationDegrees()
-                baseContentOrientation = base
-                val relative = (base - compensation + 360) % 360
-                lastAllowedContentRotation = relative.toFloat()
-                applyLatestAutomaticRotation()
             }
         }
         powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -475,6 +503,8 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        if (::audioInputMonitor.isInitialized) audioInputMonitor.stop()
+        removeRotationRenderBarrier()
         chromeHandler.removeCallbacks(chromeRefresh)
         chromeHandler.removeCallbacks(savePreferencesRunnable)
         saveUserPreferencesNow()
@@ -493,6 +523,8 @@ class MainActivity : Activity() {
     }
 
     override fun onStop() {
+        if (::audioInputMonitor.isInitialized) audioInputMonitor.stop()
+        removeRotationRenderBarrier()
         chromeHandler.removeCallbacks(chromeRefresh)
         if (::contentOrientationListener.isInitialized) contentOrientationListener.disable()
         unregisterStabilizerSensor()
@@ -508,6 +540,7 @@ class MainActivity : Activity() {
 
     override fun onStart() {
         super.onStart()
+        if (::audioInputMonitor.isInitialized) audioInputMonitor.start()
         if (::contentOrientationListener.isInitialized && contentOrientationListener.canDetectOrientation()) {
             contentOrientationListener.enable()
         }
@@ -526,12 +559,82 @@ class MainActivity : Activity() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        baseContentOrientation = currentDisplayRotationDegrees()
-        val relative = (baseContentOrientation!! + detectedDeviceOrientationDegrees) % 360
-        lastAllowedContentRotation = relative.toFloat()
-        applyLatestAutomaticRotation()
+        // A display quarter-turn updates the window dimensions before every child has
+        // completed its new layout. Without a barrier Android can submit that single,
+        // internally inconsistent frame: the preview, selector strip and chrome briefly
+        // occupy positions from different orientations. Keep the last complete frame on
+        // screen until both the root and the preview have their final geometry.
+        installRotationRenderBarrier(newConfig.orientation)
+        val previousDisplayRotation = baseContentOrientation ?: currentDisplayRotationDegrees()
+        val newDisplayRotation = currentDisplayRotationDegrees()
+        baseContentOrientation = newDisplayRotation
+        val displayDelta = shortestRotationDelta(
+            previousDisplayRotation.toFloat(),
+            newDisplayRotation.toFloat()
+        )
+        // Rebase each label against the display quarter-turn, then let the existing
+        // Bézier animation bring it upright. The window can rotate seamlessly while
+        // controls retain the progressive motion used by PURA.
+        lastAllowedContentRotation = 0f
+        appliedContentRotation = 0f
+        cameraChrome.rebaseContentRotation(-displayDelta)
+        cameraChrome.animateContentRotation(0f)
+        settingsDialogFrame?.contentRotationDegrees = 0f
         chromeLayer.post { updatePanelLayout(newConfig.orientation) }
-        preview.post { configurePreviewTransform(preview.width, preview.height) }
+        updateStabilizerGuide()
+    }
+
+    private fun installRotationRenderBarrier(expectedOrientation: Int) {
+        if (!::chromeLayer.isInitialized || !::preview.isInitialized) return
+        removeRotationRenderBarrier()
+
+        var layoutUpdateRequested = false
+        val listener = object : ViewTreeObserver.OnPreDrawListener {
+            override fun onPreDraw(): Boolean {
+                val expectedLandscape = expectedOrientation == Configuration.ORIENTATION_LANDSCAPE
+                val rootReady = chromeLayer.width > 0 && chromeLayer.height > 0 &&
+                    (chromeLayer.width > chromeLayer.height) == expectedLandscape
+                val previewReady = preview.width > 0 && preview.height > 0 &&
+                    (preview.width > preview.height) == expectedLandscape
+
+                if (!rootReady || !previewReady) {
+                    if (!layoutUpdateRequested) {
+                        layoutUpdateRequested = true
+                        chromeLayer.post {
+                            updatePanelLayout(expectedOrientation)
+                            chromeLayer.requestLayout()
+                        }
+                    }
+                    return false
+                }
+
+                // Apply the TextureView matrix in the same traversal that releases the
+                // complete layout. No stale preview transform can become visible between
+                // the window rotation and PURA's final chrome geometry.
+                configurePreviewTransform(preview.width, preview.height)
+                removeRotationRenderBarrier()
+                return true
+            }
+        }
+        rotationPreDrawListener = listener
+        chromeLayer.viewTreeObserver.addOnPreDrawListener(listener)
+        chromeLayer.requestLayout()
+    }
+
+    private fun removeRotationRenderBarrier() {
+        val listener = rotationPreDrawListener ?: return
+        if (::chromeLayer.isInitialized) {
+            val observer = chromeLayer.viewTreeObserver
+            if (observer.isAlive) observer.removeOnPreDrawListener(listener)
+        }
+        rotationPreDrawListener = null
+    }
+
+    private fun shortestRotationDelta(fromDegrees: Float, toDegrees: Float): Float {
+        var delta = toDegrees - fromDegrees
+        if (delta > 180f) delta -= 360f
+        if (delta < -180f) delta += 360f
+        return delta
     }
 
     private fun requestRequiredPermissions() {
@@ -559,6 +662,7 @@ class MainActivity : Activity() {
         leftHandedMode = prefs.getBoolean(PREF_LEFT_HANDED, false)
         selectedCameraIndex = prefs.getInt(PREF_CAMERA_INDEX, selectedCameraIndex).coerceAtLeast(0)
         selectedRawIndex = prefs.getInt(PREF_RAW_INDEX, selectedRawIndex).coerceAtLeast(0)
+        selectedHlg10Index = prefs.getInt(PREF_HLG10_INDEX, selectedHlg10Index).coerceAtLeast(0)
         selectedPreviewIndex = prefs.getInt(PREF_PREVIEW_INDEX, selectedPreviewIndex)
             .coerceIn(PREVIEW_SIZES.indices)
         selectedFps = prefs.getInt(PREF_FPS, selectedFps)
@@ -598,6 +702,7 @@ class MainActivity : Activity() {
             .putBoolean(PREF_LEFT_HANDED, leftHandedMode)
             .putInt(PREF_CAMERA_INDEX, selectedCameraIndex)
             .putInt(PREF_RAW_INDEX, selectedRawIndex)
+            .putInt(PREF_HLG10_INDEX, selectedHlg10Index)
             .putInt(PREF_PREVIEW_INDEX, selectedPreviewIndex)
             .putInt(PREF_FPS, selectedFps)
             .putString(PREF_CAPTURE_MODE, captureMode.name)
@@ -713,11 +818,9 @@ class MainActivity : Activity() {
         recordButton = TextView(this).apply {
             gravity = Gravity.CENTER
             isEnabled = false
+            isClickable = false
             contentDescription = "Grabar"
             background = recordButtonBackground(active = false)
-            setOnClickListener {
-                if (recording || switchingSession) stopRecording() else startRecording()
-            }
         }
         captureRail.addView(recordButton)
 
@@ -882,15 +985,25 @@ class MainActivity : Activity() {
         panel.addView(TextView(this).apply {
             text = "CONFIGURACIÓN"
             setTextColor(Color.WHITE)
-            textSize = 18f
+            textSize = 17f
             typeface = cameraTypeface(Typeface.NORMAL)
-            setPadding(0, 0, 0, dp(14))
+            letterSpacing = 0.075f
         })
         panel.addView(TextView(this).apply {
-            text = "PREVIEW"
-            setTextColor(MUTED)
-            textSize = 12f
+            text = "RAWLITE · ${Build.MODEL.uppercase(Locale.US)}"
+            setTextColor(RawLiteDesign.TEXT_MUTED)
+            textSize = 9f
             typeface = cameraTypeface(Typeface.NORMAL)
+            letterSpacing = 0.08f
+            setPadding(0, dp(3), 0, dp(18))
+        })
+        panel.addView(settingsSectionHeading("CAPTURA", "PREVISUALIZACIÓN Y SONIDO"))
+        panel.addView(TextView(this).apply {
+            text = "PREVIEW"
+            setTextColor(RawLiteDesign.TEXT_MUTED)
+            textSize = 9f
+            typeface = cameraTypeface(Typeface.NORMAL)
+            letterSpacing = 0.08f
         })
         val previewRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -928,7 +1041,7 @@ class MainActivity : Activity() {
             })
         }
         panel.addView(previewRow)
-        panel.addView(settingsSwitch("Audio", audioEnabled) { control, checked ->
+        panel.addView(settingsSwitch("AUDIO", "Grabar y sincronizar audio con cada toma", audioEnabled) { control, checked ->
                 if (checked && checkSelfPermission(Manifest.permission.RECORD_AUDIO) !=
                     PackageManager.PERMISSION_GRANTED
                 ) {
@@ -940,19 +1053,34 @@ class MainActivity : Activity() {
                     updateMicrophoneUi()
                 }
             })
+        audioInputStatusText = TextView(this).apply {
+            textSize = 12f
+            setTextColor(MUTED)
+            setPadding(dp(4), dp(8), dp(4), dp(12))
+        }
+        panel.addView(audioInputStatusText)
+        updateMicrophoneUi()
         panel.addView(settingsDivider())
-        panel.addView(settingsSwitch("Cuadrícula de tercios", thirdsGridEnabled) { _, checked ->
+        panel.addView(settingsSectionHeading("INTERFAZ", "GEOMETRÍA Y GUÍAS"))
+        panel.addView(settingsSwitch("CUADRÍCULA DE TERCIOS", "Guía blanca sobre la previsualización", thirdsGridEnabled) { _, checked ->
                 thirdsGridEnabled = checked
                 technicalOverlay.thirdsGridEnabled = checked
                 scheduleUserPreferencesSave()
             })
         panel.addView(settingsDivider())
-        panel.addView(settingsSwitch("Controles para zurdos", leftHandedMode) { _, checked ->
+        panel.addView(settingsSwitch("CONTROLES PARA ZURDOS", "Invierte la geometría de operación con una mano", leftHandedMode) { _, checked ->
                 leftHandedMode = checked
                 cameraChrome.leftHanded = checked
                 scheduleUserPreferencesSave()
             })
         lateinit var dialog: AlertDialog
+        panel.addView(settingsDivider())
+        panel.addView(settingsSectionHeading("ALMACENAMIENTO", "ESTADO ACTUAL"))
+        val movieDir = getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: filesDir
+        val availableBytes = runCatching { StatFs(movieDir.absolutePath).availableBytes }.getOrDefault(0L)
+        panel.addView(settingsInformationRow("UBICACIÓN", "DCIM / RawLite"))
+        panel.addView(settingsDivider())
+        panel.addView(settingsInformationRow("DISPONIBLE", formatStorageBytes(availableBytes)))
         panel.addView(settingsDivider())
         panel.addView(TextView(this).apply {
             text = "CERRAR"
@@ -966,7 +1094,17 @@ class MainActivity : Activity() {
         val rotatingFrame = RotatingDialogFrame(this).apply {
             contentRotationDegrees = appliedContentRotation
             addView(
-                panel,
+                ScrollView(this@MainActivity).apply {
+                    isFillViewport = true
+                    overScrollMode = View.OVER_SCROLL_NEVER
+                    addView(
+                        panel,
+                        FrameLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        )
+                    )
+                },
                 FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
@@ -978,7 +1116,10 @@ class MainActivity : Activity() {
             .setView(rotatingFrame)
             .create()
         dialog.setOnDismissListener {
-            if (settingsDialogFrame === rotatingFrame) settingsDialogFrame = null
+            if (settingsDialogFrame === rotatingFrame) {
+                settingsDialogFrame = null
+                audioInputStatusText = null
+            }
         }
         dialog.show()
         dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
@@ -1059,12 +1200,13 @@ class MainActivity : Activity() {
     private fun syncWheelToSelectedParameter() {
         if (!::wheelView.isInitialized) return
         wheelView.valueFormatter = { progress -> formatWheelValue(selectedParameter, progress) }
+        val fpsOptions = currentFpsOptions()
         val majorStep = when (selectedParameter) {
             CameraParameter.LENS -> discreteStep(cameraOptions.size)
-            CameraParameter.FPS -> discreteStep(FPS_OPTIONS.size)
+            CameraParameter.FPS -> discreteStep(fpsOptions.size)
             CameraParameter.SHUTTER -> discreteStep(shutterValuesNs().size)
             CameraParameter.ISO -> isoProgressStep()
-            CameraParameter.RESOLUTION -> discreteStep(currentOption()?.rawSizes?.size ?: 0)
+            CameraParameter.RESOLUTION -> discreteStep(currentResolutionCount())
             else -> 100
         }
         wheelView.valueInterval = majorStep
@@ -1088,7 +1230,9 @@ class MainActivity : Activity() {
     private fun progressForParameter(parameter: CameraParameter): Int {
         return when (parameter) {
             CameraParameter.LENS -> discreteProgress(selectedCameraIndex, cameraOptions.size)
-            CameraParameter.FPS -> discreteProgress(FPS_OPTIONS.indexOf(selectedFps), FPS_OPTIONS.size)
+            CameraParameter.FPS -> currentFpsOptions().let { options ->
+                discreteProgress(options.indexOf(selectedFps).coerceAtLeast(0), options.size)
+            }
             CameraParameter.SHUTTER -> shutterProgressFor(
                 if (manualExposure) exposureNs else {
                     latestResult?.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: exposureNs
@@ -1102,8 +1246,8 @@ class MainActivity : Activity() {
             CameraParameter.WHITE_BALANCE -> wbControls.seek.progress
             CameraParameter.FOCUS -> focusControls.seek.progress
             CameraParameter.RESOLUTION -> discreteProgress(
-                selectedRawIndex,
-                currentOption()?.rawSizes?.size ?: 0
+                currentResolutionIndex(),
+                currentResolutionCount()
             )
         }
     }
@@ -1113,9 +1257,10 @@ class MainActivity : Activity() {
             CameraParameter.LENS -> cameraOptions.getOrNull(
                 discreteIndex(progress, cameraOptions.size)
             )?.let(::lensDisplayLabel) ?: "24"
-            CameraParameter.FPS -> FPS_OPTIONS.getOrNull(
-                discreteIndex(progress, FPS_OPTIONS.size)
-            )?.toString() ?: selectedFps.toString()
+            CameraParameter.FPS -> currentFpsOptions().let { options ->
+                options.getOrNull(discreteIndex(progress, options.size))
+                    ?.toString() ?: selectedFps.toString()
+            }
             CameraParameter.SHUTTER -> {
                 formatExposure(shutterValueForProgress(progress))
             }
@@ -1131,9 +1276,8 @@ class MainActivity : Activity() {
                 formatFocus(progressToLinear(progress, 0.0, maxFocus.toDouble()).toFloat())
             }
             CameraParameter.RESOLUTION -> {
-                val sizes = currentOption()?.rawSizes.orEmpty()
-                sizes.getOrNull(discreteIndex(progress, sizes.size))?.let(::resolutionDisplayLabel)
-                    ?: "RAW"
+                val count = currentResolutionCount()
+                resolutionLabelAt(discreteIndex(progress, count)) ?: "—"
             }
         }
     }
@@ -1156,8 +1300,9 @@ class MainActivity : Activity() {
                 }
             }
             CameraParameter.FPS -> {
-                val index = discreteIndex(progress, FPS_OPTIONS.size)
-                val fps = FPS_OPTIONS.getOrNull(index) ?: return
+                val options = currentFpsOptions()
+                val index = discreteIndex(progress, options.size)
+                val fps = options.getOrNull(index) ?: return
                 if (fps != selectedFps) {
                     selectedFps = fps
                     scheduleUserPreferencesSave()
@@ -1207,14 +1352,16 @@ class MainActivity : Activity() {
                 }
             }
             CameraParameter.RESOLUTION -> {
-                val count = currentOption()?.rawSizes?.size ?: 0
+                val count = currentResolutionCount()
                 val index = discreteIndex(progress, count)
-                if (index != selectedRawIndex) {
-                    selectedRawIndex = index
+                if (index != currentResolutionIndex()) {
+                    setCurrentResolutionIndex(index)
+                    constrainFpsToCurrentResolution()
                     scheduleUserPreferencesSave()
                     resolutionSpinner.setSelection(index)
                     updateFormatHint()
                     updateChromeValues()
+                    showCurrentResolutionStatus()
                     reopenSelectedCamera()
                 }
             }
@@ -1237,8 +1384,8 @@ class MainActivity : Activity() {
         }
         val step = when (selectedParameter) {
             CameraParameter.LENS -> discreteStep(cameraOptions.size)
-            CameraParameter.FPS -> discreteStep(FPS_OPTIONS.size)
-            CameraParameter.RESOLUTION -> discreteStep(currentOption()?.rawSizes?.size ?: 0)
+            CameraParameter.FPS -> discreteStep(currentFpsOptions().size)
+            CameraParameter.RESOLUTION -> discreteStep(currentResolutionCount())
             CameraParameter.WHITE_BALANCE -> 6
             CameraParameter.ISO -> isoProgressStep()
             CameraParameter.SHUTTER, CameraParameter.FOCUS -> 4
@@ -1322,7 +1469,7 @@ class MainActivity : Activity() {
             CameraParameter.FOCUS -> controls.manualFocus
             CameraParameter.LENS -> cameraOptions.size > 1
             CameraParameter.FPS -> true
-            CameraParameter.RESOLUTION -> (currentOption()?.rawSizes?.size ?: 0) > 1
+            CameraParameter.RESOLUTION -> currentResolutionCount() > 1
         }
         if (!supported) return false
         if (!recording) return true
@@ -1551,16 +1698,17 @@ class MainActivity : Activity() {
         ) return
         val next = if (captureMode == CaptureMode.RAW) CaptureMode.PURE10 else CaptureMode.RAW
         if (next == CaptureMode.PURE10 && !currentPure10Availability()) {
-            cameraChrome.showStatusPopup("PURE 10 NO DISPONIBLE")
+            cameraChrome.showStatusPopup("HLG 10 NO DISPONIBLE")
             return
         }
         captureMode = next
+        refreshModeDependentSelectors()
         updateFormatHint()
         updateChromeValues()
         syncWheelToSelectedParameter()
         scheduleUserPreferencesSave()
         val label = if (captureMode == CaptureMode.PURE10) {
-            "PURE 10 · HEVC MAIN10 · HLG"
+            "HLG 10 · HEVC MAIN10"
         } else {
             "RAW"
         }
@@ -1591,12 +1739,11 @@ class MainActivity : Activity() {
         selectorButtons[CameraParameter.ISO]?.text = "${displayedIso}ISO"
         selectorButtons[CameraParameter.WHITE_BALANCE]?.text = "${kelvin}K"
         selectorButtons[CameraParameter.FOCUS]?.text = formatFocus(displayedFocus)
-        selectorButtons[CameraParameter.RESOLUTION]?.text = currentRawSize()
-            ?.let(::resolutionDisplayLabel) ?: "RAW"
+        selectorButtons[CameraParameter.RESOLUTION]?.text = currentResolutionLabel()
         selectorButtons.forEach { (parameter, button) ->
             button.setTextColor(parameterTextColor(parameter))
         }
-        val modeLabel = if (captureMode == CaptureMode.RAW) "RAW" else "PURE 10"
+        val modeLabel = if (captureMode == CaptureMode.RAW) "RAW" else "HLG 10"
         rawModeButton.text = modeLabel
         rawModeButton.setTextColor(ACCENT)
         if (::cameraChrome.isInitialized) {
@@ -1607,7 +1754,7 @@ class MainActivity : Activity() {
                 "${displayedIso}ISO",
                 "${kelvin}K",
                 formatFocus(displayedFocus),
-                currentRawSize()?.let(::resolutionDisplayLabel) ?: "RAW"
+                currentResolutionLabel()
             )
             cameraChrome.autoParameterStates = CameraParameter.entries.map(::parameterIsAuto)
             cameraChrome.selectedParameter = selectedParameter.ordinal
@@ -1620,10 +1767,10 @@ class MainActivity : Activity() {
             cameraChrome.pushAutoEnabled = pushAutoCanRunNow()
             val majorStep = when (selectedParameter) {
                 CameraParameter.LENS -> discreteStep(cameraOptions.size)
-                CameraParameter.FPS -> discreteStep(FPS_OPTIONS.size)
+                CameraParameter.FPS -> discreteStep(currentFpsOptions().size)
                 CameraParameter.SHUTTER -> discreteStep(shutterValuesNs().size)
                 CameraParameter.ISO -> isoProgressStep()
-                CameraParameter.RESOLUTION -> discreteStep(currentOption()?.rawSizes?.size ?: 0)
+                CameraParameter.RESOLUTION -> discreteStep(currentResolutionCount())
                 else -> 100
             }
             cameraChrome.configureWheel(
@@ -1664,11 +1811,7 @@ class MainActivity : Activity() {
     }
 
     private fun resolutionDisplayLabel(size: Size): String {
-        return when {
-            size.width >= 3800 -> "4K"
-            size.width >= 1900 -> "2K"
-            else -> "${size.width}p"
-        }
+        return "${size.width}×${size.height}"
     }
 
     private fun discreteIndex(progress: Int, count: Int): Int {
@@ -1750,12 +1893,14 @@ class MainActivity : Activity() {
 
         resolutionSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                if (suppressSpinnerEvents || position == selectedRawIndex) return
-                selectedRawIndex = position
+                if (suppressSpinnerEvents || position == currentResolutionIndex()) return
+                setCurrentResolutionIndex(position)
+                constrainFpsToCurrentResolution()
                 scheduleUserPreferencesSave()
                 updateFormatHint()
                 updateChromeValues()
                 syncWheelToSelectedParameter()
+                showCurrentResolutionStatus()
                 reopenSelectedCamera()
             }
 
@@ -1775,7 +1920,7 @@ class MainActivity : Activity() {
 
         fpsSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                val fps = FPS_OPTIONS.getOrNull(position) ?: return
+                val fps = currentFpsOptions().getOrNull(position) ?: return
                 if (suppressSpinnerEvents || fps == selectedFps) return
                 selectedFps = fps
                 scheduleUserPreferencesSave()
@@ -1881,7 +2026,7 @@ class MainActivity : Activity() {
         selectedCameraIndex = selectedCameraIndex.coerceIn(cameraOptions.indices)
         cameraSpinner.setSelection(selectedCameraIndex)
         configureUiForCamera()
-        fpsSpinner.setSelection(FPS_OPTIONS.indexOf(selectedFps).coerceAtLeast(0))
+        fpsSpinner.setSelection(currentFpsOptions().indexOf(selectedFps).coerceAtLeast(0))
         suppressSpinnerEvents = false
 
         preview.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
@@ -1919,12 +2064,16 @@ class MainActivity : Activity() {
         manualWbGains = null
         manualWbTransform = null
         suppressSpinnerEvents = true
-        resolutionSpinner.adapter = spinnerAdapter(option.rawSizes.mapIndexed { index, size ->
-            val mode = if (index == 0) "FULL" else "BIN 2×"
-            "$mode ${size.width}×${size.height}"
-        })
         selectedRawIndex = selectedRawIndex.coerceIn(option.rawSizes.indices)
-        resolutionSpinner.setSelection(selectedRawIndex)
+        val hlgProfiles = availableHlg10Profiles()
+        if (captureMode == CaptureMode.PURE10 && hlgProfiles.isEmpty()) {
+            captureMode = CaptureMode.RAW
+        }
+        selectedHlg10Index = selectedHlg10Index.coerceIn(
+            0,
+            (hlgProfiles.size - 1).coerceAtLeast(0)
+        )
+        refreshModeDependentSelectors(keepSuppressed = true)
         suppressSpinnerEvents = false
         updateFormatHint()
 
@@ -2476,14 +2625,13 @@ class MainActivity : Activity() {
 
     private fun frameMetadata(result: CaptureResult): FrameMetadata {
         val gains = result.get(CaptureResult.COLOR_CORRECTION_GAINS)
-        val lensShading = result.get(CaptureResult.STATISTICS_LENS_SHADING_CORRECTION_MAP)
-            ?.let { map ->
-                val factors = FloatArray(map.gainFactorCount)
-                map.copyGainFactors(factors, 0)
-                runCatching {
-                    LensShadingSample(map.rowCount, map.columnCount, factors)
-                }.getOrNull()
+        val lensShading = if (pure10Recording) {
+            pure10LensShading ?: readLensShadingSample(result)?.also {
+                pure10LensShading = it
             }
+        } else {
+            readLensShadingSample(result)
+        }
         return FrameMetadata(
             timestampNs = result.get(CaptureResult.SENSOR_TIMESTAMP) ?: 0L,
             iso = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: 0,
@@ -2496,6 +2644,17 @@ class MainActivity : Activity() {
             wbBlue = gains?.blue ?: 1f,
             lensShading = lensShading
         )
+    }
+
+    private fun readLensShadingSample(result: CaptureResult): LensShadingSample? {
+        return result.get(CaptureResult.STATISTICS_LENS_SHADING_CORRECTION_MAP)
+            ?.let { map ->
+                val factors = FloatArray(map.gainFactorCount)
+                map.copyGainFactors(factors, 0)
+                runCatching {
+                    LensShadingSample(map.rowCount, map.columnCount, factors)
+                }.getOrNull()
+            }
     }
 
     private fun timelineFrameForTimestamp(timestampNs: Long): Int {
@@ -2911,6 +3070,7 @@ class MainActivity : Activity() {
         activeCaptureMode = captureMode
         val output = CaptureFormatPolicy.output(activeCaptureMode, selectedRawIndex)
         pure10Recording = output == CaptureOutput.PURE10
+        pure10LensShading = null
         packedRawRecording = output == CaptureOutput.RAW10
         dngRecording = output == CaptureOutput.CINEMA_DNG
         if (!CaptureFormatPolicy.selectionIsValid(activeCaptureMode, selectedRawIndex)) {
@@ -3035,8 +3195,35 @@ class MainActivity : Activity() {
         }
         val dir = sessionDir ?: return
         if (audioRecorder != null) return
-        val recorder = PcmAudioRecorder.create(this, dir, ::updateAudioLevel)
+        val token = Any()
+        audioCaptureToken = token
+        runOnUiThread {
+            activeAudioInput = null
+            audioCaptureError = false
+            updateMicrophoneUi()
+        }
+        val recorder = PcmAudioRecorder.create(
+            this, dir,
+            routeListener = { input -> runOnUiThread {
+                if (audioCaptureToken === token) {
+                    activeAudioInput = input
+                    updateMicrophoneUi()
+                }
+            } },
+            errorListener = { error -> runOnUiThread {
+                if (audioCaptureToken === token) {
+                    audioCaptureError = true
+                    updateMicrophoneUi()
+                    setStatusText("Audio interrumpido · $error")
+                }
+            } },
+            levelListener = ::updateAudioLevel
+        )
         if (recorder == null || !recorder.start()) {
+            runOnUiThread {
+                audioCaptureError = true
+                updateMicrophoneUi()
+            }
             setStatusText("Grabación activa · no se pudo iniciar el micrófono")
             return
         }
@@ -3047,6 +3234,7 @@ class MainActivity : Activity() {
     private fun finishAudioCapture() {
         val recorder = audioRecorder ?: return
         audioRecorder = null
+        audioCaptureToken = null
         val dir = sessionDir ?: return
         finalizingAudio = true
         logStopMeasurement("AUDIO_STOP_START")
@@ -3148,9 +3336,9 @@ class MainActivity : Activity() {
 
     private fun openPure10Outputs(): Boolean {
         val dir = sessionDir ?: return false
-        val selectedSize = currentRawSize() ?: return false
-        val outputSize = pure10OutputSize(selectedSize)
-        val sourceSize = pure10SourceSize(outputSize, selectedSize)
+        val fallbackSize = currentRawSize() ?: return false
+        val outputSize = currentResolutionSize() ?: return false
+        val sourceSize = pure10SourceSize(outputSize, fallbackSize)
         val option = currentOption() ?: return false
         var encoder: Pure10Encoder? = null
         return try {
@@ -3173,7 +3361,7 @@ class MainActivity : Activity() {
             Log.e(TAG, "Could not create PURE 10 outputs", error)
             runCatching { encoder?.abort() }
             pure10Encoder = null
-            setStatusText("PURE 10 no pudo iniciar el encoder Main10")
+            setStatusText("HLG 10 no pudo iniciar el encoder Main10")
             false
         }
     }
@@ -3446,6 +3634,7 @@ class MainActivity : Activity() {
     }
 
     private fun buildPure10Description(sourceSize: Size, outputSize: Size): JSONObject {
+        val profile = currentHlg10Profile()
         return CaptureMetadataFactory.pure10(
             captureMetadataContext(outputSize),
             postRawGain,
@@ -3455,7 +3644,12 @@ class MainActivity : Activity() {
             .put("raw_source_height", sourceSize.height)
             .put("pure10_crop_x", ((sourceSize.width - outputSize.width) / 2) and -2)
             .put("pure10_crop_y", ((sourceSize.height - outputSize.height) / 2) and -2)
-            .put("pure10_experimental_4k", sourceSize != outputSize)
+            .put("pure10_experimental_4k", profile?.status == Hlg10OutputProfile.Status.EXPERIMENTAL)
+            .put("hlg10_profile_id", profile?.id ?: "unknown")
+            .put("hlg10_output_width", outputSize.width)
+            .put("hlg10_output_height", outputSize.height)
+            .put("hlg10_aspect_ratio", profile?.aspectLabel ?: aspectRatioLabel(outputSize))
+            .put("hlg10_profile_status", profile?.status?.name ?: "UNKNOWN")
             .put("sensor_capture_rotation_degrees", captureRotationDegrees(currentOption()!!.characteristics))
             .put("rotation_degrees", PURE10_CONTAINER_ROTATION_DEGREES)
             .put("requested_frame_duration_ns", sessionRequestedFrameDurationNs)
@@ -3681,7 +3875,7 @@ class MainActivity : Activity() {
         cameraDevice?.close()
         cameraDevice = null
         clearPendingRawImages()
-        rawReader?.close()
+        val readerToClose = rawReader
         rawReader = null
         analysisReader?.close()
         analysisReader = null
@@ -3689,6 +3883,31 @@ class MainActivity : Activity() {
         previewSurface = null
         resultsByTimestamp.clear()
         latestResult = null
+
+        // Acquired RAW Images are deliberately processed on ioExecutor. Closing their
+        // ImageReader here invalidates the direct ByteBuffers while the native Bayer ->
+        // P010 conversion may still be reading them (for example when the app goes to the
+        // background during a take). Queue the close behind every submitted frame instead.
+        // The field is cleared immediately so a resumed camera can create a fresh reader.
+        if (readerToClose != null) {
+            runCatching {
+                ioExecutor.execute { readerToClose.close() }
+            }.onFailure {
+                // onDestroy can shut the executor down before the asynchronous camera
+                // onClosed callback reaches this method. Never invalidate an acquired Image
+                // in that race: wait for the accepted work to drain on a disposable thread.
+                Thread({
+                    val drained = runCatching {
+                        ioExecutor.awaitTermination(READER_CLOSE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                    }.getOrDefault(false)
+                    if (drained) {
+                        readerToClose.close()
+                    } else {
+                        Log.w(TAG, "Leaving RAW reader to process teardown after I/O drain timeout")
+                    }
+                }, "RawLiteReaderClose").start()
+            }
+        }
     }
 
     private fun closeCameraForBackground(finalizeCapture: Boolean) {
@@ -3883,7 +4102,7 @@ class MainActivity : Activity() {
         }
 
         val option = currentOption() ?: return
-        val size = currentRawSize()
+        val size = currentResolutionSize()
         val measuredIso = latestResult?.get(CaptureResult.SENSOR_SENSITIVITY)
         val measuredExposure = latestResult?.get(CaptureResult.SENSOR_EXPOSURE_TIME)
         val measuredFrameDuration = latestResult?.get(CaptureResult.SENSOR_FRAME_DURATION)
@@ -3944,7 +4163,7 @@ class MainActivity : Activity() {
             }
         }
         val previewSize = currentPreviewSize()
-        val captureLabel = if (captureMode == CaptureMode.PURE10) "PURE 10" else "RAW"
+        val captureLabel = if (captureMode == CaptureMode.PURE10) "HLG 10" else "RAW"
         val rawAvailability = if (rawVideoSupportedForCurrentCamera()) {
             captureLabel
         } else {
@@ -4066,7 +4285,7 @@ class MainActivity : Activity() {
             CaptureFeature.PURE10,
             option.openId,
             option.physicalId
-        ).available
+        ).available && availableHlg10Profiles().isNotEmpty()
     }
 
     private fun currentDisplayRotationDegrees(): Int {
@@ -4204,12 +4423,133 @@ class MainActivity : Activity() {
         return value
     }
 
+    private fun availableHlg10Profiles(): List<Hlg10OutputProfile> {
+        val raw10Sizes = currentCharacteristics()
+            ?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            ?.getOutputSizes(ImageFormat.RAW10)
+            ?.toList()
+            .orEmpty()
+        if (raw10Sizes.isEmpty()) return emptyList()
+        return CAPTURE_PROFILE.hlg10OutputProfiles.filter { profile ->
+            profile.width <= CAPTURE_PROFILE.pure10MaximumWidth &&
+                profile.height <= CAPTURE_PROFILE.pure10MaximumHeight &&
+                raw10Sizes.any { source ->
+                    source.width >= profile.width && source.height >= profile.height
+                }
+        }
+    }
+
+    private fun currentHlg10Profile(): Hlg10OutputProfile? =
+        availableHlg10Profiles().getOrNull(selectedHlg10Index)
+
+    private fun currentResolutionIndex(): Int = if (captureMode == CaptureMode.PURE10) {
+        selectedHlg10Index
+    } else {
+        selectedRawIndex
+    }
+
+    private fun currentResolutionCount(): Int = if (captureMode == CaptureMode.PURE10) {
+        availableHlg10Profiles().size
+    } else {
+        currentOption()?.rawSizes?.size ?: 0
+    }
+
+    private fun setCurrentResolutionIndex(index: Int) {
+        if (captureMode == CaptureMode.PURE10) {
+            selectedHlg10Index = index.coerceIn(0, (availableHlg10Profiles().size - 1).coerceAtLeast(0))
+        } else {
+            selectedRawIndex = index.coerceIn(0, ((currentOption()?.rawSizes?.size ?: 1) - 1))
+        }
+    }
+
+    private fun resolutionLabelAt(index: Int): String? = if (captureMode == CaptureMode.PURE10) {
+        availableHlg10Profiles().getOrNull(index)?.exactLabel
+    } else {
+        currentOption()?.rawSizes?.getOrNull(index)?.let(::resolutionDisplayLabel)
+    }
+
+    private fun currentResolutionLabel(): String =
+        resolutionLabelAt(currentResolutionIndex()) ?: "—"
+
+    private fun currentResolutionSize(): Size? = if (captureMode == CaptureMode.PURE10) {
+        currentHlg10Profile()?.let { Size(it.width, it.height) }
+    } else {
+        currentRawSize()
+    }
+
+    private fun currentFpsOptions(): List<Int> = if (captureMode == CaptureMode.PURE10) {
+        currentHlg10Profile()?.frameRates.orEmpty().ifEmpty { FPS_OPTIONS }
+    } else {
+        FPS_OPTIONS
+    }
+
+    private fun constrainFpsToCurrentResolution() {
+        val options = currentFpsOptions()
+        if (options.isEmpty()) return
+        if (selectedFps !in options) {
+            selectedFps = options.minBy { option -> abs(option - selectedFps) }
+        }
+        if (::fpsSpinner.isInitialized) {
+            val previousSuppression = suppressSpinnerEvents
+            suppressSpinnerEvents = true
+            fpsSpinner.adapter = spinnerAdapter(options.map(Int::toString))
+            fpsSpinner.setSelection(options.indexOf(selectedFps).coerceAtLeast(0))
+            suppressSpinnerEvents = previousSuppression
+        }
+    }
+
+    private fun refreshModeDependentSelectors(keepSuppressed: Boolean = false) {
+        if (!::resolutionSpinner.isInitialized || !::fpsSpinner.isInitialized) return
+        val previousSuppression = suppressSpinnerEvents
+        suppressSpinnerEvents = true
+        val labels = if (captureMode == CaptureMode.PURE10) {
+            availableHlg10Profiles().map { profile ->
+                "HLG 10 · ${profile.exactLabel} · ${profile.aspectLabel} · " +
+                    hlg10StatusLabel(profile.status)
+            }
+        } else {
+            currentOption()?.rawSizes.orEmpty().mapIndexed { index, size ->
+                val format = if (index == 0) "CinemaDNG FULL" else "RAW10"
+                "$format · ${resolutionDisplayLabel(size)} · ${aspectRatioLabel(size)}"
+            }
+        }
+        resolutionSpinner.adapter = spinnerAdapter(labels)
+        resolutionSpinner.setSelection(currentResolutionIndex().coerceAtLeast(0))
+        constrainFpsToCurrentResolution()
+        suppressSpinnerEvents = if (keepSuppressed) true else previousSuppression
+    }
+
+    private fun aspectRatioLabel(size: Size): String {
+        val ratio = size.width.toDouble() / size.height.coerceAtLeast(1)
+        return if (abs(ratio - 16.0 / 9.0) < 0.03) "16:9" else if (
+            abs(ratio - 4.0 / 3.0) < 0.03
+        ) {
+            "4:3"
+        } else {
+            String.format(Locale.US, "%.2f:1", ratio)
+        }
+    }
+
+    private fun hlg10StatusLabel(status: Hlg10OutputProfile.Status): String = when (status) {
+        Hlg10OutputProfile.Status.VALIDATED -> "VALIDADO"
+        Hlg10OutputProfile.Status.MEASURED -> "MEDIDO"
+        Hlg10OutputProfile.Status.EXPERIMENTAL -> "EXPERIMENTAL"
+    }
+
+    private fun showCurrentResolutionStatus() {
+        if (captureMode != CaptureMode.PURE10 || !::cameraChrome.isInitialized) return
+        val profile = currentHlg10Profile() ?: return
+        cameraChrome.showStatusPopup(
+            "${profile.exactLabel} · ${profile.aspectLabel} · ${hlg10StatusLabel(profile.status)}"
+        )
+    }
+
     private fun currentRawSize(): Size? = currentOption()?.rawSizes?.getOrNull(selectedRawIndex)
     private fun currentCaptureRawSize(): Size? {
-        val selectedSize = currentRawSize() ?: return null
-        if (captureMode != CaptureMode.PURE10) return selectedSize
-        val outputSize = pure10OutputSize(selectedSize)
-        return pure10SourceSize(outputSize, selectedSize)
+        val fallback = currentRawSize() ?: return null
+        if (captureMode != CaptureMode.PURE10) return fallback
+        val outputSize = currentResolutionSize() ?: return null
+        return pure10SourceSize(outputSize, fallback)
     }
 
     private fun pure10SourceSize(outputSize: Size, fallback: Size): Size {
@@ -4223,18 +4563,8 @@ class MainActivity : Activity() {
 
     private fun isPure10UhdSelected(): Boolean {
         if (captureMode != CaptureMode.PURE10) return false
-        val selectedSize = currentRawSize() ?: return false
-        return pure10OutputSize(selectedSize) == PURE10_UHD_SIZE
-    }
-
-    private fun pure10OutputSize(sourceSize: Size): Size {
-        return if (sourceSize.width >= PURE10_UHD_SIZE.width &&
-            sourceSize.height >= PURE10_UHD_SIZE.height
-        ) {
-            PURE10_UHD_SIZE
-        } else {
-            sourceSize
-        }
+        val profile = currentHlg10Profile() ?: return false
+        return profile.width == 3840 && profile.height == 2160
     }
 
     private fun currentPreviewSize(): Size {
@@ -4264,19 +4594,35 @@ class MainActivity : Activity() {
     private fun updateFormatHint() {
         if (!::formatHint.isInitialized) return
         formatHint.text = if (captureMode == CaptureMode.PURE10) {
-            "PURE 10 · HEVC MAIN10 · HLG · ${Pure10Encoder.BIT_RATE / 1_000_000} Mb/s"
+            val profile = currentHlg10Profile()
+            if (profile != null) {
+                "HLG 10 · ${profile.exactLabel} · ${profile.aspectLabel} · " +
+                    "${selectedFps} FPS · HEVC MAIN10 · " +
+                    "${Pure10Encoder.BIT_RATE / 1_000_000} Mb/s · " +
+                    hlg10StatusLabel(profile.status)
+            } else {
+                "HLG 10 no disponible"
+            }
         } else if (selectedRawIndex > 0) {
             val size = currentRawSize()
             val megabytesPerSecond = size?.let {
                 ((it.width.toLong() * it.height * 10L + 7L) / 8L) * selectedFps / 1_000_000.0
             }
             if (megabytesPerSecond != null) {
-                String.format(Locale.US, "RAW10 · %.1f MB/s", megabytesPerSecond)
+                String.format(
+                    Locale.US,
+                    "RAW10 · %s · %s · %.1f MB/s",
+                    size?.let(::resolutionDisplayLabel) ?: "—",
+                    size?.let(::aspectRatioLabel) ?: "—",
+                    megabytesPerSecond
+                )
             } else {
                 "RAW10 secuencial"
             }
         } else {
-            "DNG secuencial"
+            val size = currentRawSize()
+            "CinemaDNG · ${size?.let(::resolutionDisplayLabel) ?: "—"} · " +
+                "${size?.let(::aspectRatioLabel) ?: "—"}"
         }
     }
 
@@ -4307,10 +4653,33 @@ class MainActivity : Activity() {
     }
 
     private fun updateMicrophoneUi() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            runOnUiThread { updateMicrophoneUi() }
+            return
+        }
         if (!::microphoneButton.isInitialized) return
         val permitted = checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
-        microphoneButton.text = if (audioEnabled && permitted) "MIC" else "MUTE"
+        val input = if (recording) activeAudioInput else availableAudioInput
+        val label = when {
+            !audioEnabled || !permitted -> "MUTE"
+            recording && audioCaptureError -> "MIC ERROR"
+            recording && input == null -> "MIC ?"
+            input?.isExternal == true -> "MIC EXT"
+            recording && availableAudioInput?.isExternal == true -> "MIC INT !"
+            input?.type == android.media.AudioDeviceInfo.TYPE_BUILTIN_MIC -> "MIC INT"
+            else -> "MIC AUTO"
+        }
+        microphoneButton.text = label
+        if (::cameraChrome.isInitialized) cameraChrome.audioInputLabel = label
+        audioInputStatusText?.text = when {
+            !audioEnabled || !permitted -> "Audio desactivado"
+            recording && audioCaptureError -> "Audio interrumpido. Revisa la conexión del micrófono."
+            recording -> "Entrada activa: ${input?.label ?: "verificando micrófono…"}" +
+                if (availableAudioInput?.isExternal == true && input?.isExternal != true)
+                    "\nExterno conectado: ${availableAudioInput?.label}; uso aún no confirmado." else ""
+            else -> "Entrada automática: ${input?.label ?: "Micrófono del sistema"}"
+        }
         microphoneButton.setTextColor(if (audioEnabled && permitted) Color.WHITE else MUTED)
         microphoneButton.alpha = if (recording || finalizingAudio || pure10MuxInProgress()) 0.55f else 1f
         if (!recording) {
@@ -4342,6 +4711,7 @@ class MainActivity : Activity() {
         ) 0.55f else 1f
         recordIndicator.visibility = if (recording) View.VISIBLE else View.GONE
         if (!recording) recordTimerText = "00:00"
+        updateSystemRotationPolicy()
         if (::cameraChrome.isInitialized) {
             cameraChrome.recording = recording
             cameraChrome.saving = uiState == CaptureUiState.SAVING
@@ -4368,7 +4738,17 @@ class MainActivity : Activity() {
         cameraChrome.showStatusPopup(
             if (rotationLockedByUser) "GIRO FIJO" else "GIRO AUTO"
         )
+        updateSystemRotationPolicy()
         applyLatestAutomaticRotation()
+    }
+
+    private fun updateSystemRotationPolicy() {
+        val target = if (rotationLockedByUser || recording || switchingSession) {
+            ActivityInfo.SCREEN_ORIENTATION_LOCKED
+        } else {
+            ActivityInfo.SCREEN_ORIENTATION_USER
+        }
+        if (requestedOrientation != target) requestedOrientation = target
     }
 
     private fun updateAudioLevel(peak: Float) {
@@ -4711,7 +5091,7 @@ class MainActivity : Activity() {
             this.text = text
             setTextColor(MUTED)
             textSize = 10f
-            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            typeface = cameraTypeface(Typeface.BOLD)
             gravity = Gravity.START or Gravity.CENTER_VERTICAL
         }
     }
@@ -4721,7 +5101,7 @@ class MainActivity : Activity() {
             this.text = text
             setTextColor(Color.WHITE)
             textSize = 11f
-            typeface = Typeface.MONOSPACE
+            typeface = cameraTypeface(Typeface.NORMAL)
             gravity = Gravity.CENTER_VERTICAL
             isSingleLine = true
         }
@@ -4741,20 +5121,41 @@ class MainActivity : Activity() {
 
     private fun settingsSwitch(
         label: String,
+        detail: String,
         checked: Boolean,
         onChanged: (Switch, Boolean) -> Unit
-    ): Switch {
+    ): View {
         val checkedState = intArrayOf(android.R.attr.state_checked)
         val defaultState = intArrayOf()
-        return Switch(this).apply {
-            text = label
-            setTextColor(Color.WHITE)
-            textSize = 14f
-            typeface = cameraTypeface(Typeface.NORMAL)
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            minHeight = dp(52)
+            minimumHeight = dp(52)
+            setPadding(0, dp(7), 0, dp(7))
+        }
+        val copy = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        copy.addView(TextView(this).apply {
+            text = label
+            setTextColor(RawLiteDesign.TEXT)
+            textSize = 12f
+            typeface = cameraTypeface(Typeface.NORMAL)
+            letterSpacing = 0.05f
+        })
+        copy.addView(TextView(this).apply {
+            text = detail
+            setTextColor(RawLiteDesign.TEXT_MUTED)
+            textSize = 9f
+            typeface = cameraTypeface(Typeface.NORMAL)
+        })
+        row.addView(copy, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val control = Switch(this).apply {
             isChecked = checked
             showText = false
+            text = ""
+            minWidth = dp(56)
             thumbTintList = ColorStateList(
                 arrayOf(checkedState, defaultState),
                 intArrayOf(RawLiteDesign.BLACK, RawLiteDesign.TEXT)
@@ -4767,6 +5168,60 @@ class MainActivity : Activity() {
                 onChanged(button as Switch, value)
             }
         }
+        row.addView(control, LinearLayout.LayoutParams(dp(64), dp(48)))
+        row.setOnClickListener { control.isChecked = !control.isChecked }
+        return row
+    }
+
+    private fun settingsSectionHeading(label: String, detail: String): View {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(10), 0, dp(8))
+            addView(TextView(this@MainActivity).apply {
+                text = label
+                setTextColor(RawLiteDesign.ACCENT)
+                textSize = 10f
+                typeface = cameraTypeface(Typeface.NORMAL)
+                letterSpacing = 0.08f
+            }, LinearLayout.LayoutParams(0, dp(28), 1f))
+            addView(TextView(this@MainActivity).apply {
+                text = detail
+                gravity = Gravity.END or Gravity.CENTER_VERTICAL
+                setTextColor(RawLiteDesign.TEXT_DISABLED)
+                textSize = 8f
+                typeface = cameraTypeface(Typeface.NORMAL)
+                letterSpacing = 0.06f
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(28)))
+        }
+    }
+
+    private fun settingsInformationRow(label: String, value: String): View {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(8), 0, dp(8))
+            addView(TextView(this@MainActivity).apply {
+                text = label
+                setTextColor(RawLiteDesign.TEXT_MUTED)
+                textSize = 10f
+                typeface = cameraTypeface(Typeface.NORMAL)
+                letterSpacing = 0.06f
+            }, LinearLayout.LayoutParams(0, dp(32), 1f))
+            addView(TextView(this@MainActivity).apply {
+                text = value
+                gravity = Gravity.END or Gravity.CENTER_VERTICAL
+                setTextColor(RawLiteDesign.TEXT)
+                textSize = 10f
+                typeface = cameraTypeface(Typeface.NORMAL)
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(32)))
+        }
+    }
+
+    private fun formatStorageBytes(bytes: Long): String = when {
+        bytes >= 1_000_000_000L -> String.format(Locale.US, "%.1f GB", bytes / 1e9)
+        bytes >= 1_000_000L -> String.format(Locale.US, "%.1f MB", bytes / 1e6)
+        else -> String.format(Locale.US, "%.1f KB", bytes / 1e3)
     }
 
     private fun settingsDivider(): View = View(this).apply {
@@ -4842,10 +5297,10 @@ class MainActivity : Activity() {
         // capability guesses and must remain stable until a different device profile is selected.
         private val PURE10_MAX_IMAGES = CAPTURE_PROFILE.pure10ImageReaderCapacity
         private val PURE10_MAX_PENDING_WRITES = CAPTURE_PROFILE.pure10MaximumPendingWrites
-        private val PURE10_UHD_SIZE = Size(3840, 2160)
         private const val PURE10_CONTAINER_ROTATION_DEGREES = 0
         private val MIN_FREE_BYTES = CAPTURE_PROFILE.minimumFreeBytes
         private val BACKGROUND_DRAIN_TIMEOUT_MS = CAPTURE_PROFILE.backgroundDrainTimeoutMs
+        private const val READER_CLOSE_TIMEOUT_SECONDS = 30L
         private const val FASTEST_VIDEO_EXPOSURE_NS = 125_000L
         private const val VIDEO_EXPOSURE_DUTY_PERCENT = 95L
         private const val BG = RawLiteDesign.BLACK
@@ -4860,6 +5315,7 @@ class MainActivity : Activity() {
         private const val PREF_LEFT_HANDED = "left_handed"
         private const val PREF_CAMERA_INDEX = "camera_index"
         private const val PREF_RAW_INDEX = "raw_index"
+        private const val PREF_HLG10_INDEX = "hlg10_index"
         private const val PREF_PREVIEW_INDEX = "preview_index"
         private const val PREF_FPS = "fps"
         private const val PREF_CAPTURE_MODE = "capture_mode"

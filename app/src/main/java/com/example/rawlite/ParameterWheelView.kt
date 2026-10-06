@@ -10,6 +10,9 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 
 class ParameterWheelView(context: Context) : View(context) {
+    private val openSans: Typeface = runCatching { resources.getFont(R.font.open_sans) }
+        .getOrElse { Typeface.create("sans-serif", Typeface.NORMAL) }
+
     var vertical = true
         set(value) {
             field = value
@@ -38,7 +41,7 @@ class ParameterWheelView(context: Context) : View(context) {
         color = 0xB8FFFFFF.toInt()
         textAlign = Paint.Align.CENTER
         textSize = density(13f)
-        typeface = Typeface.create("Arial", Typeface.NORMAL)
+        typeface = openSans
     }
     private val selectedPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = ACCENT
@@ -46,7 +49,7 @@ class ParameterWheelView(context: Context) : View(context) {
     }
     private val selectedTextPaint = Paint(textPaint).apply {
         color = ACCENT
-        typeface = Typeface.create("Arial", Typeface.BOLD)
+        typeface = Typeface.create(openSans, Typeface.BOLD)
     }
 
     private var progress = 500

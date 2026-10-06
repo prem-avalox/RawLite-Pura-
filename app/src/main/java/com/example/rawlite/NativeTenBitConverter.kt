@@ -8,6 +8,8 @@ internal object NativeTenBitConverter {
         System.loadLibrary("rawlite_writer")
     }
 
+    external fun resetP010HlgCaches()
+
     external fun raw10ToP010Hlg(
         raw: ByteBuffer,
         rawOffset: Int,

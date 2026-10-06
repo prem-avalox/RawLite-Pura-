@@ -7,6 +7,7 @@ import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.RectF
+import android.graphics.Typeface
 import android.media.Image
 import android.os.PowerManager
 import android.view.View
@@ -24,6 +25,8 @@ internal enum class TechnicalOverlayMode(val label: String) {
 }
 
 internal class TechnicalOverlayView(context: Context) : View(context) {
+    private val openSans: Typeface = runCatching { resources.getFont(R.font.open_sans) }
+        .getOrElse { Typeface.create("sans-serif", Typeface.NORMAL) }
     private val bitmapPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val panelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = RawLiteDesign.SURFACE and 0x00FFFFFF or 0xCC000000.toInt()
@@ -36,7 +39,7 @@ internal class TechnicalOverlayView(context: Context) : View(context) {
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
         textSize = 11f * resources.displayMetrics.scaledDensity
-        typeface = android.graphics.Typeface.MONOSPACE
+        typeface = openSans
     }
     private val gridPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = 0xA6FFFFFF.toInt()

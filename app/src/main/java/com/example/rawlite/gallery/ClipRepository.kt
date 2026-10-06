@@ -1,6 +1,7 @@
 package com.example.rawlite.gallery
 
 import com.example.rawlite.ClipSummary
+import com.example.rawlite.CaptureStorage
 import com.example.rawlite.DngSequenceClip
 import com.example.rawlite.Pure10Clip
 import com.example.rawlite.Raw10Clip
@@ -11,7 +12,7 @@ internal class ClipRepository {
     fun list(baseDirectory: File?): List<ClipSummary> = baseDirectory
         ?.listFiles { file -> file.isDirectory }
         ?.mapNotNull(::inspect)
-        ?.sortedByDescending { it.directory.lastModified() }
+        ?.sortedByDescending { CaptureStorage.captureTimeMillis(it.directory) }
         .orEmpty()
 
     fun delete(summary: ClipSummary): Boolean = summary.directory.deleteRecursively()

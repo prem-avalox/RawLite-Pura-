@@ -218,6 +218,12 @@ class CameraChromeView(context: Context) : View(context) {
             field = value
             invalidate()
         }
+    var audioInputLabel: String = "MIC INT"
+        set(value) {
+            if (field == value) return
+            field = value
+            invalidate()
+        }
     var exposureLocked: Boolean = true
         set(value) {
             if (field == value) return
@@ -610,6 +616,12 @@ class CameraChromeView(context: Context) : View(context) {
         }
     }
 
+    fun rebaseContentRotation(degrees: Float) {
+        rotationAnimator?.cancel()
+        contentRotation = degrees
+        invalidate()
+    }
+
     fun currentContentRotationDegrees(): Float = contentRotation
 
     fun showStatusPopup(text: String) {
@@ -756,34 +768,81 @@ class CameraChromeView(context: Context) : View(context) {
             }
             val label = if (index == 7) captureModeLabel else selectorValues.getOrElse(index) { "—" }
             withContentRotation(canvas, rect.centerX(), rect.centerY()) {
-                drawSelectorLabel(canvas, label, rect.centerX(), rect.centerY(), color)
+                val availableWidth = if (landscape) rect.width() else rect.height()
+                drawSelectorLabel(
+                    canvas,
+                    label,
+                    rect.centerX(),
+                    rect.centerY(),
+                    color,
+                    availableWidth - 16f
+                )
             }
         }
     }
 
-    private fun drawSelectorLabel(canvas: Canvas, label: String, cx: Float, cy: Float, color: Int) {
+    private fun drawSelectorLabel(
+        canvas: Canvas,
+        label: String,
+        cx: Float,
+        cy: Float,
+        color: Int,
+        maximumWidth: Float
+    ) {
         val parts = splitValueAndUnit(label)
-        val valueSize = if (label.length >= 7) 42f else 50f
-        val unitSize = 24f
+        val preferredValueSize = if (label.length >= 7) 42f else 50f
+        val preferredUnitSize = 24f
         paint.typeface = openSans
         paint.textAlign = Paint.Align.LEFT
-        paint.textSize = valueSize
+        paint.textSize = preferredValueSize
         val valueWidth = paint.measureText(parts.first)
-        paint.textSize = unitSize
+        paint.textSize = preferredUnitSize
         val unitWidth = if (parts.second.isEmpty()) 0f else paint.measureText(parts.second)
         val gap = if (parts.second.isEmpty()) 0f else 3f
-        var x = cx - (valueWidth + gap + unitWidth) / 2f
-        val baseline = centeredBaseline(cy, valueSize)
-        paint.color = color
-        paint.alpha = if (controlsEnabled) 255 else 158
+        val preferredWidth = valueWidth + gap + unitWidth
+        val scale = (maximumWidth / preferredWidth.coerceAtLeast(1f)).coerceIn(0.62f, 1f)
+        val valueSize = preferredValueSize * scale
+        val unitSize = preferredUnitSize * scale
         paint.textSize = valueSize
-        canvas.drawText(parts.first, x, baseline, paint)
-        x += valueWidth + gap
+        val fittedValueWidth = paint.measureText(parts.first)
+        paint.textSize = unitSize
+        val fittedUnitWidth = if (parts.second.isEmpty()) 0f else paint.measureText(parts.second)
+        val fittedGap = gap * scale
+        var x = cx - (fittedValueWidth + fittedGap + fittedUnitWidth) / 2f
+        val baseline = centeredBaseline(cy, valueSize)
+        val textAlpha = if (controlsEnabled) 255 else 158
+        drawSelectorText(canvas, parts.first, x, baseline, valueSize, color, textAlpha)
+        x += fittedValueWidth + fittedGap
         if (parts.second.isNotEmpty()) {
-            paint.textSize = unitSize
-            canvas.drawText(parts.second, x, baseline, paint)
+            drawSelectorText(canvas, parts.second, x, baseline, unitSize, color, textAlpha)
         }
+        paint.style = Paint.Style.FILL
         paint.alpha = 255
+    }
+
+    private fun drawSelectorText(
+        canvas: Canvas,
+        text: String,
+        x: Float,
+        baseline: Float,
+        textSize: Float,
+        color: Int,
+        fillAlpha: Int
+    ) {
+        paint.textSize = textSize
+        val hiddenHudProgress = (1f - chromeReveal).coerceIn(0f, 1f)
+        if (hiddenHudProgress > 0.001f) {
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = HIDDEN_HUD_TEXT_OUTLINE_WIDTH
+            paint.strokeJoin = Paint.Join.ROUND
+            paint.color = Color.BLACK
+            paint.alpha = (fillAlpha * hiddenHudProgress).roundToInt()
+            canvas.drawText(text, x, baseline, paint)
+        }
+        paint.style = Paint.Style.FILL
+        paint.color = color
+        paint.alpha = fillAlpha
+        canvas.drawText(text, x, baseline, paint)
     }
 
     private fun splitValueAndUnit(label: String): Pair<String, String> {
@@ -868,7 +927,13 @@ class CameraChromeView(context: Context) : View(context) {
         alpha: Int,
         selected: Boolean = false
     ) {
-        val textSize = if (selected) 48f else 34f
+        val textSize = if (selectedParameter == PARAMETER_RESOLUTION) {
+            if (selected) 30f else 19f
+        } else if (selected) {
+            48f
+        } else {
+            34f
+        }
         paint.typeface = openSans
         paint.color = color
         paint.alpha = alpha
@@ -1157,6 +1222,14 @@ class CameraChromeView(context: Context) : View(context) {
             drawSavingStatus(canvas, timerCenter)
         } else {
             drawStatusPopup(canvas, timerCenter)
+        }
+
+        withContentRotation(canvas, timerCenter.x, timerCenter.y) {
+            drawOutlinedCenterText(
+                canvas, audioInputLabel, timerCenter.x, timerCenter.y - 62f,
+                24f, if (audioInputLabel.contains("!") || audioInputLabel == "MIC ERROR")
+                    RawLiteDesign.RECORD else Color.WHITE, 1f, 4f
+            )
         }
 
         drawDPadBackground(canvas, dPad)
@@ -2273,6 +2346,7 @@ class CameraChromeView(context: Context) : View(context) {
         private const val GUTTER = 213f
         private const val CELL = 213f
         private const val SELECTOR_THICKNESS = 196.5f
+        private const val HIDDEN_HUD_TEXT_OUTLINE_WIDTH = 3f
         private const val SELECTOR_START = 213f
         private const val SELECTOR_END = 1917f
         private const val PORTRAIT_SELECTOR_X = 982.5f
