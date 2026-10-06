@@ -1185,3 +1185,19 @@ svg .icon-fill { fill: currentColor; stroke: none; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
 }
+
+/* Regla de Oro: Normalización óptica estricta para todas las cuadrículas profesionales */
+.grid-layer-thirds .grid-line-h,
+.grid-layer-thirds .grid-line-v,
+.grid-layer-center .grid-center-h,
+.grid-layer-center .grid-center-v {
+  background: rgba(247, 247, 247, 0.72) !important;
+  box-shadow: none !important;
+}
+.golden-spiral-svg line,
+.golden-spiral-svg path,
+.diagonal-svg line {
+  stroke: rgba(247, 247, 247, 0.72) !important;
+  stroke-width: 1px !important;
+  stroke-dasharray: none !important;
+}

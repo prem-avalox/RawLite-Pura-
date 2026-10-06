@@ -182,25 +182,22 @@
                   <!-- Proporción Áurea (Clásica Espiral de Fibonacci + Rectángulos Áureos) -->
                   <div class="grid-layer grid-layer-golden">
                     <svg class="golden-spiral-svg" viewBox="0 0 1000 618" preserveAspectRatio="none" aria-hidden="true">
-                      <!-- Rectángulos áureos -->
-                      <line x1="382" y1="0" x2="382" y2="618" stroke="rgba(255,193,0,0.5)" stroke-width="1.5" />
-                      <line x1="0" y1="382" x2="382" y2="382" stroke="rgba(255,193,0,0.5)" stroke-width="1.5" />
-                      <line x1="236" y1="382" x2="236" y2="618" stroke="rgba(255,193,0,0.5)" stroke-width="1.5" />
-                      <line x1="236" y1="472" x2="382" y2="472" stroke="rgba(255,193,0,0.5)" stroke-width="1.5" />
-                      <line x1="292" y1="472" x2="292" y2="618" stroke="rgba(255,193,0,0.5)" stroke-width="1.5" />
-                      <line x1="236" y1="528" x2="292" y2="528" stroke="rgba(255,193,0,0.5)" stroke-width="1.5" />
-                      <!-- Espiral Áurea de Fibonacci continua -->
-                      <path d="M 1000,618 A 618,618 0 0,0 382,0 A 382,382 0 0,0 0,382 A 236,236 0 0,0 236,618 A 146,146 0 0,0 382,472 A 90,90 0 0,0 292,382 A 56,56 0 0,0 236,438 A 34,34 0 0,0 270,472" fill="none" stroke="var(--yellow)" stroke-width="2.5" stroke-linecap="round" />
+                      <!-- Rectángulos áureos canónicos (todos con 1px y mismo color uniforme) -->
+                      <line x1="382" y1="0" x2="382" y2="618" stroke="rgba(247, 247, 247, 0.72)" stroke-width="1" />
+                      <line x1="0" y1="382" x2="382" y2="382" stroke="rgba(247, 247, 247, 0.72)" stroke-width="1" />
+                      <line x1="236" y1="382" x2="236" y2="618" stroke="rgba(247, 247, 247, 0.72)" stroke-width="1" />
+                      <line x1="236" y1="472" x2="382" y2="472" stroke="rgba(247, 247, 247, 0.72)" stroke-width="1" />
+                      <line x1="292" y1="472" x2="292" y2="618" stroke="rgba(247, 247, 247, 0.72)" stroke-width="1" />
+                      <line x1="236" y1="528" x2="292" y2="528" stroke="rgba(247, 247, 247, 0.72)" stroke-width="1" />
+                      <!-- Espiral Áurea continua (1px, mismo color) -->
+                      <path d="M 1000,618 A 618,618 0 0,0 382,0 A 382,382 0 0,0 0,382 A 236,236 0 0,0 236,618 A 146,146 0 0,0 382,472 A 90,90 0 0,0 292,382 A 56,56 0 0,0 236,438 A 34,34 0 0,0 270,472" fill="none" stroke="rgba(247, 247, 247, 0.72)" stroke-width="1" />
                     </svg>
                   </div>
 
-                  <!-- Cuadrícula Diagonal Armónica -->
+                  <!-- Cuadrícula Diagonal: Literalmente UNA línea diagonal continua limpia -->
                   <div class="grid-layer grid-layer-diagonal">
-                    <svg class="diagonal-svg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-                      <line x1="0" y1="0" x2="100" y2="100" stroke="rgba(255,255,255,0.7)" stroke-width="0.8" stroke-dasharray="3,3" />
-                      <line x1="100" y1="0" x2="0" y2="100" stroke="rgba(255,255,255,0.7)" stroke-width="0.8" stroke-dasharray="3,3" />
-                      <line x1="0" y1="100" x2="50" y2="0" stroke="rgba(255,193,0,0.6)" stroke-width="0.8" />
-                      <line x1="100" y1="100" x2="50" y2="0" stroke="rgba(255,193,0,0.6)" stroke-width="0.8" />
+                    <svg class="diagonal-svg" viewBox="0 0 1000 618" preserveAspectRatio="none" aria-hidden="true">
+                      <line class="single-diagonal" x1="0" y1="0" x2="1000" y2="618" stroke="rgba(247, 247, 247, 0.72)" stroke-width="1" />
                     </svg>
                   </div>
 

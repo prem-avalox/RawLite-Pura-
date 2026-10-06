@@ -70,25 +70,32 @@ Al ser RawLite una herramienta de captura técnica profesional, su interfaz debe
 
 ---
 
-### Punto 5: Cuadrículas de Composición, Espiral Áurea de Fibonacci y Zonas Seguras Sumables
-* **Revisión de Guías de Composición (Exclusivas):**
-  1. **Eliminar la retícula de cruz central (+):** En su lugar, incorporar una verdadera **Cuadrícula de Centro (2×2)** con ejes ortogonales completos de lado a lado que dividen el fotograma en cuatro cuadrantes iguales (50% / 50%) para composiciones simétricas y balance de masas.
-  2. **Espiral Áurea clásica de Fibonacci (Golden Spiral):** Implementar la construcción geométrica canónica basada en rectángulos áureos subdivididos sucesivamente ($1, 1, 2, 3, 5, 8, 13, 21 \dots$) con el arco logarítmico continuo que guía la mirada hacia el ojo/foco de atención áureo.
-  3. **Cuadrícula Diagonal (Armadura Armónica):** Diagonales continuas desde las cuatro esquinas hacia los centros y vértices opuestos para componer líneas de fuga y tensión dramática.
-  4. **Control `INVERTIR ⇄`:** Un botón ubicado inmediatamente sobre la Espiral Áurea y la Diagonal que permite voltear horizontalmente (`transform: scaleX(-1)`) la orientación de la guía para alinear el ojo de la espiral o las diagonales con la dirección de la mirada del sujeto (*lead room*) o el vector del movimiento en escena.
-  5. **Cuadrícula de Tercios (3×3)** y **Panorámico (2.39:1)** como opciones estándar de rodaje.
-  6. **Eliminación del texto *"NO SE GRABA"*:** Paternalista e innecesario en un entorno técnico profesional.
+### Punto 5: Cuadrículas Profesionales, Espiral Áurea de Fibonacci y Zonas Seguras Adaptativas
+* **Normalización Óptica de Cuadrículas (Calidad de Monitor Profesional):**
+  - **Grosor y color idénticos:** Todas las guías de encuadre deben tener estrictamente el mismo grosor calibrado (**1 px**) y el mismo color uniforme tenue (**rgba(247, 247, 247, 0.72)**). Se eliminan estilos punteados, trazos desiguales o mezclas de color que ensucien la escena en monitorización.
+  - **Cuadrícula de Centro (2×2):** Dos ejes ortogonales limpios (horizontal al 50% y vertical al 50%) que cruzan el fotograma de borde a borde, dividiéndolo en cuatro cuadrantes simétricos.
+  - **Cuadrícula Diagonal:** Literalmente **una sola línea diagonal continua** que cruza el encuadre de una esquina a la esquina opuesta.
+  - **Espiral Áurea clásica de Fibonacci:** La construcción canónica compuesta por los rectángulos áureos de subdivisión sucesiva (1, 1, 2, 3, 5, 8, 13, 21...) y el arco continuo hacia el punto focal, trazados con línea uniforme de 1 px.
+  - **Control INVERTIR ⇄:** Ubicado en la cabecera de las guías dinámicas:
+    * En la **Diagonal**: Cambia la inclinación entre diagonal descendente (superior-izquierda → inferior-derecha) y diagonal ascendente (inferior-izquierda → superior-derecha).
+    * En la **Espiral Áurea**: Voltea horizontalmente la espiral (scaleX(-1)), permitiendo ubicar el ojo focal en el lado izquierdo o derecho según el movimiento o la mirada del sujeto.
+  - **Cuadrícula de Tercios (3×3):** Dos líneas horizontales y dos verticales dividiendo la escena según la regla de los tercios.
 
-* **Zonas Seguras Superpuestas y Sumables (Estilo DaVinci Resolve):**
-  A diferencia de las cuadrículas (que son excluyentes), las **Zonas Seguras son aditivas**: se activan como un checklist independiente y se superponen simultáneamente sobre cualquier cuadrícula activa:
-  - **`[✓] 9:16 REELS / TIKTOK / SHORTS`:** Caja vertical 9:16 centrada con márgenes de interfaz proyectados:
-    * Margen superior: `15%` (288 px para barras de estado y búsqueda).
-    * Margen inferior: `20%–22%` (384–422 px para pie de foto, autor y música).
-    * Margen derecho: `12%–15%` (140 px para iconos de interacción).
-  - **`[✓] 1:1 FEED INSTAGRAM`:** Recorte cuadrado central para previsualizar feed de publicaciones.
-  - **`[✓] 4:5 RETRATO`:** Caja vertical para encuadre vertical de publicaciones de Instagram.
-  - **`[✓] 90% ACTION SAFE`:** Margen de seguridad broadcast para asegurar que la acción no quede tapada en bordes de pantallas.
-  - **`[✓] 80% TITLE SAFE`:** Margen de seguridad para subtítulos y rótulos.
+* **Separación de la Máscara de Formato (2.39:1) como Capa Base:**
+  - **Error conceptual previo:** Tratar el panorámico 2.39:1 como la última opción de la lista de cuadrículas lo volvía mutuamente excluyente con las cuadrículas (impedía componer con la Espiral Áurea o los Tercios dentro de un formato 2.39:1).
+  - **Jerarquía cinematográfica correcta (Estándar ARRI / RED / DaVinci):**
+    1. **Máscara de Formato / Matte (Capa Base):** `OFF` | `2.39:1 PANORÁMICO`. Establece el límite perimetral del encuadre mediante barras semitransparentes (*letterbox matte*).
+    2. **Guía de Composición (Capa Media):** `NINGUNA` | `TERCIOS` | `CENTRO (2×2)` | `ESPIRAL ÁUREA` | `DIAGONAL`. Se proyecta **dentro** del encuadre activo delimitado por la máscara, con su toggle `INVERTIR ⇄`.
+    3. **Zonas Seguras (Capa Superior):** Se superponen y suman sobre el resultado.
+
+* **Zonas Seguras Sumables (Estilo DaVinci Resolve) y Excepción para Modo Vertical:**
+  - **Lienzo Completo (16:9 y 4:3):** Las zonas seguras generales cubren **todo el lienzo activo del sensor**, adaptándose automáticamente al formato de captura elegido:
+    * **[✓] 90% ACTION SAFE:** Margen de seguridad perimetral continuo del 5% en cada borde sobre todo el encuadre.
+    * **[✓] 80% TITLE SAFE:** Margen de seguridad perimetral continuo del 10% en cada borde sobre todo el encuadre.
+  - **Excepción Contextual para Redes Sociales (Reels / TikTok / Shorts):**
+    * **Criterio:** Dado que la interfaz de la cámara rota y las tomas para redes sociales se graban de forma nativa en posición vertical, **las zonas seguras de interfaz de redes sociales deben activarse para el modo vertical**.
+    * En **modo vertical**, el lienzo coincide con el ratio 9:16 nativo y se superponen los insets reales de las apps sobre todo el encuadre (margen superior 15% para cabecera, inferior 20% para pie de foto/audio y lateral 15% para iconos de interacción).
+    * En **modo horizontal (16:9 o 4:3)**, si el operador desea encuadrar para redes, se proyecta una caja central 9:16 con máscara semitransparente, o se mantiene el visor limpio con las guías de acción broadcast.
 
 ---
 
