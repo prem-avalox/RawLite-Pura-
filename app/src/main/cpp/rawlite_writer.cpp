@@ -1659,48 +1659,30 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
                     hlg_lut[channel(6)]
                 };
             };
-            const auto rgb0 = rec2020_hlg(gf);
-            const auto rgb1 = rec2020_hlg(gf0);
-            const auto rgb2 = rec2020_hlg(gf1);
-            const auto rgb3 = rgb0;
-            const auto luma = [](const std::array<uint16_t, 3>& rgb) -> uint16_t {
+            const auto rgb = rec2020_hlg(gf);
+            const auto luma = [](const std::array<uint16_t, 3>& rgb_in) -> uint16_t {
                 return static_cast<uint16_t>(std::clamp(
-                    (269 * static_cast<int>(rgb[0]) +
-                        694 * static_cast<int>(rgb[1]) +
-                        61 * static_cast<int>(rgb[2]) + 512) >> 10,
+                    (269 * static_cast<int>(rgb_in[0]) +
+                        694 * static_cast<int>(rgb_in[1]) +
+                        61 * static_cast<int>(rgb_in[2]) + 512) >> 10,
                     64,
                     940
                 ));
             };
-            const uint16_t y0 = luma(rgb0);
-            const uint16_t y1 = luma(rgb1);
-            const uint16_t y2 = luma(rgb2);
-            const uint16_t y3 = luma(rgb3);
+            const uint16_t y_val = luma(rgb);
+            const uint16_t y_shifted = static_cast<uint16_t>(y_val << 6);
             const size_t top = static_cast<size_t>(y) * output_stride_pixels + x;
             const size_t bottom = top + output_stride_pixels;
-            y_plane[top] = static_cast<uint16_t>(y0 << 6);
-            y_plane[top + 1] = static_cast<uint16_t>(y1 << 6);
-            y_plane[bottom] = static_cast<uint16_t>(y2 << 6);
-            y_plane[bottom + 1] = static_cast<uint16_t>(y3 << 6);
+            y_plane[top] = y_shifted;
+            y_plane[top + 1] = y_shifted;
+            y_plane[bottom] = y_shifted;
+            y_plane[bottom + 1] = y_shifted;
 
-            const int y_average = (y0 + y1 + y2 + y3 + 2) >> 2;
-            const int b_average = (
-                static_cast<int>(rgb0[2]) +
-                    static_cast<int>(rgb1[2]) +
-                    static_cast<int>(rgb2[2]) +
-                    static_cast<int>(rgb3[2]) + 2
-                ) >> 2;
-            const int r_average = (
-                static_cast<int>(rgb0[0]) +
-                    static_cast<int>(rgb1[0]) +
-                    static_cast<int>(rgb2[0]) +
-                    static_cast<int>(rgb3[0]) + 2
-                ) >> 2;
             const uint16_t cb = limited_chroma(
-                ((b_average - y_average) * 557) >> 10
+                ((static_cast<int>(rgb[2]) - static_cast<int>(y_val)) * 557) >> 10
             );
             const uint16_t cr = limited_chroma(
-                ((r_average - y_average) * 711) >> 10
+                ((static_cast<int>(rgb[0]) - static_cast<int>(y_val)) * 711) >> 10
             );
             const size_t uv = static_cast<size_t>(y / 2) * output_stride_pixels + x;
             uv_plane[uv] = static_cast<uint16_t>(cb << 6);

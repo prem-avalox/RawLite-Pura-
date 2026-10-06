@@ -154,18 +154,27 @@ internal class PcmAudioRecorder private constructor(
         }
     }
 
-    private fun updateRoutedInput() = synchronized(routeLock) {
-        if (routingClosed || audioRecord.recordingState != AudioRecord.RECORDSTATE_RECORDING) return
-        // A preferred device is only a request. Report the route Android actually uses.
-        val actual = audioRecord.routedDevice?.inputDescription()
-        if (actual != routedInput || routeHistory.length() == 0) {
-            routedInput = actual
-            routeHistory.put(JSONObject().apply {
-                put("observed_boottime_ns", SystemClock.elapsedRealtimeNanos())
-                put("device", actual?.toJson() ?: JSONObject.NULL)
-            })
-            routeListener(actual)
+    private fun updateRoutedInput() {
+        val listenerToNotify: ((AudioInputDevice?) -> Unit)?
+        val deviceToReport: AudioInputDevice?
+        synchronized(routeLock) {
+            if (routingClosed || audioRecord.recordingState != AudioRecord.RECORDSTATE_RECORDING) return
+            // A preferred device is only a request. Report the route Android actually uses.
+            val actual = audioRecord.routedDevice?.inputDescription()
+            if (actual != routedInput || routeHistory.length() == 0) {
+                routedInput = actual
+                routeHistory.put(JSONObject().apply {
+                    put("observed_boottime_ns", SystemClock.elapsedRealtimeNanos())
+                    put("device", actual?.toJson() ?: JSONObject.NULL)
+                })
+                listenerToNotify = routeListener
+                deviceToReport = actual
+            } else {
+                listenerToNotify = null
+                deviceToReport = null
+            }
         }
+        listenerToNotify?.invoke(deviceToReport)
     }
 
     private fun AudioInputDevice.toJson() = JSONObject().apply {

@@ -519,6 +519,7 @@ class MainActivity : Activity() {
         ioExecutor.shutdown()
         telemetryExecutor.shutdown()
         audioExecutor.shutdown()
+        postProcessExecutor.shutdown()
         super.onDestroy()
     }
 
@@ -3770,6 +3771,7 @@ class MainActivity : Activity() {
             runCatching { inProgressFile.delete() }
             pure10MuxQueuedDirectories.remove(directoryKey)
             runOnUiThread {
+                if (isDestroyed || isFinishing) return@runOnUiThread
                 recordButton.isEnabled = cameraDevice != null && !switchingSession &&
                     !recording && !finalizingOutput && !finalizingAudio &&
                     rawVideoSupportedForCurrentCamera()

@@ -27,3 +27,4 @@ test-output/
 # Native build intermediates
 .cxx/
 externalNativeBuild/
+.android/
