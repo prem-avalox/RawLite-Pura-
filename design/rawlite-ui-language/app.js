@@ -868,10 +868,10 @@ function init() {
       });
       const preview = $("#grid-preview");
       preview.dataset.grid = choice;
-      const invertBtn = $("#toggle-grid-invert");
-      if (invertBtn) {
-        invertBtn.disabled = !(choice === "golden" || choice === "diagonal");
-        invertBtn.style.opacity = (choice === "golden" || choice === "diagonal") ? "1" : "0.35";
+      const invertButton = $("#toggle-grid-invert");
+      if (invertButton) {
+        invertButton.disabled = !(choice === "golden" || choice === "diagonal");
+        invertButton.style.opacity = (choice === "golden" || choice === "diagonal") ? "1" : "0.35";
       }
       showToast(`CUADRÍCULA · ${button.querySelector("strong").textContent}`);
     });
@@ -899,39 +899,6 @@ function init() {
         targetLayer.classList.toggle("is-active", checkbox.checked);
       }
       showToast(checkbox.checked ? `ZONA SEGURA SUMADA · ${zoneId.toUpperCase()}` : `ZONA SEGURA APAGADA · ${zoneId.toUpperCase()}`);
-    });
-  });
-
-  // Wire Invert button for Golden and Diagonal
-  const invertBtn = $("#btn-invert-grid");
-  if (invertBtn) {
-    invertBtn.addEventListener("click", () => {
-      const preview = $("#grid-preview");
-      const current = preview.dataset.gridInverted === "true";
-      const next = !current;
-      preview.dataset.gridInverted = String(next);
-      invertBtn.classList.toggle("is-active", next);
-      invertBtn.setAttribute("aria-pressed", String(next));
-      showToast(next ? "CUADRÍCULA · INVERTIDA ⇄" : "CUADRÍCULA · ESTÁNDAR");
-    });
-  }
-
-  // Wire Additive Safe Zones (DaVinci Resolve Style)
-  $$(".safe-zone-toggle").forEach(cb => {
-    cb.addEventListener("change", () => {
-      const safeId = cb.dataset.safeId;
-      const overlay = $(`#overlay-${safeId}`);
-      if (overlay) {
-        overlay.classList.toggle("is-active", cb.checked);
-      }
-      const names = {
-        reels916: "ÁREA SEGURA · 9:16 REELS/TIKTOK",
-        feed11: "ÁREA SEGURA · 1:1 FEED",
-        portrait45: "ÁREA SEGURA · 4:5 RETRATO",
-        action90: "ÁREA SEGURA · 90% ACTION",
-        title80: "ÁREA SEGURA · 80% TITLE"
-      };
-      showToast(`${names[safeId] || "ZONA SEGURA"} · ${cb.checked ? "ACTIVA" : "DESACTIVADA"}`);
     });
   });
 
