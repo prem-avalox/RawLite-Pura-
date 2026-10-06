@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="color-scheme" content="dark">
-  <title>PURA UI Lab</title>
+  <title>PURA UI Lab · Mesa de Luz</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -25,6 +25,7 @@
     <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
     <symbol id="i-reset" viewBox="0 0 24 24"><path d="M5 8a8 8 0 1 1-1 7M5 8V3M5 8h5"/></symbol>
     <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+    <symbol id="i-filter" viewBox="0 0 24 24"><path d="M4 6h16M7 12h10M10 18h4"/></symbol>
   </svg>
 
   <header class="lab-bar" aria-label="Navegación del prototipo">
@@ -55,8 +56,8 @@
           <p id="gallery-summary">5 TOMAS · 18,7 GB</p>
         </div>
         <button class="text-button accent" id="select-mode">SELECCIONAR</button>
-        <button class="icon-button" id="gallery-more" aria-label="Más opciones">
-          <svg><use href="#i-more"/></svg>
+        <button class="icon-button" id="gallery-more" aria-label="Filtrar y ordenar tomas">
+          <svg><use href="#i-filter"/></svg>
         </button>
       </header>
 
@@ -83,7 +84,7 @@
 
       <div class="gallery-scroll" id="gallery-scroll">
         <div class="gallery-intro">
-          <span>CONTACTO / RECIENTES</span>
+          <span id="gallery-filter-status">CONTACTO / TODAS LAS TOMAS</span>
           <span>ARRASTRA PARA SELECCIONAR</span>
         </div>
         <div class="contact-sheet" id="contact-sheet" aria-live="polite"></div>
@@ -164,92 +165,72 @@
 
                         <div class="grid-config">
               <div class="grid-preview" id="grid-preview" data-grid="thirds" data-grid-inverted="false" aria-label="Vista previa de composición y áreas seguras">
-                
-                <!-- Capas de Cuadrículas de Composición (Excluyentes) -->
-                <div class="grid-layer-container" id="grid-layer-container">
+                <!-- Capas de Cuadrícula de Composición -->
+                <div class="grid-layer" id="grid-layer">
                   <!-- Tercios (3x3) -->
-                  <div class="grid-layer grid-layer-thirds">
-                    <span class="grid-line-h one"></span><span class="grid-line-h two"></span>
-                    <span class="grid-line-v one"></span><span class="grid-line-v two"></span>
-                  </div>
+                  <span class="grid-preview-h one"></span><span class="grid-preview-h two"></span>
+                  <span class="grid-preview-v one"></span><span class="grid-preview-v two"></span>
 
-                  <!-- Cuadrícula de Centro (2x2 / 4 cuadrantes completos) -->
-                  <div class="grid-layer grid-layer-center">
-                    <span class="grid-center-h"></span>
-                    <span class="grid-center-v"></span>
-                  </div>
+                  <!-- Cuadrícula de Centro Real (2x2 / 4 cuadrantes) -->
+                  <span class="grid-center-full-h"></span>
+                  <span class="grid-center-full-v"></span>
 
-                  <!-- Proporción Áurea (Clásica Espiral de Fibonacci + Rectángulos Áureos) -->
-                  <div class="grid-layer grid-layer-golden">
-                    <svg class="golden-spiral-svg" viewBox="0 0 1000 618" preserveAspectRatio="none" aria-hidden="true">
-                      <!-- Rectángulos áureos canónicos (todos con 1px y mismo color uniforme) -->
-                      <line x1="382" y1="0" x2="382" y2="618" stroke="rgba(247, 247, 247, 0.72)" stroke-width="1" />
-                      <line x1="0" y1="382" x2="382" y2="382" stroke="rgba(247, 247, 247, 0.72)" stroke-width="1" />
-                      <line x1="236" y1="382" x2="236" y2="618" stroke="rgba(247, 247, 247, 0.72)" stroke-width="1" />
-                      <line x1="236" y1="472" x2="382" y2="472" stroke="rgba(247, 247, 247, 0.72)" stroke-width="1" />
-                      <line x1="292" y1="472" x2="292" y2="618" stroke="rgba(247, 247, 247, 0.72)" stroke-width="1" />
-                      <line x1="236" y1="528" x2="292" y2="528" stroke="rgba(247, 247, 247, 0.72)" stroke-width="1" />
-                      <!-- Espiral Áurea continua (1px, mismo color) -->
-                      <path d="M 1000,618 A 618,618 0 0,0 382,0 A 382,382 0 0,0 0,382 A 236,236 0 0,0 236,618 A 146,146 0 0,0 382,472 A 90,90 0 0,0 292,382 A 56,56 0 0,0 236,438 A 34,34 0 0,0 270,472" fill="none" stroke="rgba(247, 247, 247, 0.72)" stroke-width="1" />
-                    </svg>
-                  </div>
+                  <!-- Clásica Espiral Áurea de Fibonacci con Rectángulos Áureos -->
+                  <svg class="grid-golden-spiral-svg" viewBox="0 0 1000 618" preserveAspectRatio="none" aria-hidden="true">
+                    <!-- Rectángulos áureos subdivididos -->
+                    <line x1="382" y1="0" x2="382" y2="618"/>
+                    <line x1="0" y1="382" x2="382" y2="382"/>
+                    <line x1="236" y1="382" x2="236" y2="618"/>
+                    <line x1="236" y1="472" x2="382" y2="472"/>
+                    <line x1="292" y1="472" x2="292" y2="618"/>
+                    <line x1="236" y1="528" x2="292" y2="528"/>
+                    <!-- Espiral logarítmica clásica continua -->
+                    <path class="golden-spiral-path" d="M 1000,618 A 618,618 0 0,0 382,0 A 382,382 0 0,0 0,382 A 236,236 0 0,0 236,618 A 146,146 0 0,0 382,472 A 90,90 0 0,0 292,382 A 56,56 0 0,0 236,438 A 34,34 0 0,0 270,472"/>
+                  </svg>
 
-                  <!-- Cuadrícula Diagonal: Literalmente UNA línea diagonal continua limpia -->
-                  <div class="grid-layer grid-layer-diagonal">
-                    <svg class="diagonal-svg" viewBox="0 0 1000 618" preserveAspectRatio="none" aria-hidden="true">
-                      <line class="single-diagonal" x1="0" y1="0" x2="1000" y2="618" stroke="rgba(247, 247, 247, 0.72)" stroke-width="1" />
-                    </svg>
-                  </div>
+                  <!-- Cuadrícula Diagonal Armónica (desde esquinas) -->
+                  <svg class="grid-diagonal-svg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+                    <line x1="0" y1="0" x2="100" y2="100"/>
+                    <line x1="100" y1="0" x2="0" y2="100"/>
+                    <line x1="0" y1="100" x2="50" y2="0"/>
+                    <line x1="100" y1="100" x2="50" y2="0"/>
+                  </svg>
 
-                  <!-- Panorámico 2.39:1 -->
-                  <div class="grid-layer grid-layer-scope">
-                    <span class="grid-scope-matte"></span>
-                  </div>
+                  <!-- 2.39:1 Panorámico -->
+                  <span class="grid-preview-frame"></span>
                 </div>
 
-                <!-- ZONAS SEGURAS SUPERPUESTAS Y SUMABLES (DaVinci Resolve Style) -->
-                <div class="safezone-overlays-container" aria-hidden="true">
-                  <!-- 9:16 Reels / TikTok / Shorts -->
-                  <div class="safezone-layer" id="overlay-reels916">
-                    <div class="safezone-box-916">
-                      <span class="safezone-matte-side left"></span>
-                      <span class="safezone-matte-side right"></span>
-                      <div class="safezone-guide-916">
-                        <span class="safezone-guide-line top"></span>
-                        <span class="safezone-guide-line bottom"></span>
-                        <span class="safezone-guide-line right"></span>
-                        <span class="safezone-tag top">TOP 15% (BARRAS)</span>
-                        <span class="safezone-tag bottom">UI 20% (DESCRIPCIÓN / AUDIO)</span>
-                        <span class="safezone-tag right">ICONS 15%</span>
-                      </div>
+                <!-- Zonas Seguras Superpuestas y Sumables (Estilo DaVinci Resolve) -->
+                <div class="safe-zone-overlays" id="safe-zone-overlays" aria-hidden="true">
+                  <div class="safe-layer safe-layer-reels916" id="safe-reels916">
+                    <div class="safe-box-916">
+                      <span class="safe-marker top">TOP 15%</span>
+                      <span class="safe-marker bottom">UI 20%</span>
+                      <span class="safe-marker right">ICONS 15%</span>
                     </div>
                   </div>
 
-                  <!-- 1:1 Feed Instagram -->
-                  <div class="safezone-layer" id="overlay-feed11">
-                    <div class="safezone-box-11">
-                      <span class="safezone-tag top-left">FEED 1:1</span>
+                  <div class="safe-layer safe-layer-feed11" id="safe-feed11">
+                    <div class="safe-box-11">
+                      <span class="safe-label">FEED 1:1</span>
                     </div>
                   </div>
 
-                  <!-- 4:5 Retrato Instagram -->
-                  <div class="safezone-layer" id="overlay-portrait45">
-                    <div class="safezone-box-45">
-                      <span class="safezone-tag bottom-left">4:5 RETRATO</span>
+                  <div class="safe-layer safe-layer-portrait45" id="safe-portrait45">
+                    <div class="safe-box-45">
+                      <span class="safe-label">4:5 RETRATO</span>
                     </div>
                   </div>
 
-                  <!-- 90% Action Safe -->
-                  <div class="safezone-layer" id="overlay-action90">
-                    <div class="safezone-box-action">
-                      <span class="safezone-tag top-right">ACTION 90%</span>
+                  <div class="safe-layer safe-layer-action90" id="safe-action90">
+                    <div class="safe-box-action">
+                      <span class="safe-tag-edge">ACTION 90%</span>
                     </div>
                   </div>
 
-                  <!-- 80% Title Safe -->
-                  <div class="safezone-layer" id="overlay-title80">
-                    <div class="safezone-box-title">
-                      <span class="safezone-tag bottom-right">TITLE 80%</span>
+                  <div class="safe-layer safe-layer-title80" id="safe-title80">
+                    <div class="safe-box-title">
+                      <span class="safe-tag-edge">TITLE 80%</span>
                     </div>
                   </div>
                 </div>
@@ -263,50 +244,53 @@
                 <button class="grid-choice is-active" data-grid-choice="thirds" role="radio" aria-checked="true"><strong>TERCIOS</strong><small>Composición 3 × 3 (33.3% / 66.6%)</small></button>
                 <button class="grid-choice" data-grid-choice="center" role="radio" aria-checked="false"><strong>CUADRÍCULA DE CENTRO</strong><small>Ejes completos en 4 cuadrantes (50% / 50%)</small></button>
 
-                <!-- Bloque con Invertir para Áurea y Diagonal -->
-                <div class="grid-invert-block">
-                  <div class="grid-invert-header">
+                <!-- Grupo con Invertir para Áurea y Diagonal -->
+                <div class="grid-special-group">
+                  <div class="grid-special-header">
                     <span>COMPOSICIÓN DINÁMICA</span>
-                    <button class="invert-btn" id="btn-invert-grid" title="Invertir orientación horizontal de la cuadrícula" aria-pressed="false">
-                      <svg class="icon-flip" viewBox="0 0 24 24"><path d="M8 7h8m0 0-3-3m3 3-3 3M16 17H8m0 0 3 3m-3-3 3-3"/></svg>
+                    <button class="invert-toggle-btn" id="toggle-grid-invert" title="Invertir orientación horizontal de la cuadrícula" aria-pressed="false">
                       <span>INVERTIR ⇄</span>
                     </button>
                   </div>
-                  <button class="grid-choice" data-grid-choice="golden" role="radio" aria-checked="false"><strong>PROPORCIÓN ÁUREA</strong><small>Espiral de Fibonacci + Rectángulos Phi</small></button>
-                  <button class="grid-choice" data-grid-choice="diagonal" role="radio" aria-checked="false"><strong>DIAGONAL</strong><small>Armadura armónica desde esquinas</small></button>
+                  <button class="grid-choice" data-grid-choice="golden" role="radio" aria-checked="false">
+                    <strong>ESPIRAL Y RECTÁNGULOS ÁUREOS</strong><small>Clásica proporción áurea de Fibonacci</small>
+                  </button>
+                  <button class="grid-choice" data-grid-choice="diagonal" role="radio" aria-checked="false">
+                    <strong>DIAGONAL</strong><small>Armadura armónica desde esquinas</small>
+                  </button>
                 </div>
 
-                <button class="grid-choice" data-grid-choice="scope" role="radio" aria-checked="false"><strong>2.39:1 PANORÁMICO</strong><small>Formato anamórfico / cine</small></button>
+                <button class="grid-choice" data-grid-choice="scope" role="radio" aria-checked="false"><strong>2.39:1 PANORÁMICO</strong><small>Formato anamórfico cine</small></button>
 
-                <div class="section-heading" style="margin-top: 20px;">
+                <div class="section-heading" style="margin-top: 18px;">
                   <span>ZONAS SEGURAS (SUMABLES)</span>
                   <small>SUPERPOSICIÓN DAVINCI</small>
                 </div>
-                <div class="safezone-checklist" role="group" aria-label="Zonas seguras superpuestas">
-                  <label class="safe-check-item">
-                    <input type="checkbox" class="safe-zone-toggle" data-safe-id="reels916">
-                    <span class="safe-check-indicator"></span>
-                    <span class="safe-check-text"><strong>9:16 REELS / TIKTOK / SHORTS</strong><small>Caja vertical con insets de botones</small></span>
+                <div class="safe-zone-checklist" role="group" aria-label="Zonas seguras superpuestas">
+                  <label class="safe-check-row">
+                    <input type="checkbox" class="safe-toggle-cb" data-safe-zone="reels916">
+                    <span class="safe-check-mark"></span>
+                    <span><strong>9:16 REELS / TIKTOK / SHORTS</strong><small>Caja vertical con insets de botones</small></span>
                   </label>
-                  <label class="safe-check-item">
-                    <input type="checkbox" class="safe-zone-toggle" data-safe-id="feed11">
-                    <span class="safe-check-indicator"></span>
-                    <span class="safe-check-text"><strong>1:1 FEED INSTAGRAM</strong><small>Recorte cuadrado central</small></span>
+                  <label class="safe-check-row">
+                    <input type="checkbox" class="safe-toggle-cb" data-safe-zone="feed11">
+                    <span class="safe-check-mark"></span>
+                    <span><strong>1:1 FEED INSTAGRAM</strong><small>Recorte cuadrado central</small></span>
                   </label>
-                  <label class="safe-check-item">
-                    <input type="checkbox" class="safe-zone-toggle" data-safe-id="portrait45">
-                    <span class="safe-check-indicator"></span>
-                    <span class="safe-check-text"><strong>4:5 RETRATO</strong><small>Feed vertical Instagram</small></span>
+                  <label class="safe-check-row">
+                    <input type="checkbox" class="safe-toggle-cb" data-safe-zone="portrait45">
+                    <span class="safe-check-mark"></span>
+                    <span><strong>4:5 RETRATO</strong><small>Feed vertical Instagram</small></span>
                   </label>
-                  <label class="safe-check-item">
-                    <input type="checkbox" class="safe-zone-toggle" data-safe-id="action90">
-                    <span class="safe-check-indicator"></span>
-                    <span class="safe-check-text"><strong>90% ACTION SAFE</strong><small>Margen de acción broadcast</small></span>
+                  <label class="safe-check-row">
+                    <input type="checkbox" class="safe-toggle-cb" data-safe-zone="action90">
+                    <span class="safe-check-mark"></span>
+                    <span><strong>90% ACTION SAFE</strong><small>Margen de acción broadcast</small></span>
                   </label>
-                  <label class="safe-check-item">
-                    <input type="checkbox" class="safe-zone-toggle" data-safe-id="title80">
-                    <span class="safe-check-indicator"></span>
-                    <span class="safe-check-text"><strong>80% TITLE SAFE</strong><small>Margen de títulos y subtítulos</small></span>
+                  <label class="safe-check-row">
+                    <input type="checkbox" class="safe-toggle-cb" data-safe-zone="title80">
+                    <span class="safe-check-mark"></span>
+                    <span><strong>80% TITLE SAFE</strong><small>Margen de títulos y subtítulos</small></span>
                   </label>
                 </div>
               </div>

@@ -95,6 +95,9 @@ const seedClips = [
 ];
 
 let clips = seedClips.map(clip => ({ ...clip }));
+let galleryFormatFilter = "ALL";
+let galleryFpsFilter = "ALL";
+let gallerySortOrder = "newest";
 let selected = new Set();
 let selectionMode = false;
 let activeClip = clips[0];
@@ -172,9 +175,25 @@ function formatBytes(bytes) {
   return `${(bytes / 1_000_000_000).toFixed(2).replace(".", ",")} GB`;
 }
 
+function getFilteredClips() {
+  let list = clips.filter(clip => {
+    if (galleryFormatFilter === "HLG10" && clip.format !== "PURE 10") return false;
+    if (galleryFormatFilter === "RAW10" && clip.format !== "RAW10") return false;
+    if (galleryFormatFilter === "CINEMADNG" && clip.format !== "CinemaDNG") return false;
+    if (galleryFpsFilter === "24" && clip.fps !== 24) return false;
+    if (galleryFpsFilter === "30" && clip.fps !== 30) return false;
+    return true;
+  });
+  if (gallerySortOrder === "oldest") {
+    list = [...list].reverse();
+  }
+  return list;
+}
+
 function renderGallery() {
   const sheet = $("#contact-sheet");
-  sheet.innerHTML = clips.map((clip, index) => `
+  const filtered = getFilteredClips();
+  sheet.innerHTML = filtered.map((clip, index) => `
     <article class="clip-card${selected.has(clip.id) ? " is-selected" : ""}" data-clip-id="${clip.id}" tabindex="0" aria-label="${clip.title}, ${clip.format}">
       <div class="clip-visual">
         <div class="scene scene--${clip.scene}"></div>
@@ -194,9 +213,23 @@ function renderGallery() {
       </div>
     </article>
   `).join("");
-  updateGallerySummary();
+  updateGallerySummary(filtered);
+  const statusEl = $("#gallery-filter-status");
+  if (statusEl) {
+    statusEl.textContent = galleryFormatFilter === "ALL" 
+      ? "CONTACTO / TODAS LAS TOMAS" 
+      : `CONTACTO / FILTRADO POR ${galleryFormatFilter}`;
+  }
 }
 
+function updateGallerySummary(filtered = clips) {
+  const summary = $("#gallery-summary");
+  const label = filtered.length === 1 ? "TOMA" : "TOMAS";
+  summary.textContent = `${filtered.length} ${label} · ${formatBytes(totalBytes(filtered))}`;
+  if (!filtered.length) {
+    $("#contact-sheet").innerHTML = `<div class="empty-state"><strong>SIN RESULTADOS</strong><span>No hay tomas que coincidan con los filtros aplicados.</span></div>`;
+  }
+}
 function updateGallerySummary() {
   const summary = $("#gallery-summary");
   const label = clips.length === 1 ? "TOMA" : "TOMAS";
@@ -752,34 +785,39 @@ function init() {
   $("#gallery-more").onclick = event => {
     showPopover(event.currentTarget, `
       <span class="popover-section-label">FILTRAR POR FORMATO</span>
-      <button class="popover-button" data-filter-format="ALL">TODOS LOS FORMATOS</button>
+      <button class="popover-button" data-filter-format="ALL">${icon("i-check")}TODOS LOS FORMATOS</button>
       <button class="popover-button" data-filter-format="HLG10">HLG 10 (HEVC MAIN10)</button>
-      <button class="popover-button" data-filter-format="RAW10">RAW 10 (CONTENEDOR 2K)</button>
-      <button class="popover-button" data-filter-format="CINEMADNG">CINEMADNG (SECUENCIA 4K)</button>
+      <button class="popover-button" data-filter-format="RAW10">RAW 10 (2K RAW10C)</button>
+      <button class="popover-button" data-filter-format="CINEMADNG">CINEMADNG (4K DNG)</button>
       <div class="popover-divider"></div>
-      <span class="popover-section-label">ACCIONES DE TOMAS</span>
-      <button class="popover-button" data-gallery-action="select-all">${icon("i-check")}SELECCIONAR TODO</button>
+      <span class="popover-section-label">ORDENAR TOMAS</span>
+      <button class="popover-button" data-sort-order="newest">${icon("i-check")}MÁS RECIENTES PRIMERO</button>
+      <button class="popover-button" data-sort-order="oldest">MÁS ANTIGUAS PRIMERO</button>
+      <div class="popover-divider"></div>
+      <button class="popover-button" data-gallery-action="select-all">${icon("i-tools")}SELECCIONAR TODO</button>
       <button class="popover-button" data-gallery-action="location">${icon("i-info")}UBICACIÓN DE TOMAS</button>
     `);
     $("#popover").onclick = popEvent => {
-      const formatBtn = popEvent.target.closest("[data-filter-format]");
-      if (formatBtn) {
-        closePopover();
-        window.applyGalleryFilter(formatBtn.dataset.filterFormat);
-        return;
-      }
-      const action = popEvent.target.closest("[data-gallery-action]")?.dataset.galleryAction;
-      if (!action) return;
+      const target = popEvent.target.closest("[data-filter-format], [data-sort-order], [data-gallery-action]");
+      if (!target) return;
       closePopover();
-      if (action === "select-all") {
+      if (target.dataset.filterFormat) {
+        galleryFormatFilter = target.dataset.filterFormat;
+        renderGallery();
+        showToast(`FILTRO · ${galleryFormatFilter}`);
+      } else if (target.dataset.sortOrder) {
+        gallerySortOrder = target.dataset.sortOrder;
+        renderGallery();
+        showToast(`ORDEN · ${gallerySortOrder === "newest" ? "RECIENTES" : "ANTIGUAS"}`);
+      } else if (target.dataset.galleryAction === "select-all") {
         setSelectionMode(true);
-        clips.forEach(clip => setClipSelected(clip.id, true));
-      } else if (action === "location") {
-        showToast("DCIM / MOVIES / RAWLITE");
+        getFilteredClips().forEach(clip => setClipSelected(clip.id, true));
+      } else if (target.dataset.galleryAction === "location") {
+        showToast("ANDROID / MOVIES / RAWLITE");
       }
     };
   };
-  $("#player-back").onclick = () => showScreen("gallery");
+  $("#player-back")  $("#player-back").onclick = () => showScreen("gallery");
   $("#play-toggle").onclick = () => playing ? stopPlayback() : startPlayback();
   $("#previous-frame").onclick = () => stepFrame(-1);
   $("#next-frame").onclick = () => stepFrame(1);
@@ -825,21 +863,42 @@ function init() {
     button.addEventListener("click", () => {
       const choice = button.dataset.gridChoice;
       $$("[data-grid-choice]").forEach(b => {
-        const isActive = b === button;
-        b.classList.toggle("is-active", isActive);
-        b.setAttribute("aria-checked", String(isActive));
+        b.classList.toggle("is-active", b === button);
+        b.setAttribute("aria-checked", String(b === button));
       });
       const preview = $("#grid-preview");
       preview.dataset.grid = choice;
-      const labels = {
-        off: "COMPOSICIÓN · VISOR LIMPIO",
-        thirds: "COMPOSICIÓN · TERCIOS 3×3",
-        center: "COMPOSICIÓN · CUADRÍCULA DE CENTRO (4 CUADRANTES)",
-        golden: "COMPOSICIÓN · PROPORCIÓN ÁUREA (ESPIRAL DE FIBONACCI)",
-        diagonal: "COMPOSICIÓN · DIAGONAL ARMÓNICA",
-        scope: "COMPOSICIÓN · 2.39:1 PANORÁMICO"
-      };
-      showToast(labels[choice] || "COMPOSICIÓN ACTUALIZADA");
+      const invertBtn = $("#toggle-grid-invert");
+      if (invertBtn) {
+        invertBtn.disabled = !(choice === "golden" || choice === "diagonal");
+        invertBtn.style.opacity = (choice === "golden" || choice === "diagonal") ? "1" : "0.35";
+      }
+      showToast(`CUADRÍCULA · ${button.querySelector("strong").textContent}`);
+    });
+  });
+
+  // Botón Invertir para Áurea y Diagonal
+  const invertBtn = $("#toggle-grid-invert");
+  if (invertBtn) {
+    invertBtn.onclick = () => {
+      const preview = $("#grid-preview");
+      const current = preview.dataset.gridInverted === "true";
+      preview.dataset.gridInverted = String(!current);
+      invertBtn.classList.toggle("is-active", !current);
+      invertBtn.setAttribute("aria-pressed", String(!current));
+      showToast(!current ? "ORIENTACIÓN · INVERTIDA (⇄)" : "ORIENTACIÓN · NORMAL");
+    };
+  }
+
+  // Zonas Seguras Superpuestas y Sumables (DaVinci Resolve Style)
+  $$(".safe-toggle-cb").forEach(checkbox => {
+    checkbox.addEventListener("change", () => {
+      const zoneId = checkbox.dataset.safeZone;
+      const targetLayer = $(`#safe-${zoneId}`);
+      if (targetLayer) {
+        targetLayer.classList.toggle("is-active", checkbox.checked);
+      }
+      showToast(checkbox.checked ? `ZONA SEGURA SUMADA · ${zoneId.toUpperCase()}` : `ZONA SEGURA APAGADA · ${zoneId.toUpperCase()}`);
     });
   });
 
