@@ -1671,11 +1671,22 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
                 ? (ry > 0 ? ry - 1 : ry)
                 : (ry + 1 < num_row_pairs ? ry + 1 : ry);
 
+            const int prev_ry_g = ry > 0 ? ry - 1 : ry;
+            const int next_ry_g = ry + 1 < num_row_pairs ? ry + 1 : ry;
+
             const auto* curr_r = &quad_rf[static_cast<size_t>(ry) * num_quads];
             const auto* v_r = &quad_rf[static_cast<size_t>(r_ry_neighbor) * num_quads];
+            const auto* prev_r = &quad_rf[static_cast<size_t>(prev_ry_g) * num_quads];
+            const auto* next_r = &quad_rf[static_cast<size_t>(next_ry_g) * num_quads];
+
             const auto* curr_b = &quad_bf[static_cast<size_t>(ry) * num_quads];
             const auto* v_b = &quad_bf[static_cast<size_t>(b_ry_neighbor) * num_quads];
+            const auto* prev_b = &quad_bf[static_cast<size_t>(prev_ry_g) * num_quads];
+            const auto* next_b = &quad_bf[static_cast<size_t>(next_ry_g) * num_quads];
+
             const auto* curr_g = &quad_gf[static_cast<size_t>(ry) * num_quads];
+            const auto* prev_g = &quad_gf[static_cast<size_t>(prev_ry_g) * num_quads];
+            const auto* next_g = &quad_gf[static_cast<size_t>(next_ry_g) * num_quads];
 
             for (int qx = 0; qx < num_quads; ++qx) {
                 const int r_qx_neighbor = r_on_right
@@ -1699,13 +1710,60 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
 
                 const int gf = static_cast<int>(curr_g[qx]);
 
+                // Pass 1c: Guided color-difference fringe suppression (Method B)
+                // Evaluates green guide gradient to detect and suppress spurious
+                // chromatic fringing / dispersion along high-contrast boundaries.
+                const int qx_prev = qx > 0 ? qx - 1 : qx;
+                const int qx_next = qx + 1 < num_quads ? qx + 1 : qx;
+
+                const int g_left = static_cast<int>(curr_g[qx_prev]);
+                const int g_right = static_cast<int>(curr_g[qx_next]);
+                const int g_up = static_cast<int>(prev_g[qx]);
+                const int g_down = static_cast<int>(next_g[qx]);
+
+                const int grad_g_h = std::abs(g_right - g_left);
+                const int grad_g_v = std::abs(g_down - g_up);
+                const int grad_g = std::max(grad_g_h, grad_g_v);
+
+                int rf_final = rf_centered;
+                int bf_final = bf_centered;
+
+                constexpr int kEdgeMinThreshold = 128; // ~3% contrast threshold in 12-bit linear space
+                if (grad_g > kEdgeMinThreshold) {
+                    const int delta_rg = rf_centered - gf;
+                    const int delta_bg = bf_centered - gf;
+
+                    const int d_rg_left = static_cast<int>(curr_r[qx_prev]) - g_left;
+                    const int d_rg_right = static_cast<int>(curr_r[qx_next]) - g_right;
+                    const int d_rg_up = static_cast<int>(prev_r[qx]) - g_up;
+                    const int d_rg_down = static_cast<int>(next_r[qx]) - g_down;
+
+                    const int d_bg_left = static_cast<int>(curr_b[qx_prev]) - g_left;
+                    const int d_bg_right = static_cast<int>(curr_b[qx_next]) - g_right;
+                    const int d_bg_up = static_cast<int>(prev_b[qx]) - g_up;
+                    const int d_bg_down = static_cast<int>(next_b[qx]) - g_down;
+
+                    const int margin = std::max(64, (grad_g >> 3));
+
+                    const int min_rg = std::min({d_rg_left, d_rg_right, d_rg_up, d_rg_down}) - margin;
+                    const int max_rg = std::max({d_rg_left, d_rg_right, d_rg_up, d_rg_down}) + margin;
+                    const int filtered_delta_rg = std::clamp(delta_rg, min_rg, max_rg);
+
+                    const int min_bg = std::min({d_bg_left, d_bg_right, d_bg_up, d_bg_down}) - margin;
+                    const int max_bg = std::max({d_bg_left, d_bg_right, d_bg_up, d_bg_down}) + margin;
+                    const int filtered_delta_bg = std::clamp(delta_bg, min_bg, max_bg);
+
+                    rf_final = std::clamp(gf + filtered_delta_rg, 0, 4096);
+                    bf_final = std::clamp(gf + filtered_delta_bg, 0, 4096);
+                }
+
                 const std::array<int64_t, 3> red_blue_contribution = {
-                    static_cast<int64_t>(camera_to_rec2020_q[0]) * rf_centered +
-                        static_cast<int64_t>(camera_to_rec2020_q[2]) * bf_centered,
-                    static_cast<int64_t>(camera_to_rec2020_q[3]) * rf_centered +
-                        static_cast<int64_t>(camera_to_rec2020_q[5]) * bf_centered,
-                    static_cast<int64_t>(camera_to_rec2020_q[6]) * rf_centered +
-                        static_cast<int64_t>(camera_to_rec2020_q[8]) * bf_centered
+                    static_cast<int64_t>(camera_to_rec2020_q[0]) * rf_final +
+                        static_cast<int64_t>(camera_to_rec2020_q[2]) * bf_final,
+                    static_cast<int64_t>(camera_to_rec2020_q[3]) * rf_final +
+                        static_cast<int64_t>(camera_to_rec2020_q[5]) * bf_final,
+                    static_cast<int64_t>(camera_to_rec2020_q[6]) * rf_final +
+                        static_cast<int64_t>(camera_to_rec2020_q[8]) * bf_final
                 };
                 const auto channel = [&](int row) -> int {
                     const int64_t value = red_blue_contribution[row / 3] +
