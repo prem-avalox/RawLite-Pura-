@@ -45,30 +45,50 @@ internal class AspectRatioTextureView @JvmOverloads constructor(
     private var lastTouchX = 0f
     private var lastTouchY = 0f
     private var activePointerId = MotionEvent.INVALID_POINTER_ID
+    private var prevFocusX = 0f
+    private var prevFocusY = 0f
     private var zoomAnimator: ValueAnimator? = null
 
     private val scaleDetector = ScaleGestureDetector(
         context,
         object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
+                prevFocusX = detector.focusX
+                prevFocusY = detector.focusY
+                parent?.requestDisallowInterceptTouchEvent(true)
+                return true
+            }
+
             override fun onScale(detector: ScaleGestureDetector): Boolean {
+                val focusX = detector.focusX
+                val focusY = detector.focusY
+                val deltaFocusX = focusX - prevFocusX
+                val deltaFocusY = focusY - prevFocusY
+                prevFocusX = focusX
+                prevFocusY = focusY
+
                 val previousScale = currentScale
                 currentScale = (currentScale * detector.scaleFactor).coerceIn(MIN_SCALE, MAX_SCALE)
 
                 if (currentScale != previousScale) {
                     val factor = currentScale / previousScale
-                    val focusX = detector.focusX
-                    val focusY = detector.focusY
-
                     panX -= (focusX - centerX - panX) * (factor - 1f)
                     panY -= (focusY - centerY - panY) * (factor - 1f)
-
-                    clampPan()
-                    applyTransform()
                 }
+
+                // Sumar deltaFocus para que el paneo con dos dedos continúe funcionando con fluidez
+                // incluso cuando currentScale alcanza MAX_SCALE (4.0f)
+                panX += deltaFocusX
+                panY += deltaFocusY
+
+                clampPan()
+                applyTransform()
                 return true
             }
 
             override fun onScaleEnd(detector: ScaleGestureDetector) {
+                prevFocusX = 0f
+                prevFocusY = 0f
                 if (currentScale <= MIN_SCALE) {
                     parent?.requestDisallowInterceptTouchEvent(false)
                 }
@@ -235,15 +255,23 @@ internal class AspectRatioTextureView @JvmOverloads constructor(
     }
 
     private fun clampPan() {
-        if (currentScale <= MIN_SCALE) {
+        if (currentScale <= MIN_SCALE || width <= 0 || height <= 0 || targetWidth <= 0f || targetHeight <= 0f) {
             panX = 0f
             panY = 0f
             return
         }
         val zoomedWidth = targetWidth * currentScale
         val zoomedHeight = targetHeight * currentScale
-        val maxPanX = if (zoomedWidth > width) (zoomedWidth - width) / 2f else 0f
-        val maxPanY = if (zoomedHeight > height) (zoomedHeight - height) / 2f else 0f
+        val maxPanX = if (zoomedWidth > width) {
+            (zoomedWidth - width) / 2f
+        } else {
+            ((zoomedWidth - targetWidth) / 2f).coerceAtLeast(0f)
+        }
+        val maxPanY = if (zoomedHeight > height) {
+            (zoomedHeight - height) / 2f
+        } else {
+            ((zoomedHeight - targetHeight) / 2f).coerceAtLeast(0f)
+        }
         panX = panX.coerceIn(-maxPanX, maxPanX)
         panY = panY.coerceIn(-maxPanY, maxPanY)
     }
@@ -281,8 +309,16 @@ internal class AspectRatioTextureView @JvmOverloads constructor(
 
             val targetZoomedWidth = targetWidth * clampedTargetScale
             val targetZoomedHeight = targetHeight * clampedTargetScale
-            val maxPanX = if (targetZoomedWidth > width) (targetZoomedWidth - width) / 2f else 0f
-            val maxPanY = if (targetZoomedHeight > height) (targetZoomedHeight - height) / 2f else 0f
+            val maxPanX = if (targetZoomedWidth > width) {
+                (targetZoomedWidth - width) / 2f
+            } else {
+                ((targetZoomedWidth - targetWidth) / 2f).coerceAtLeast(0f)
+            }
+            val maxPanY = if (targetZoomedHeight > height) {
+                (targetZoomedHeight - height) / 2f
+            } else {
+                ((targetZoomedHeight - targetHeight) / 2f).coerceAtLeast(0f)
+            }
 
             targetPanX = rawPanX.coerceIn(-maxPanX, maxPanX)
             targetPanY = rawPanY.coerceIn(-maxPanY, maxPanY)

@@ -127,7 +127,7 @@ class ReviewActivity : Activity() {
 
     private var stage: FrameLayout? = null
     private var textureView: AspectRatioTextureView? = null
-    private var sequenceView: ImageView? = null
+    private var sequenceView: ZoomableImageView? = null
     private var stageStatus: TextView? = null
     private var detailView: TextView? = null
     private var positionView: TextView? = null
@@ -773,8 +773,8 @@ class ReviewActivity : Activity() {
                 if (generation.get() != currentGeneration || isFinishing) return@runOnUiThread
                 result.onSuccess {
                     val playerUi = buildPlayerShell(summary)
-                    val image = ImageView(this).apply {
-                        scaleType = ImageView.ScaleType.FIT_CENTER
+                    val image = ZoomableImageView(this).apply {
+                        scaleType = ImageView.ScaleType.MATRIX
                         setBackgroundColor(RawLiteDesign.BLACK)
                         contentDescription = "Secuencia ${summary.captureFormat}"
                     }
@@ -2116,6 +2116,7 @@ class ReviewActivity : Activity() {
         bufferingAnchorIndex = 0
         bufferingTargetFrames = 0
         bufferingResumePositionMs = 0
+        sequenceView?.resetZoom()
         sequenceView?.setImageDrawable(null)
         displayedBitmap = null
         frameBuffer.clear()
