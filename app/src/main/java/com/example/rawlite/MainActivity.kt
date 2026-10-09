@@ -2277,6 +2277,7 @@ class MainActivity : Activity() {
         val activeSession = captureSession
         if (activeSession != null) {
             captureSession = null
+            activeRepeatingBuilder = null
             closingSession = activeSession
             activeSession.close()
             return

@@ -16,14 +16,6 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
 
-internal enum class TechnicalOverlayMode(val label: String) {
-    OFF("TOOLS OFF"),
-    ZEBRA("ZEBRA"),
-    FALSE_COLOR("FALSE"),
-    PEAKING("PEAK"),
-    HISTOGRAM("HIST")
-}
-
 internal class TechnicalOverlayView(context: Context) : View(context) {
     private val openSans: Typeface = runCatching { resources.getFont(R.font.open_sans) }
         .getOrElse { Typeface.create("sans-serif", Typeface.NORMAL) }
