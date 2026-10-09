@@ -26,6 +26,7 @@ class ParameterWheelView(context: Context) : View(context) {
         }
 
     var onProgressChanged: ((Int) -> Unit)? = null
+    var onTouchRelease: (() -> Unit)? = null
 
     var valueInterval = 100
         set(value) {
@@ -154,10 +155,12 @@ class ParameterWheelView(context: Context) : View(context) {
             MotionEvent.ACTION_UP -> {
                 if (abs(coordinate - touchOrigin) < density(3f)) performClick()
                 parent?.requestDisallowInterceptTouchEvent(false)
+                onTouchRelease?.invoke()
                 return true
             }
             MotionEvent.ACTION_CANCEL -> {
                 parent?.requestDisallowInterceptTouchEvent(false)
+                onTouchRelease?.invoke()
                 return true
             }
         }

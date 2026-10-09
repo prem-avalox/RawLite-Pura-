@@ -36,6 +36,7 @@ class CameraChromeView(context: Context) : View(context) {
     var onPreviewFocus: ((Float, Float, Boolean) -> Unit)? = null
     var onPushAutoChanged: ((Boolean) -> Unit)? = null
     var onWheelChanged: ((Int) -> Unit)? = null
+    var onWheelReleased: (() -> Unit)? = null
     var onStep: ((Int) -> Unit)? = null
     var onParameterStep: ((Int) -> Unit)? = null
     var onRecordPressed: (() -> Unit)? = null
@@ -1729,6 +1730,7 @@ class CameraChromeView(context: Context) : View(context) {
                 animateWheelTo(wheelProgress.toFloat())
                 onWheelChanged?.invoke(wheelProgress)
             }
+            onWheelReleased?.invoke()
             wheelDragging = false
             invalidate()
             return true

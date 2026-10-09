@@ -791,6 +791,7 @@ class MainActivity : Activity() {
         }
         wheelView = ParameterWheelView(this).apply {
             onProgressChanged = { progress -> applyWheelProgress(progress) }
+            onTouchRelease = { scheduleControlApply(forceImmediate = true) }
         }
         wheelPanel.addView(wheelView, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
         wheelAutoButton = selectorText("AUTO").apply {
@@ -901,6 +902,7 @@ class MainActivity : Activity() {
                 if (pressed) beginPushAuto() else endPushAuto()
             }
             onWheelChanged = { progress -> applyWheelProgress(progress) }
+            onWheelReleased = { scheduleControlApply(forceImmediate = true) }
             onStep = { direction -> stepSelectedParameter(direction) }
             onParameterStep = { direction -> stepParameterSelection(direction) }
             onRecordPressed = {
@@ -1274,7 +1276,7 @@ class MainActivity : Activity() {
             }
             CameraParameter.FOCUS -> {
                 val maxFocus = maximumFocusDistanceDiopters()
-                formatFocus(progressToLinear(progress, 0.0, maxFocus.toDouble()).toFloat())
+                formatFocus(progressToFocusDiopters(progress, maxFocus))
             }
             CameraParameter.RESOLUTION -> {
                 val count = currentResolutionCount()
@@ -1650,9 +1652,7 @@ class MainActivity : Activity() {
             measured.focusDiopters?.let { focusDiopters = it }
             val maxFocus = maximumFocusDistanceDiopters()
             if (maxFocus > 0f) {
-                focusControls.seek.progress = linearToProgress(
-                    focusDiopters.toDouble(), 0.0, maxFocus.toDouble()
-                )
+                focusControls.seek.progress = focusDioptersToProgress(focusDiopters, maxFocus)
             }
             manualFocus = true
         } else {
@@ -1830,12 +1830,75 @@ class MainActivity : Activity() {
         return if (count <= 1) 1000 else (1000f / (count - 1)).roundToInt()
     }
 
-    private fun scheduleControlApply() {
-        telemetryHandler.removeCallbacks(controlApplyRunnable)
-        telemetryHandler.postDelayed(controlApplyRunnable, 45L)
+    private var lastControlApplyTimeMs = 0L
+    private val controlApplyThrottleIntervalMs = 33L
+    private var trailingControlApplyScheduled = false
+    private var activeRepeatingBuilder: CaptureRequest.Builder? = null
+
+    private val controlApplyRunnable = Runnable {
+        trailingControlApplyScheduled = false
+        lastControlApplyTimeMs = SystemClock.elapsedRealtime()
+        applyCurrentControlsToCamera()
     }
 
-    private val controlApplyRunnable = Runnable { restartRepeating() }
+    private fun scheduleControlApply(forceImmediate: Boolean = false) {
+        val now = SystemClock.elapsedRealtime()
+        val elapsed = now - lastControlApplyTimeMs
+
+        if (forceImmediate || elapsed >= controlApplyThrottleIntervalMs) {
+            telemetryHandler.removeCallbacks(controlApplyRunnable)
+            trailingControlApplyScheduled = false
+            lastControlApplyTimeMs = now
+            applyCurrentControlsToCamera()
+        } else if (!trailingControlApplyScheduled) {
+            trailingControlApplyScheduled = true
+            val delay = (controlApplyThrottleIntervalMs - elapsed).coerceAtLeast(1L)
+            telemetryHandler.postDelayed(controlApplyRunnable, delay)
+        }
+    }
+
+    private fun applyCurrentControlsToCamera() {
+        if (switchingSession || captureSession == null) return
+        if (selectedParameter == CameraParameter.FOCUS && canFastUpdateFocus()) {
+            fastUpdateFocus()
+        } else {
+            restartRepeating()
+        }
+    }
+
+    private fun canFastUpdateFocus(): Boolean {
+        return activeRepeatingBuilder != null && captureSession != null && !switchingSession
+    }
+
+    private fun fastUpdateFocus() {
+        val session = captureSession ?: return
+        val builder = activeRepeatingBuilder ?: return
+        val maxFocus = maximumFocusDistanceDiopters()
+        val lockedFocus = recording && lockFocus && snapshotCurrentValues()?.focusDiopters != null
+        when {
+            maxFocus <= 0f -> {
+                put(builder, CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+                put(builder, CaptureRequest.LENS_FOCUS_DISTANCE, 0f)
+            }
+            manualFocus || lockedFocus -> {
+                put(builder, CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+                val target = (if (lockedFocus) snapshotCurrentValues()?.focusDiopters else focusDiopters)
+                    ?.coerceIn(0f, maxFocus) ?: focusDiopters.coerceIn(0f, maxFocus)
+                put(builder, CaptureRequest.LENS_FOCUS_DISTANCE, target)
+            }
+            else -> {
+                put(builder, CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+            }
+        }
+        cameraHandler.post {
+            try {
+                session.setRepeatingRequest(builder.build(), captureCallback, cameraHandler)
+            } catch (e: Exception) {
+                Log.w(TAG, "Fast focus update fallback to full restart", e)
+                startRepeating(recording)
+            }
+        }
+    }
     private val hideStatusRunnable = Runnable {
         if (::status.isInitialized) status.visibility = View.GONE
     }
@@ -1987,24 +2050,26 @@ class MainActivity : Activity() {
                 if (fromUser) {
                     onProgress(progress)
                     scheduleUserPreferencesSave()
-                    restartRepeating()
+                    scheduleControlApply()
                 }
             }
 
             override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
-            override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {
+                scheduleControlApply(forceImmediate = true)
+            }
         })
         widgets.minus.setOnClickListener {
             widgets.seek.progress = (widgets.seek.progress + minusDelta()).coerceIn(0, widgets.seek.max)
             onProgress(widgets.seek.progress)
             scheduleUserPreferencesSave()
-            restartRepeating()
+            scheduleControlApply(forceImmediate = true)
         }
         widgets.plus.setOnClickListener {
             widgets.seek.progress = (widgets.seek.progress + plusDelta()).coerceIn(0, widgets.seek.max)
             onProgress(widgets.seek.progress)
             scheduleUserPreferencesSave()
-            restartRepeating()
+            scheduleControlApply(forceImmediate = true)
         }
     }
 
@@ -2104,7 +2169,7 @@ class MainActivity : Activity() {
         val maxFocus = maximumFocusDistanceDiopters()
         focusDiopters = focusDiopters.coerceIn(0f, maxFocus)
         focusControls.seek.progress = if (maxFocus > 0f) {
-            linearToProgress(focusDiopters.toDouble(), 0.0, maxFocus.toDouble())
+            focusDioptersToProgress(focusDiopters, maxFocus)
         } else {
             0
         }
@@ -2751,6 +2816,7 @@ class MainActivity : Activity() {
             if (includeRaw) rawReader?.surface?.let { addTarget(it) }
         }
         applyControls(builder, includeRaw)
+        activeRepeatingBuilder = builder
 
         try {
             session.setRepeatingRequest(builder.build(), captureCallback, cameraHandler)
@@ -2870,11 +2936,7 @@ class MainActivity : Activity() {
             previewMeteringRegion = null
             previewMeteringLocked = false
             previewFocusConfirmationPending = false
-            focusControls.seek.progress = linearToProgress(
-                focusDiopters.toDouble(),
-                0.0,
-                maxFocus.toDouble()
-            )
+            focusControls.seek.progress = focusDioptersToProgress(focusDiopters, maxFocus)
             scheduleUserPreferencesSave()
             updateControlModes()
             updateChromeValues()
@@ -3856,6 +3918,7 @@ class MainActivity : Activity() {
         ++recordingStartToken
         sessionGeneration++
         pendingSessionRequest = null
+        activeRepeatingBuilder = null
         if (!preservePendingOpen) pendingCameraTexture = null
         switchingSession = false
         recording = false
@@ -4089,8 +4152,7 @@ class MainActivity : Activity() {
 
     private fun updateFocusFromProgress(progress: Int) {
         val maxFocus = maximumFocusDistanceDiopters()
-        focusDiopters = progressToLinear(progress, 0.0, maxFocus.toDouble()).toFloat()
-            .coerceIn(0f, maxFocus)
+        focusDiopters = progressToFocusDiopters(progress, maxFocus)
         focusControls.value.text = formatFocus(focusDiopters)
     }
 
@@ -5056,6 +5118,21 @@ class MainActivity : Activity() {
         return (((value.coerceIn(min, max) - min) / (max - min)) * 1000)
             .roundToInt()
             .coerceIn(0, 1000)
+    }
+
+    private fun progressToFocusDiopters(progress: Int, maxFocus: Float): Float {
+        if (maxFocus <= 0f) return 0f
+        val t = progress.coerceIn(0, 1000) / 1000.0
+        val t2 = t * t
+        val t4 = t2 * t2
+        return (maxFocus * t4).toFloat().coerceIn(0f, maxFocus)
+    }
+
+    private fun focusDioptersToProgress(diopters: Float, maxFocus: Float): Int {
+        if (maxFocus <= 0f || diopters <= 0f) return 0
+        val norm = (diopters / maxFocus).coerceIn(0f, 1f)
+        val p = kotlin.math.sqrt(kotlin.math.sqrt(norm.toDouble()))
+        return (p * 1000.0).roundToInt().coerceIn(0, 1000)
     }
 
     private fun darkSpinner(): Spinner {
