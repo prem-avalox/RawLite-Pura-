@@ -48,6 +48,7 @@ internal class AspectRatioTextureView @JvmOverloads constructor(
     private var prevFocusX = 0f
     private var prevFocusY = 0f
     private var zoomAnimator: ValueAnimator? = null
+    private val transformMatrix = Matrix()
 
     private val scaleDetector = ScaleGestureDetector(
         context,
@@ -278,13 +279,12 @@ internal class AspectRatioTextureView @JvmOverloads constructor(
 
     private fun applyTransform() {
         if (width <= 0 || height <= 0) return
-        val matrix = Matrix().apply {
-            setScale(scaleX, scaleY, centerX, centerY)
-            postRotate(videoRotation.toFloat(), centerX, centerY)
-            postScale(currentScale, currentScale, centerX, centerY)
-            postTranslate(panX, panY)
-        }
-        setTransform(matrix)
+        transformMatrix.reset()
+        transformMatrix.setScale(scaleX, scaleY, centerX, centerY)
+        transformMatrix.postRotate(videoRotation.toFloat(), centerX, centerY)
+        transformMatrix.postScale(currentScale, currentScale, centerX, centerY)
+        transformMatrix.postTranslate(panX, panY)
+        setTransform(transformMatrix)
         invalidate()
     }
 

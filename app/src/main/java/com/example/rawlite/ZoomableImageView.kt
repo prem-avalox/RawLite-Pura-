@@ -49,6 +49,7 @@ internal class ZoomableImageView @JvmOverloads constructor(
     private var prevFocusX = 0f
     private var prevFocusY = 0f
     private var zoomAnimator: ValueAnimator? = null
+    private val transformMatrix = Matrix()
 
     private val scaleDetector = ScaleGestureDetector(
         context,
@@ -288,13 +289,12 @@ internal class ZoomableImageView @JvmOverloads constructor(
 
     private fun applyTransform() {
         if (width <= 0 || height <= 0 || bitmapWidth <= 0 || bitmapHeight <= 0) return
-        val matrix = Matrix().apply {
-            postScale(fitScale, fitScale)
-            postTranslate((width - targetWidth) / 2f, (height - targetHeight) / 2f)
-            postScale(currentScale, currentScale, centerX, centerY)
-            postTranslate(panX, panY)
-        }
-        imageMatrix = matrix
+        transformMatrix.reset()
+        transformMatrix.postScale(fitScale, fitScale)
+        transformMatrix.postTranslate((width - targetWidth) / 2f, (height - targetHeight) / 2f)
+        transformMatrix.postScale(currentScale, currentScale, centerX, centerY)
+        transformMatrix.postTranslate(panX, panY)
+        imageMatrix = transformMatrix
         invalidate()
     }
 
