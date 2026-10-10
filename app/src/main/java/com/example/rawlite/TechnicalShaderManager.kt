@@ -95,6 +95,16 @@ internal object TechnicalShaderManager {
         view.setRenderEffect(effect)
     }
 
+    fun apply(view: View, overlay: ActiveOverlay) {
+        val mode = when (overlay) {
+            ActiveOverlay.NONE -> TechnicalOverlayMode.OFF
+            ActiveOverlay.FOCUS_PEAKING -> TechnicalOverlayMode.PEAKING
+            ActiveOverlay.ZEBRAS -> TechnicalOverlayMode.ZEBRA
+            ActiveOverlay.FALSE_COLOR -> TechnicalOverlayMode.FALSE_COLOR
+        }
+        apply(view, mode)
+    }
+
     fun clear(view: View) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             view.setRenderEffect(null)

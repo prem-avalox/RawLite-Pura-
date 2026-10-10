@@ -32,6 +32,12 @@ import kotlin.math.roundToInt
 
 class CameraChromeView(context: Context) : View(context) {
     var onParameterSelected: ((Int) -> Unit)? = null
+    var onParameterLongPressed: ((Int) -> Unit)? = null
+    internal var alwaysOnParameter: CameraParameter? = null
+        set(value) {
+            field = value
+            invalidate()
+        }
     var onRawPressed: (() -> Unit)? = null
     var onAutoPressed: (() -> Unit)? = null
     var onAutoLongPressed: (() -> Unit)? = null
@@ -290,6 +296,8 @@ class CameraChromeView(context: Context) : View(context) {
     private var dPadDragAccumulator = 0f
     private var dPadIntensity = 0f
     private var autoLongPressTriggered = false
+    private var selectorLongPressTriggered = false
+    private val selectorTouchOrigin = PointF()
     private var previewLongPressTriggered = false
     private val previewTouchOrigin = PointF()
     private var focusReticle: FocusReticle? = null
@@ -775,8 +783,11 @@ class CameraChromeView(context: Context) : View(context) {
                 }
                 paint.alpha = 255
             }
+            val param = CameraParameter.entries.getOrNull(index)
+            val isAlwaysOnPinned = param != null && alwaysOnParameter == param
             val color = when {
                 index == 7 && rawActive -> ACCENT
+                isAlwaysOnPinned -> ACCENT
                 index in 0..6 && autoParameterStates.getOrNull(index) == true -> AUTO
                 else -> blendColor(Color.WHITE, ACCENT, selectorAccentProgress[index])
             }
@@ -1602,6 +1613,11 @@ class CameraChromeView(context: Context) : View(context) {
         for (index in 0 until 8) {
             if (selectorRect(index, layoutLandscape).contains(point.x, point.y)) {
                 touchTarget = TARGET_SELECTOR_BASE + index
+                if (index < 7) {
+                    selectorLongPressTriggered = false
+                    selectorTouchOrigin.set(point.x, point.y)
+                    repeatHandler.postDelayed(selectorLongPressRunnable, PARAMETER_LONG_PRESS_MS)
+                }
                 return true
             }
         }
@@ -1720,6 +1736,14 @@ class CameraChromeView(context: Context) : View(context) {
             }
             return true
         }
+        if (touchTarget in TARGET_SELECTOR_BASE until TARGET_SELECTOR_BASE + 7) {
+            val dx = point.x - selectorTouchOrigin.x
+            val dy = point.y - selectorTouchOrigin.y
+            if (hypot(dx, dy) > SELECTOR_TAP_SLOP) {
+                repeatHandler.removeCallbacks(selectorLongPressRunnable)
+            }
+            return true
+        }
         if (touchTarget == TARGET_PREVIEW_FOCUS) {
             val dx = point.x - previewTouchOrigin.x
             val dy = point.y - previewTouchOrigin.y
@@ -1762,6 +1786,9 @@ class CameraChromeView(context: Context) : View(context) {
         val target = touchTarget
         touchTarget = TARGET_NONE
         if (target == TARGET_AUTO) repeatHandler.removeCallbacks(autoLongPressRunnable)
+        if (target in TARGET_SELECTOR_BASE until TARGET_SELECTOR_BASE + 7) {
+            repeatHandler.removeCallbacks(selectorLongPressRunnable)
+        }
         if (target == TARGET_PREVIEW_FOCUS) repeatHandler.removeCallbacks(previewLongPressRunnable)
         if (target == TARGET_RECORD) animateRecordPress(false)
         if (target == TARGET_REVIEW) invalidate()
@@ -1814,9 +1841,11 @@ class CameraChromeView(context: Context) : View(context) {
         when {
             target in TARGET_SELECTOR_BASE until TARGET_SELECTOR_BASE + 7 && controlsEnabled -> {
                 val nextParameter = target - TARGET_SELECTOR_BASE
-                if (nextParameter == selectedParameter) revealCurrentParameterName()
-                pulseHaptic()
-                onParameterSelected?.invoke(nextParameter)
+                if (!selectorLongPressTriggered) {
+                    if (nextParameter == selectedParameter) revealCurrentParameterName()
+                    pulseHaptic()
+                    onParameterSelected?.invoke(nextParameter)
+                }
             }
             target == TARGET_SELECTOR_BASE + 7 && controlsEnabled -> onRawPressed?.invoke()
             target == TARGET_AUTO && controlsEnabled && selectedValueEnabled &&
@@ -1846,6 +1875,30 @@ class CameraChromeView(context: Context) : View(context) {
             }
         }
         return true
+    }
+
+    private val selectorLongPressRunnable = Runnable {
+        val target = touchTarget
+        if (target !in TARGET_SELECTOR_BASE until TARGET_SELECTOR_BASE + 7 || !controlsEnabled) return@Runnable
+        val parameterIndex = target - TARGET_SELECTOR_BASE
+        selectorLongPressTriggered = true
+        selectorLongPressHaptic()
+        onParameterLongPressed?.invoke(parameterIndex)
+    }
+
+    private fun selectorLongPressHaptic() {
+        val motor = vibrator ?: return
+        if (!motor.hasVibrator()) return
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                motor.vibrate(VibrationEffect.createPredefined(VibrationEffect.EFFECT_CLICK))
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                motor.vibrate(VibrationEffect.createOneShot(18L, VibrationEffect.DEFAULT_AMPLITUDE))
+            } else {
+                @Suppress("DEPRECATION")
+                motor.vibrate(18L)
+            }
+        }
     }
 
     private val autoLongPressRunnable = Runnable {
@@ -2199,6 +2252,7 @@ class CameraChromeView(context: Context) : View(context) {
         centerLabelVisibilityAnimator?.cancel()
         repeatHandler.removeCallbacks(hideCenterLabelRunnable)
         repeatHandler.removeCallbacks(autoLongPressRunnable)
+        repeatHandler.removeCallbacks(selectorLongPressRunnable)
         statusPopupAnimator?.cancel()
         repeatHandler.removeCallbacks(hideStatusPopupRunnable)
         autoAccentAnimator?.cancel()
@@ -2520,6 +2574,8 @@ class CameraChromeView(context: Context) : View(context) {
         private const val LEVEL_HAPTIC_COOLDOWN_MS = 420L
         private const val LEVEL_HAPTIC_DURATION_MS = 18L
         private const val AUTO_LONG_PRESS_MS = 550L
+        private const val PARAMETER_LONG_PRESS_MS = 700L
+        private const val SELECTOR_TAP_SLOP = 24f
         private const val PREVIEW_FOCUS_LONG_PRESS_MS = 520L
         private const val HAPTIC_AMPLITUDE = 110
         private const val LEVEL_HAPTIC_AMPLITUDE = 150

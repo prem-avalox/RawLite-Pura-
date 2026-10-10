@@ -60,6 +60,18 @@ internal class TechnicalOverlayView(context: Context) : View(context) {
             invalidate()
         }
 
+    @Volatile
+    var activeOverlay: ActiveOverlay = ActiveOverlay.NONE
+        set(value) {
+            field = value
+            mode = when (value) {
+                ActiveOverlay.NONE -> TechnicalOverlayMode.OFF
+                ActiveOverlay.FOCUS_PEAKING -> TechnicalOverlayMode.PEAKING
+                ActiveOverlay.ZEBRAS -> TechnicalOverlayMode.ZEBRA
+                ActiveOverlay.FALSE_COLOR -> TechnicalOverlayMode.FALSE_COLOR
+            }
+        }
+
     var thirdsGridEnabled: Boolean = false
         set(value) {
             field = value

@@ -404,6 +404,9 @@ class MainActivity : Activity() {
     private var audioPeak = 0f
     private var analysisFrameCounter = 0
     private var technicalMode = TechnicalOverlayMode.OFF
+    private var activeOverlay = ActiveOverlay.NONE
+    private var activeOverlayAlwaysOn = false
+    private var activeOverlayMomentary = false
     private var toolAlwaysOn = false
     private var toolMomentaryActive = false
     private var thirdsGridEnabled = false
@@ -940,24 +943,39 @@ class MainActivity : Activity() {
                 if (pressed) beginPushAuto() else endPushAuto()
             }
             onToolPressed = {
-                val supported = technicalModeForParameter(this@MainActivity.selectedParameter) != null
-                if (supported) {
-                    toolAlwaysOn = !toolAlwaysOn
-                    toolMomentaryActive = false
-                    updateTechnicalOverlayState()
+                val tool = overlayForParameter(this@MainActivity.selectedParameter)
+                if (tool != null) {
+                    if (activeOverlay == tool && activeOverlayAlwaysOn) {
+                        setActiveOverlay(ActiveOverlay.NONE, alwaysOn = false, momentary = false)
+                    } else {
+                        setActiveOverlay(tool, alwaysOn = true, momentary = false)
+                    }
+                }
+            }
+            onParameterLongPressed = { index ->
+                CameraParameter.entries.getOrNull(index)?.let { param ->
+                    val tool = overlayForParameter(param)
+                    if (tool != null) {
+                        if (activeOverlay == tool && activeOverlayAlwaysOn) {
+                            setActiveOverlay(ActiveOverlay.NONE, alwaysOn = false, momentary = false)
+                        } else {
+                            setActiveOverlay(tool, alwaysOn = true, momentary = false)
+                        }
+                    }
                 }
             }
             onWheelStarted = {
-                if (!toolAlwaysOn) {
-                    toolMomentaryActive = true
-                    updateTechnicalOverlayState()
+                if (!activeOverlayAlwaysOn) {
+                    val tool = overlayForParameter(this@MainActivity.selectedParameter)
+                    if (tool != null) {
+                        setActiveOverlay(tool, alwaysOn = false, momentary = true)
+                    }
                 }
             }
             onWheelChanged = { progress -> applyWheelProgress(progress) }
             onWheelReleased = {
-                if (!toolAlwaysOn) {
-                    toolMomentaryActive = false
-                    updateTechnicalOverlayState()
+                if (activeOverlayMomentary) {
+                    setActiveOverlay(ActiveOverlay.NONE, alwaysOn = false, momentary = false)
                 }
                 scheduleControlApply(forceImmediate = true)
             }
@@ -1234,6 +1252,18 @@ class MainActivity : Activity() {
 
     private fun selectParameter(parameter: CameraParameter) {
         selectedParameter = parameter
+
+        // Conmutación Inteligente al tocar Focus:
+        // Si hay una herramienta activa (ej. False Color) y el usuario selecciona Focus,
+        // el visor conmuta inmediatamente a Focus Peaking (respetando si está en Always-ON o momentáneo).
+        if (parameter == CameraParameter.FOCUS && activeOverlay != ActiveOverlay.NONE &&
+            activeOverlay != ActiveOverlay.FOCUS_PEAKING
+        ) {
+            val wasAlwaysOn = activeOverlayAlwaysOn
+            val wasMomentary = activeOverlayMomentary
+            setActiveOverlay(ActiveOverlay.FOCUS_PEAKING, alwaysOn = wasAlwaysOn, momentary = wasMomentary)
+        }
+
         if (::cameraChrome.isInitialized) cameraChrome.selectedParameter = parameter.ordinal
         selectorButtons.forEach { (candidate, button) ->
             button.setTextColor(parameterTextColor(candidate))
@@ -4753,64 +4783,91 @@ class MainActivity : Activity() {
     }
 
     private fun updateTechnicalOverlayState() {
-        if (::cameraChrome.isInitialized) {
-            cameraChrome.toolAlwaysOn = toolAlwaysOn
-        }
-        val isEffectiveActive = toolAlwaysOn || toolMomentaryActive
-        val effectiveMode = if (isEffectiveActive) {
-            technicalModeForParameter(selectedParameter) ?: TechnicalOverlayMode.OFF
+        if (activeOverlayAlwaysOn || activeOverlayMomentary) {
+            applyActiveOverlay(activeOverlay)
         } else {
-            TechnicalOverlayMode.OFF
+            applyActiveOverlay(ActiveOverlay.NONE)
         }
-        applyTechnicalMode(effectiveMode)
     }
 
-    private fun technicalModeForParameter(parameter: CameraParameter): TechnicalOverlayMode? = when (parameter) {
-        CameraParameter.FOCUS -> TechnicalOverlayMode.PEAKING
-        CameraParameter.SHUTTER -> TechnicalOverlayMode.ZEBRA
-        CameraParameter.ISO -> TechnicalOverlayMode.FALSE_COLOR
-        CameraParameter.WHITE_BALANCE -> TechnicalOverlayMode.HISTOGRAM
+    private fun overlayForParameter(parameter: CameraParameter): ActiveOverlay? = when (parameter) {
+        CameraParameter.FOCUS -> ActiveOverlay.FOCUS_PEAKING
+        CameraParameter.SHUTTER -> ActiveOverlay.ZEBRAS
+        CameraParameter.ISO -> ActiveOverlay.FALSE_COLOR
         else -> null
     }
 
-    private fun applyTechnicalMode(mode: TechnicalOverlayMode) {
-        technicalMode = mode
+    private fun parameterForOverlay(overlay: ActiveOverlay): CameraParameter? = when (overlay) {
+        ActiveOverlay.FOCUS_PEAKING -> CameraParameter.FOCUS
+        ActiveOverlay.ZEBRAS -> CameraParameter.SHUTTER
+        ActiveOverlay.FALSE_COLOR -> CameraParameter.ISO
+        ActiveOverlay.NONE -> null
+    }
+
+    private fun applyActiveOverlay(overlay: ActiveOverlay) {
+        technicalMode = when (overlay) {
+            ActiveOverlay.NONE -> TechnicalOverlayMode.OFF
+            ActiveOverlay.FOCUS_PEAKING -> TechnicalOverlayMode.PEAKING
+            ActiveOverlay.ZEBRAS -> TechnicalOverlayMode.ZEBRA
+            ActiveOverlay.FALSE_COLOR -> TechnicalOverlayMode.FALSE_COLOR
+        }
         if (::technicalOverlay.isInitialized) {
-            technicalOverlay.mode = if (mode == TechnicalOverlayMode.HISTOGRAM) {
-                TechnicalOverlayMode.HISTOGRAM
-            } else {
-                TechnicalOverlayMode.OFF
-            }
-            if (mode != TechnicalOverlayMode.HISTOGRAM) {
+            technicalOverlay.activeOverlay = overlay
+            if (overlay != ActiveOverlay.NONE) {
                 technicalOverlay.clearRawHistogram()
             }
         }
         if (::preview.isInitialized) {
-            when (mode) {
-                TechnicalOverlayMode.PEAKING,
-                TechnicalOverlayMode.ZEBRA,
-                TechnicalOverlayMode.FALSE_COLOR -> {
-                    TechnicalShaderManager.apply(preview, mode)
-                }
-                else -> {
-                    TechnicalShaderManager.clear(preview)
-                }
+            if (overlay == ActiveOverlay.NONE) {
+                TechnicalShaderManager.clear(preview)
+            } else {
+                TechnicalShaderManager.apply(preview, overlay)
             }
         }
+        if (::cameraChrome.isInitialized) {
+            val selectedParamOverlay = overlayForParameter(selectedParameter)
+            cameraChrome.toolAlwaysOn = activeOverlayAlwaysOn && selectedParamOverlay == overlay
+            cameraChrome.alwaysOnParameter = if (activeOverlayAlwaysOn && overlay != ActiveOverlay.NONE) {
+                parameterForOverlay(overlay)
+            } else {
+                null
+            }
+            cameraChrome.invalidate()
+        }
         if (::technicalButton.isInitialized) {
-            technicalButton.text = technicalMode.label
+            technicalButton.text = when (overlay) {
+                ActiveOverlay.NONE -> "TOOLS OFF"
+                ActiveOverlay.FOCUS_PEAKING -> "PEAK"
+                ActiveOverlay.ZEBRAS -> "ZEBRA"
+                ActiveOverlay.FALSE_COLOR -> "FALSE"
+            }
             technicalButton.setTextColor(
-                if (technicalMode == TechnicalOverlayMode.OFF) MUTED else 0xFF7CCEC6.toInt()
+                if (overlay == ActiveOverlay.NONE) MUTED else 0xFF7CCEC6.toInt()
             )
         }
     }
 
+    private fun setActiveOverlay(
+        overlay: ActiveOverlay,
+        alwaysOn: Boolean,
+        momentary: Boolean
+    ) {
+        activeOverlay = overlay
+        activeOverlayAlwaysOn = alwaysOn && overlay != ActiveOverlay.NONE
+        activeOverlayMomentary = momentary && overlay != ActiveOverlay.NONE
+        toolAlwaysOn = activeOverlayAlwaysOn
+        toolMomentaryActive = activeOverlayMomentary
+        applyActiveOverlay(activeOverlay)
+    }
+
     private fun cycleTechnicalMode() {
-        val modes = TechnicalOverlayMode.entries
-        val nextMode = modes[(technicalMode.ordinal + 1) % modes.size]
-        toolAlwaysOn = nextMode != TechnicalOverlayMode.OFF
-        toolMomentaryActive = false
-        updateTechnicalOverlayState()
+        val nextOverlay = when (activeOverlay) {
+            ActiveOverlay.NONE -> ActiveOverlay.FOCUS_PEAKING
+            ActiveOverlay.FOCUS_PEAKING -> ActiveOverlay.ZEBRAS
+            ActiveOverlay.ZEBRAS -> ActiveOverlay.FALSE_COLOR
+            ActiveOverlay.FALSE_COLOR -> ActiveOverlay.NONE
+        }
+        setActiveOverlay(nextOverlay, alwaysOn = nextOverlay != ActiveOverlay.NONE, momentary = false)
     }
 
     private fun toggleMicrophone() {
