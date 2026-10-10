@@ -18,21 +18,22 @@ internal object TechnicalShaderManager {
 
         half4 main(float2 fragCoord) {
             half4 src = image.eval(fragCoord);
+            float step = 1.5;
 
-            half tl = luma(fragCoord + float2(-1.0, -1.0));
-            half tc = luma(fragCoord + float2( 0.0, -1.0));
-            half tr = luma(fragCoord + float2( 1.0, -1.0));
-            half ml = luma(fragCoord + float2(-1.0,  0.0));
-            half mr = luma(fragCoord + float2( 1.0,  0.0));
-            half bl = luma(fragCoord + float2(-1.0,  1.0));
-            half bc = luma(fragCoord + float2( 0.0,  1.0));
-            half br = luma(fragCoord + float2( 1.0,  1.0));
+            half tl = luma(fragCoord + float2(-step, -step));
+            half tc = luma(fragCoord + float2(  0.0, -step));
+            half tr = luma(fragCoord + float2( step, -step));
+            half ml = luma(fragCoord + float2(-step,   0.0));
+            half mr = luma(fragCoord + float2( step,   0.0));
+            half bl = luma(fragCoord + float2(-step,  step));
+            half bc = luma(fragCoord + float2(  0.0,  step));
+            half br = luma(fragCoord + float2( step,  step));
 
             half gx = -tl + tr - 2.0 * ml + 2.0 * mr - bl + br;
             half gy = -tl - 2.0 * tc - tr + bl + 2.0 * bc + br;
             half edge = sqrt(gx * gx + gy * gy);
 
-            if (edge > 0.18) {
+            if (edge > 0.95) {
                 return half4(0.0, 0.94, 0.82, 1.0);
             }
             return src;
