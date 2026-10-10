@@ -54,6 +54,7 @@ import android.util.Range
 import android.util.Rational
 import android.util.Size
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.OrientationEventListener
 import android.view.Surface
 import android.view.TextureView
@@ -587,6 +588,29 @@ class MainActivity : Activity() {
         updateStabilizerGuide()
     }
 
+    fun toggleRecording() {
+        if (recordButton.isEnabled) {
+            if (recording || switchingSession) stopRecording() else startRecording()
+        }
+    }
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
+            if (event.repeatCount == 0) {
+                toggleRecording()
+            }
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
+            return true
+        }
+        return super.onKeyUp(keyCode, event)
+    }
+
     private fun installRotationRenderBarrier(expectedOrientation: Int) {
         if (!::chromeLayer.isInitialized || !::preview.isInitialized) return
         removeRotationRenderBarrier()
@@ -940,9 +964,7 @@ class MainActivity : Activity() {
             onStep = { direction -> stepSelectedParameter(direction) }
             onParameterStep = { direction -> stepParameterSelection(direction) }
             onRecordPressed = {
-                if (recordButton.isEnabled) {
-                    if (recording || switchingSession) stopRecording() else startRecording()
-                }
+                toggleRecording()
             }
             onReviewPressed = { openReview() }
             onSettingsPressed = { showSettingsDialog() }

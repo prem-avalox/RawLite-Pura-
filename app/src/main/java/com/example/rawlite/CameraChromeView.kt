@@ -23,6 +23,7 @@ import android.view.animation.PathInterpolator
 import android.view.View
 import com.example.rawlite.core.model.CameraParameter
 import kotlin.math.abs
+import kotlin.math.atan2
 import kotlin.math.floor
 import kotlin.math.hypot
 import kotlin.math.max
@@ -281,6 +282,7 @@ class CameraChromeView(context: Context) : View(context) {
     private var repeatedParameterAxis = false
     private var repeatedStartedAt = 0L
     private var dPadAxisLocked = false
+    private var dPadStrictYAxisLocked = false
     private var dPadLockedParameterAxis: Boolean? = null
     private val dPadTouchOrigin = PointF()
     private var dPadLastAxisCoordinate = 0f
@@ -1623,7 +1625,22 @@ class CameraChromeView(context: Context) : View(context) {
             onPushAutoChanged?.invoke(true)
             return true
         }
-        if (insideCircle(point, recordCenter(layoutLandscape), 108f)) {
+        val precision = precisionRect(layoutLandscape)
+        val gutterBuffer = max(42f, dpToCanonical(14f))
+        if (layoutLandscape) {
+            val dPadBottom = precision.bottom
+            val gutterRect = RectF(
+                precision.left - gutterBuffer / 2f,
+                dPadBottom,
+                precision.right + gutterBuffer / 2f,
+                dPadBottom + gutterBuffer
+            )
+            if (gutterRect.contains(point.x, point.y)) {
+                touchTarget = TARGET_NONE
+                return true
+            }
+        }
+        if (insideRecordButton(point, layoutLandscape)) {
             touchTarget = TARGET_RECORD
             animateRecordPress(true)
             return true
@@ -1636,11 +1653,11 @@ class CameraChromeView(context: Context) : View(context) {
             invalidate()
             return true
         }
-        val precision = precisionRect(layoutLandscape)
         if (precision.contains(point.x, point.y)) {
             touchTarget = TARGET_PRECISION
             dPadTouchOrigin.set(point.x, point.y)
             dPadAxisLocked = false
+            dPadStrictYAxisLocked = false
             dPadLockedParameterAxis = null
             dPadDragAccumulator = 0f
             parent?.requestDisallowInterceptTouchEvent(true)
@@ -1677,10 +1694,24 @@ class CameraChromeView(context: Context) : View(context) {
 
     private fun handleMove(point: PointF): Boolean {
         if (touchTarget == TARGET_PRECISION) {
+            val dx = point.x - dPadTouchOrigin.x
+            val dy = point.y - dPadTouchOrigin.y
+            val dragDist = hypot(dx, dy)
+            val threshold8dp = max(24f, dpToCanonical(8f))
+
+            if (!dPadStrictYAxisLocked && dragDist >= threshold8dp) {
+                val angleDeg = Math.toDegrees(atan2(abs(dx).toDouble(), abs(dy).toDouble())).toFloat()
+                if (angleDeg <= 30f) {
+                    dPadStrictYAxisLocked = true
+                    dPadAxisLocked = true
+                    val screenDirection = if (dy < 0f) DPAD_UP else DPAD_DOWN
+                    val yAction = dPadAction(screenDirection)
+                    lockDPadAxis(yAction, point, precisionRect(layoutLandscape))
+                }
+            }
+
             if (!dPadAxisLocked) {
-                val dx = point.x - dPadTouchOrigin.x
-                val dy = point.y - dPadTouchOrigin.y
-                if (hypot(dx, dy) >= DPAD_AXIS_LOCK_THRESHOLD) {
+                if (dragDist >= DPAD_AXIS_LOCK_THRESHOLD) {
                     val screenDirection = directionForDelta(dx, dy)
                     lockDPadAxis(dPadAction(screenDirection), point, precisionRect(layoutLandscape))
                 }
@@ -1736,6 +1767,7 @@ class CameraChromeView(context: Context) : View(context) {
         if (target == TARGET_REVIEW) invalidate()
         if (target == TARGET_PRECISION) {
             dPadAxisLocked = false
+            dPadStrictYAxisLocked = false
             dPadLockedParameterAxis = null
             dPadDragAccumulator = 0f
             parent?.requestDisallowInterceptTouchEvent(false)
@@ -1789,7 +1821,7 @@ class CameraChromeView(context: Context) : View(context) {
             target == TARGET_SELECTOR_BASE + 7 && controlsEnabled -> onRawPressed?.invoke()
             target == TARGET_AUTO && controlsEnabled && selectedValueEnabled &&
                 !autoLongPressTriggered -> onAutoPressed?.invoke()
-            target == TARGET_RECORD && recordEnabled && insideCircle(point, recordCenter(layoutLandscape), 115f) -> {
+            target == TARGET_RECORD && recordEnabled && insideRecordButton(point, layoutLandscape) -> {
                 onRecordPressed?.invoke()
             }
             target == TARGET_REVIEW && controlsEnabled &&
@@ -1876,7 +1908,7 @@ class CameraChromeView(context: Context) : View(context) {
         dPadLastMoveUptime = now
 
         if (abs(delta) > 0.25f) {
-            val horizontal = dPadAxisIsHorizontal(parameterAxis)
+            val horizontal = if (dPadStrictYAxisLocked) false else dPadAxisIsHorizontal(parameterAxis)
             val screenDirection = when {
                 horizontal && delta < 0f -> DPAD_LEFT
                 horizontal -> DPAD_RIGHT
@@ -1909,7 +1941,7 @@ class CameraChromeView(context: Context) : View(context) {
             stopRepeating()
             return
         }
-        val horizontal = dPadAxisIsHorizontal(parameterAxis)
+        val horizontal = if (dPadStrictYAxisLocked) false else dPadAxisIsHorizontal(parameterAxis)
         val screenDirection = when {
             horizontal && component < 0f -> DPAD_LEFT
             horizontal -> DPAD_RIGHT
@@ -2113,14 +2145,17 @@ class CameraChromeView(context: Context) : View(context) {
 
     private fun dPadAction(point: PointF, rect: RectF): DPadAction? {
         if (!rect.contains(point.x, point.y)) return null
-        val dx = point.x - rect.centerX()
+        val dx = if (dPadStrictYAxisLocked) 0f else point.x - rect.centerX()
         val dy = point.y - rect.centerY()
-        if (abs(dx) > DPAD_ARM_HALF_WIDTH && abs(dy) > DPAD_ARM_HALF_WIDTH) return null
+        if (!dPadStrictYAxisLocked && abs(dx) > DPAD_ARM_HALF_WIDTH && abs(dy) > DPAD_ARM_HALF_WIDTH) return null
         if (hypot(dx, dy) < DPAD_CENTER_DEAD_ZONE) return null
         return dPadAction(directionForDelta(dx, dy))
     }
 
     private fun directionForDelta(dx: Float, dy: Float): Int {
+        if (dPadStrictYAxisLocked) {
+            return if (dy < 0f) DPAD_UP else DPAD_DOWN
+        }
         val horizontal = abs(dx) > abs(dy)
         return when {
             horizontal && dx < 0f -> DPAD_LEFT
@@ -2131,15 +2166,24 @@ class CameraChromeView(context: Context) : View(context) {
     }
 
     private fun dPadAction(screenDirection: Int): DPadAction {
-        val horizontal = screenDirection == DPAD_LEFT || screenDirection == DPAD_RIGHT
-        val parameterAxis = if (layoutLandscape) horizontal else !horizontal
+        val effectiveDirection = if (dPadStrictYAxisLocked && (screenDirection == DPAD_LEFT || screenDirection == DPAD_RIGHT)) {
+            DPAD_UP
+        } else {
+            screenDirection
+        }
+        val horizontal = effectiveDirection == DPAD_LEFT || effectiveDirection == DPAD_RIGHT
+        val parameterAxis = if (dPadStrictYAxisLocked) {
+            if (layoutLandscape) false else true
+        } else {
+            if (layoutLandscape) horizontal else !horizontal
+        }
         val logicalDirection = when {
-            !layoutLandscape && horizontal -> if (screenDirection == DPAD_LEFT) 1 else -1
-            screenDirection == DPAD_LEFT || screenDirection == DPAD_UP -> -1
+            !layoutLandscape && horizontal -> if (effectiveDirection == DPAD_LEFT) 1 else -1
+            effectiveDirection == DPAD_LEFT || effectiveDirection == DPAD_UP -> -1
             else -> 1
         }
         val rotationSteps = ((contentRotation / 90f).roundToInt() % 4 + 4) % 4
-        val accentDirection = ((screenDirection - 1 - rotationSteps + 4) % 4) + 1
+        val accentDirection = ((effectiveDirection - 1 - rotationSteps + 4) % 4) + 1
         return DPadAction(accentDirection, logicalDirection, parameterAxis)
     }
 
@@ -2324,6 +2368,21 @@ class CameraChromeView(context: Context) : View(context) {
 
     private fun insideCircle(point: PointF, center: PointF, radius: Float): Boolean =
         hypot(point.x - center.x, point.y - center.y) <= radius
+
+    private fun dpToCanonical(dp: Float): Float =
+        if (contentScale > 0f) (dp * resources.displayMetrics.density) / contentScale else dp * 3f
+
+    private fun insideRecordButton(point: PointF, landscape: Boolean): Boolean {
+        val center = recordCenter(landscape)
+        val gutterBuffer = max(42f, dpToCanonical(14f))
+        if (landscape) {
+            val dPadBottom = precisionRect(landscape).bottom
+            if (point.y < dPadBottom + gutterBuffer) {
+                return false
+            }
+        }
+        return insideCircle(point, center, 108f)
+    }
 
     private fun toCanonical(x: Float, y: Float): PointF {
         val canonicalX = (x - contentOffsetX) / contentScale
