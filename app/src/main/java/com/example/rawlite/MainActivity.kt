@@ -403,6 +403,8 @@ class MainActivity : Activity() {
     private var audioPeak = 0f
     private var analysisFrameCounter = 0
     private var technicalMode = TechnicalOverlayMode.OFF
+    private var toolAlwaysOn = false
+    private var toolMomentaryActive = false
     private var thirdsGridEnabled = false
     private var leftHandedMode = false
     private var lastStatusUpdateMs = 0L
@@ -791,7 +793,19 @@ class MainActivity : Activity() {
         }
         wheelView = ParameterWheelView(this).apply {
             onProgressChanged = { progress -> applyWheelProgress(progress) }
-            onTouchRelease = { scheduleControlApply(forceImmediate = true) }
+            onTouchStart = {
+                if (!toolAlwaysOn) {
+                    toolMomentaryActive = true
+                    updateTechnicalOverlayState()
+                }
+            }
+            onTouchRelease = {
+                if (!toolAlwaysOn) {
+                    toolMomentaryActive = false
+                    updateTechnicalOverlayState()
+                }
+                scheduleControlApply(forceImmediate = true)
+            }
         }
         wheelPanel.addView(wheelView, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
         wheelAutoButton = selectorText("AUTO").apply {
@@ -901,8 +915,28 @@ class MainActivity : Activity() {
             onPushAutoChanged = { pressed ->
                 if (pressed) beginPushAuto() else endPushAuto()
             }
+            onToolPressed = {
+                val supported = technicalModeForParameter(this@MainActivity.selectedParameter) != null
+                if (supported) {
+                    toolAlwaysOn = !toolAlwaysOn
+                    toolMomentaryActive = false
+                    updateTechnicalOverlayState()
+                }
+            }
+            onWheelStarted = {
+                if (!toolAlwaysOn) {
+                    toolMomentaryActive = true
+                    updateTechnicalOverlayState()
+                }
+            }
             onWheelChanged = { progress -> applyWheelProgress(progress) }
-            onWheelReleased = { scheduleControlApply(forceImmediate = true) }
+            onWheelReleased = {
+                if (!toolAlwaysOn) {
+                    toolMomentaryActive = false
+                    updateTechnicalOverlayState()
+                }
+                scheduleControlApply(forceImmediate = true)
+            }
             onStep = { direction -> stepSelectedParameter(direction) }
             onParameterStep = { direction -> stepParameterSelection(direction) }
             onRecordPressed = {
@@ -1185,6 +1219,7 @@ class MainActivity : Activity() {
         scheduleUserPreferencesSave()
         syncWheelToSelectedParameter()
         updateChromeValues()
+        updateTechnicalOverlayState()
     }
 
     private fun parameterTextColor(parameter: CameraParameter): Int = when {
@@ -2361,6 +2396,7 @@ class MainActivity : Activity() {
                             !finalizingOutput && !finalizingAudio
                         updateControlModes()
                         updateRecordingChrome()
+                        updateTechnicalOverlayState()
                         preview.post {
                             configurePreviewTransform(preview.width, preview.height)
                         }
@@ -3922,6 +3958,9 @@ class MainActivity : Activity() {
         activeRepeatingBuilder = null
         if (!preservePendingOpen) pendingCameraTexture = null
         switchingSession = false
+        if (::preview.isInitialized) {
+            TechnicalShaderManager.clear(preview)
+        }
         recording = false
         captureStopPending = false
         closeCameraAfterSession = true
@@ -4691,19 +4730,65 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun updateTechnicalOverlayState() {
+        if (::cameraChrome.isInitialized) {
+            cameraChrome.toolAlwaysOn = toolAlwaysOn
+        }
+        val isEffectiveActive = toolAlwaysOn || toolMomentaryActive
+        val effectiveMode = if (isEffectiveActive) {
+            technicalModeForParameter(selectedParameter) ?: TechnicalOverlayMode.OFF
+        } else {
+            TechnicalOverlayMode.OFF
+        }
+        applyTechnicalMode(effectiveMode)
+    }
+
+    private fun technicalModeForParameter(parameter: CameraParameter): TechnicalOverlayMode? = when (parameter) {
+        CameraParameter.FOCUS -> TechnicalOverlayMode.PEAKING
+        CameraParameter.SHUTTER -> TechnicalOverlayMode.ZEBRA
+        CameraParameter.ISO -> TechnicalOverlayMode.FALSE_COLOR
+        CameraParameter.WHITE_BALANCE -> TechnicalOverlayMode.HISTOGRAM
+        else -> null
+    }
+
+    private fun applyTechnicalMode(mode: TechnicalOverlayMode) {
+        technicalMode = mode
+        if (::technicalOverlay.isInitialized) {
+            technicalOverlay.mode = if (mode == TechnicalOverlayMode.HISTOGRAM) {
+                TechnicalOverlayMode.HISTOGRAM
+            } else {
+                TechnicalOverlayMode.OFF
+            }
+            if (mode != TechnicalOverlayMode.HISTOGRAM) {
+                technicalOverlay.clearRawHistogram()
+            }
+        }
+        if (::preview.isInitialized) {
+            when (mode) {
+                TechnicalOverlayMode.PEAKING,
+                TechnicalOverlayMode.ZEBRA,
+                TechnicalOverlayMode.FALSE_COLOR -> {
+                    TechnicalShaderManager.apply(preview, mode)
+                }
+                else -> {
+                    TechnicalShaderManager.clear(preview)
+                }
+            }
+        }
+        if (::technicalButton.isInitialized) {
+            technicalButton.text = technicalMode.label
+            technicalButton.setTextColor(
+                if (technicalMode == TechnicalOverlayMode.OFF) MUTED else 0xFF7CCEC6.toInt()
+            )
+        }
+    }
+
     private fun cycleTechnicalMode() {
-        if (recording || switchingSession || finalizingOutput ||
-            finalizingAudio || pure10MuxInProgress()
-        ) return
         val modes = TechnicalOverlayMode.entries
-        technicalMode = modes[(technicalMode.ordinal + 1) % modes.size]
-        technicalOverlay.mode = technicalMode
-        technicalOverlay.clearRawHistogram()
-        technicalButton.text = technicalMode.label
-        technicalButton.setTextColor(
-            if (technicalMode == TechnicalOverlayMode.OFF) MUTED else 0xFF7CCEC6.toInt()
-        )
-        reopenSelectedCamera()
+        val nextMode = modes[(technicalMode.ordinal + 1) % modes.size]
+        toolAlwaysOn = nextMode != TechnicalOverlayMode.OFF
+        toolMomentaryActive = false
+        updateTechnicalOverlayState()
     }
 
     private fun toggleMicrophone() {

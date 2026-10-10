@@ -21,6 +21,7 @@ import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.animation.PathInterpolator
 import android.view.View
+import com.example.rawlite.core.model.CameraParameter
 import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.math.hypot
@@ -36,7 +37,9 @@ class CameraChromeView(context: Context) : View(context) {
     var onPreviewFocus: ((Float, Float, Boolean) -> Unit)? = null
     var onPushAutoChanged: ((Boolean) -> Unit)? = null
     var onWheelChanged: ((Int) -> Unit)? = null
+    var onWheelStarted: (() -> Unit)? = null
     var onWheelReleased: (() -> Unit)? = null
+    var onToolPressed: (() -> Unit)? = null
     var onStep: ((Int) -> Unit)? = null
     var onParameterStep: ((Int) -> Unit)? = null
     var onRecordPressed: (() -> Unit)? = null
@@ -97,6 +100,12 @@ class CameraChromeView(context: Context) : View(context) {
             invalidate()
         }
     var autoSupported: Boolean = true
+        set(value) {
+            if (field == value) return
+            field = value
+            invalidate()
+        }
+    var toolAlwaysOn: Boolean = false
         set(value) {
             if (field == value) return
             field = value
@@ -718,6 +727,7 @@ class CameraChromeView(context: Context) : View(context) {
         if (chromeReveal > 0.001f) {
             drawRuler(canvas, landscape = true)
             drawAuto(canvas, autoRect(landscape = true))
+            drawTool(canvas, toolRect(landscape = true))
         }
         drawParameterName(canvas, landscape = true)
         drawStabilizerGuide(canvas, landscape = true)
@@ -739,6 +749,7 @@ class CameraChromeView(context: Context) : View(context) {
         if (chromeReveal > 0.001f) {
             drawRuler(canvas, landscape = false)
             drawAuto(canvas, autoRect(landscape = false))
+            drawTool(canvas, toolRect(landscape = false))
         }
         drawParameterName(canvas, landscape = false)
         drawStabilizerGuide(canvas, landscape = false)
@@ -985,6 +996,26 @@ class CameraChromeView(context: Context) : View(context) {
         val alpha = ((if (controlsEnabled) 255 else 158) * chromeReveal / 255f).coerceIn(0f, 1f)
         withContentRotation(canvas, rect.centerX(), rect.centerY()) {
             drawCenteredText(canvas, "AUTO", rect.centerX(), rect.centerY(), 36f, scaledAlpha(color, alpha))
+        }
+        paint.alpha = 255
+    }
+
+    private fun toolLabelForParameter(paramIndex: Int): String? = when (CameraParameter.entries.getOrNull(paramIndex)) {
+        CameraParameter.FOCUS -> "PEAK"
+        CameraParameter.SHUTTER -> "ZEBRA"
+        CameraParameter.ISO -> "FALSE"
+        CameraParameter.WHITE_BALANCE -> "HIST"
+        else -> null
+    }
+
+    private fun drawTool(canvas: Canvas, rect: RectF) {
+        val label = toolLabelForParameter(selectedParameter) ?: return
+        val baseColor = if (toolAlwaysOn) ACCENT else 0x88FFFFFF.toInt()
+        val alpha = ((if (controlsEnabled) 255 else 158) * chromeReveal / 255f).coerceIn(0f, 1f)
+        val color = scaledAlpha(baseColor, alpha)
+        paint.color = color
+        withContentRotation(canvas, rect.centerX(), rect.centerY()) {
+            drawCenteredText(canvas, label, rect.centerX(), rect.centerY(), 34f, paint)
         }
         paint.alpha = 255
     }
@@ -1580,6 +1611,12 @@ class CameraChromeView(context: Context) : View(context) {
             repeatHandler.postDelayed(autoLongPressRunnable, AUTO_LONG_PRESS_MS)
             return true
         }
+        if (chromeToolsVisible && selectedValueEnabled &&
+            toolRect(layoutLandscape).contains(point.x, point.y)
+        ) {
+            touchTarget = TARGET_TOOL
+            return true
+        }
         if (insideCircle(point, pushAutoCenter(layoutLandscape), 108f) && pushAutoEnabled) {
             touchTarget = TARGET_PUSH_AUTO
             pushAutoActive = true
@@ -1622,6 +1659,7 @@ class CameraChromeView(context: Context) : View(context) {
             wheelProgressOrigin = wheelProgress
             lastWheelHapticValue = valueFormatter(wheelProgress)
             parent?.requestDisallowInterceptTouchEvent(true)
+            onWheelStarted?.invoke()
             return true
         }
         if (!recording && !saving && controlsEnabled &&
@@ -1736,6 +1774,11 @@ class CameraChromeView(context: Context) : View(context) {
             return true
         }
         if (cancelled) return true
+        if (target == TARGET_TOOL && controlsEnabled && selectedValueEnabled) {
+            pulseHaptic()
+            onToolPressed?.invoke()
+            return true
+        }
         when {
             target in TARGET_SELECTOR_BASE until TARGET_SELECTOR_BASE + 7 && controlsEnabled -> {
                 val nextParameter = target - TARGET_SELECTOR_BASE
@@ -2151,6 +2194,14 @@ class CameraChromeView(context: Context) : View(context) {
         }
     }
 
+    private fun toolRect(landscape: Boolean): RectF {
+        return if (landscape) {
+            RectF(WHEEL_START, 0f, WHEEL_END, SELECTOR_THICKNESS)
+        } else {
+            RectF(PORTRAIT_WIDTH - SELECTOR_THICKNESS, WHEEL_START, PORTRAIT_WIDTH, WHEEL_END)
+        }
+    }
+
     private fun precisionRect(landscape: Boolean): RectF {
         val rect = if (landscape) {
             RectF(2188f, 71.5f, 2498f, 381.5f)
@@ -2300,6 +2351,13 @@ class CameraChromeView(context: Context) : View(context) {
         canvas.drawText(text, cx, centeredBaseline(cy, size), paint)
     }
 
+    private fun drawCenteredText(canvas: Canvas, text: String, cx: Float, cy: Float, size: Float, paint: Paint) {
+        paint.typeface = openSans
+        paint.textAlign = Paint.Align.CENTER
+        paint.textSize = size
+        canvas.drawText(text, cx, centeredBaseline(cy, size), paint)
+    }
+
     private inline fun withContentRotation(canvas: Canvas, cx: Float, cy: Float, draw: () -> Unit) {
         canvas.save()
         if (leftHanded) canvas.scale(-1f, 1f, cx, cy)
@@ -2428,16 +2486,17 @@ class CameraChromeView(context: Context) : View(context) {
         private const val TARGET_NONE = 0
         private const val TARGET_SELECTOR_BASE = 100
         private const val TARGET_AUTO = 200
-        private const val TARGET_RECORD = 201
-        private const val TARGET_REVIEW = 202
-        private const val TARGET_PRECISION = 203
-        private const val TARGET_WHEEL = 204
-        private const val TARGET_LOCK_BUTTON = 205
-        private const val TARGET_SETTINGS = 206
-        private const val TARGET_PUSH_AUTO = 207
-        private const val TARGET_VISIBILITY = 208
-        private const val TARGET_ROTATION = 209
-        private const val TARGET_PREVIEW_FOCUS = 210
+        private const val TARGET_TOOL = 201
+        private const val TARGET_RECORD = 202
+        private const val TARGET_REVIEW = 203
+        private const val TARGET_PRECISION = 204
+        private const val TARGET_WHEEL = 205
+        private const val TARGET_LOCK_BUTTON = 206
+        private const val TARGET_SETTINGS = 207
+        private const val TARGET_PUSH_AUTO = 208
+        private const val TARGET_VISIBILITY = 209
+        private const val TARGET_ROTATION = 210
+        private const val TARGET_PREVIEW_FOCUS = 211
         private const val TARGET_LOCK_ITEM_BASE = 300
 
         private const val ACCENT = RawLiteDesign.ACCENT

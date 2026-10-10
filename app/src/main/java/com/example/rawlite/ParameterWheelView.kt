@@ -26,6 +26,7 @@ class ParameterWheelView(context: Context) : View(context) {
         }
 
     var onProgressChanged: ((Int) -> Unit)? = null
+    var onTouchStart: (() -> Unit)? = null
     var onTouchRelease: (() -> Unit)? = null
 
     var valueInterval = 100
@@ -142,6 +143,7 @@ class ParameterWheelView(context: Context) : View(context) {
                 parent?.requestDisallowInterceptTouchEvent(true)
                 touchOrigin = coordinate
                 progressOrigin = progress
+                onTouchStart?.invoke()
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
