@@ -88,4 +88,130 @@ class CaptureMathTest {
         assertEquals(80, CaptureMath.audioTargetMs(0, 125, 1_000, 45))
         assertEquals(1_000, CaptureMath.audioTargetMs(990, 125, 1_000, 45))
     }
+
+    @Test
+    fun calculateCropRegion_16x9_on_4x3_sensor_cropsVerticallyWithEvenAlignment() {
+        val result = CaptureMath.calculateCropRegion(
+            activeWidth = 4080,
+            activeHeight = 3072,
+            targetWidth = 1920,
+            targetHeight = 1080
+        )
+        assertEquals(0, result.left)
+        assertEquals(388, result.top)
+        assertEquals(4080, result.width)
+        assertEquals(2294, result.height)
+        assertEquals(4080, result.right)
+        assertEquals(2682, result.bottom)
+        assertEquals(0, result.left % 2)
+        assertEquals(0, result.top % 2)
+        assertEquals(0, result.width % 2)
+        assertEquals(0, result.height % 2)
+    }
+
+    @Test
+    fun calculateCropRegion_4x3_on_4x3_sensor_cropsHorizontallyWithEvenAlignment() {
+        val result = CaptureMath.calculateCropRegion(
+            activeWidth = 4080,
+            activeHeight = 3072,
+            targetWidth = 2032,
+            targetHeight = 1536
+        )
+        assertEquals(8, result.left)
+        assertEquals(0, result.top)
+        assertEquals(4064, result.width)
+        assertEquals(3072, result.height)
+        assertEquals(4072, result.right)
+        assertEquals(3072, result.bottom)
+        assertEquals(0, result.left % 2)
+        assertEquals(0, result.top % 2)
+        assertEquals(0, result.width % 2)
+        assertEquals(0, result.height % 2)
+    }
+
+    @Test
+    fun calculateCropRegion_full_sensor_preservesActiveDimensions() {
+        val result = CaptureMath.calculateCropRegion(
+            activeWidth = 4080,
+            activeHeight = 3072,
+            targetWidth = 4080,
+            targetHeight = 3072
+        )
+        assertEquals(0, result.left)
+        assertEquals(0, result.top)
+        assertEquals(4080, result.width)
+        assertEquals(3072, result.height)
+    }
+
+    @Test
+    fun calculateCropRegion_active_offset_shiftsCropRegion() {
+        val result = CaptureMath.calculateCropRegion(
+            activeWidth = 4080,
+            activeHeight = 3072,
+            targetWidth = 1920,
+            targetHeight = 1080,
+            activeLeft = 16,
+            activeTop = 16
+        )
+        assertEquals(16, result.left)
+        assertEquals(404, result.top)
+        assertEquals(4080, result.width)
+        assertEquals(2294, result.height)
+    }
+
+    @Test
+    fun fitWithin_landscape_20x9_with_16x9_createsHorizontalPillarbox() {
+        val result = CaptureMath.fitWithin(
+            containerWidth = 2400f,
+            containerHeight = 1080f,
+            contentWidth = 1920f,
+            contentHeight = 1080f
+        )
+        assertEquals(1.0f, result.scale, 0.001f)
+        assertEquals(240f, result.left, 0.001f)
+        assertEquals(0f, result.top, 0.001f)
+        assertEquals(1920f, result.width, 0.001f)
+        assertEquals(1080f, result.height, 0.001f)
+        assertEquals(2160f, result.right, 0.001f)
+        assertEquals(1080f, result.bottom, 0.001f)
+    }
+
+    @Test
+    fun fitWithin_landscape_20x9_with_4x3_createsHorizontalPillarbox() {
+        val result = CaptureMath.fitWithin(
+            containerWidth = 2400f,
+            containerHeight = 1080f,
+            contentWidth = 1280f,
+            contentHeight = 960f
+        )
+        assertEquals(1.125f, result.scale, 0.001f)
+        assertEquals(480f, result.left, 0.001f)
+        assertEquals(0f, result.top, 0.001f)
+        assertEquals(1440f, result.width, 0.001f)
+        assertEquals(1080f, result.height, 0.001f)
+    }
+
+    @Test
+    fun fitWithin_portrait_20x9_with_16x9_createsVerticalLetterbox() {
+        val result = CaptureMath.fitWithin(
+            containerWidth = 1080f,
+            containerHeight = 2400f,
+            contentWidth = 1080f,
+            contentHeight = 1920f
+        )
+        assertEquals(1.0f, result.scale, 0.001f)
+        assertEquals(0f, result.left, 0.001f)
+        assertEquals(240f, result.top, 0.001f)
+        assertEquals(1080f, result.width, 0.001f)
+        assertEquals(1920f, result.height, 0.001f)
+    }
+
+    @Test
+    fun fitWithin_handlesZeroOrNegativeDimensions() {
+        val result = CaptureMath.fitWithin(0f, 0f, 1920f, 1080f)
+        assertEquals(0f, result.left, 0.001f)
+        assertEquals(0f, result.top, 0.001f)
+        assertEquals(0f, result.width, 0.001f)
+        assertEquals(0f, result.height, 0.001f)
+    }
 }

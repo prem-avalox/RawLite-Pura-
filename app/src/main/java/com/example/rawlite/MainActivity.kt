@@ -1026,8 +1026,8 @@ class MainActivity : Activity() {
         cameraSpinner = darkSpinner()
         resolutionSpinner = darkSpinner()
         previewSpinner = darkSpinner().apply {
-            adapter = spinnerAdapter(PREVIEW_SIZES.map { "${it.width}×${it.height}" })
-            setSelection(selectedPreviewIndex)
+            adapter = spinnerAdapter(currentAvailablePreviewSizes().map { "${it.width}×${it.height}" })
+            setSelection(selectedPreviewIndex.coerceIn(currentAvailablePreviewSizes().indices))
         }
         fpsSpinner = darkSpinner().apply {
             adapter = spinnerAdapter(FPS_OPTIONS.map(Int::toString))
@@ -1104,7 +1104,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, dp(8), 0, dp(10))
         }
-        PREVIEW_SIZES.forEachIndexed { index, size ->
+        currentAvailablePreviewSizes().forEachIndexed { index, size ->
             previewRow.addView(Button(this).apply {
                 text = "${size.width}×${size.height}"
                 isAllCaps = false
@@ -1832,8 +1832,8 @@ class MainActivity : Activity() {
     }
 
     private fun reconfigurePreviewForCaptureMode() {
-        if (cameraDevice == null || captureSession == null || switchingSession || recording) return
-        createSession(includeRaw = false)
+        if (cameraDevice == null || switchingSession || recording) return
+        reopenSelectedCamera()
     }
 
     private fun updateChromeValues() {
@@ -1846,6 +1846,13 @@ class MainActivity : Activity() {
         }
         val displayedFocus = if (manualFocus) focusDiopters else {
             latestResult?.get(CaptureResult.LENS_FOCUS_DISTANCE) ?: focusDiopters
+        }
+        if (::previewSpinner.isInitialized) {
+            val available = currentAvailablePreviewSizes()
+            suppressSpinnerEvents = true
+            previewSpinner.adapter = spinnerAdapter(available.map { "${it.width}×${it.height}" })
+            previewSpinner.setSelection(selectedPreviewIndex.coerceIn(available.indices))
+            suppressSpinnerEvents = false
         }
         selectorButtons[CameraParameter.LENS]?.text = currentOption()?.let(::lensDisplayLabel) ?: "24mm"
         selectorButtons[CameraParameter.FPS]?.text = "${selectedFps}FPS"
@@ -4976,28 +4983,39 @@ class MainActivity : Activity() {
         return profile.width == 3840 && profile.height == 2160
     }
 
+    private fun isCurrentRecording16x9(): Boolean {
+        if (captureMode == CaptureMode.RAW) {
+            val size = currentRawSize() ?: return false
+            val ratio = size.width.toDouble() / size.height
+            return kotlin.math.abs(ratio - 16.0 / 9.0) < 0.05
+        } else {
+            val profile = currentHlg10Profile() ?: return false
+            return (profile.aspectWidth == 16 && profile.aspectHeight == 9) ||
+                kotlin.math.abs(profile.width.toDouble() / profile.height - 16.0 / 9.0) < 0.05
+        }
+    }
+
+    private fun currentAvailablePreviewSizes(): List<Size> =
+        if (isCurrentRecording16x9()) PREVIEW_SIZES_16X9 else PREVIEW_SIZES_4X3
+
     private fun currentPreviewSize(): Size {
-        return PREVIEW_SIZES.getOrElse(selectedPreviewIndex) { PREVIEW_SIZES.last() }
+        val sizes = currentAvailablePreviewSizes()
+        return sizes.getOrElse(selectedPreviewIndex) { sizes.last() }
     }
 
     private fun previewCropRegion(): Rect? {
         val active = currentCharacteristics()
             ?.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: return null
-        val previewSize = currentPreviewSize()
-        val targetRatio = previewSize.width.toDouble() / previewSize.height
-        val activeRatio = active.width().toDouble() / active.height()
-        val cropWidth: Int
-        val cropHeight: Int
-        if (activeRatio > targetRatio) {
-            cropHeight = active.height() and -2
-            cropWidth = (cropHeight * targetRatio).roundToInt().coerceAtMost(active.width()) and -2
-        } else {
-            cropWidth = active.width() and -2
-            cropHeight = (cropWidth / targetRatio).roundToInt().coerceAtMost(active.height()) and -2
-        }
-        val left = active.left + ((active.width() - cropWidth) / 2 and -2)
-        val top = active.top + ((active.height() - cropHeight) / 2 and -2)
-        return Rect(left, top, left + cropWidth, top + cropHeight)
+        val targetSize = currentResolutionSize() ?: currentPreviewSize()
+        val crop = CaptureMath.calculateCropRegion(
+            activeWidth = active.width(),
+            activeHeight = active.height(),
+            targetWidth = targetSize.width,
+            targetHeight = targetSize.height,
+            activeLeft = active.left,
+            activeTop = active.top
+        )
+        return Rect(crop.left, crop.top, crop.right, crop.bottom)
     }
 
     private fun updateFormatHint() {
@@ -5407,7 +5425,7 @@ class MainActivity : Activity() {
             val bufferRect = RectF(0f, 0f, bufferSize.height.toFloat(), bufferSize.width.toFloat())
             bufferRect.offset(halfWidth - bufferRect.centerX(), halfHeight - bufferRect.centerY())
             matrix.setRectToRect(viewRect, bufferRect, Matrix.ScaleToFit.FILL)
-            val scale = max(
+            val scale = min(
                 viewHeight.toFloat() / bufferSize.height,
                 viewWidth.toFloat() / bufferSize.width
             )
@@ -5418,7 +5436,9 @@ class MainActivity : Activity() {
             matrix.postRotate(180f, halfWidth, halfHeight)
         }
         preview.setTransform(matrix)
-        if (::technicalOverlay.isInitialized) technicalOverlay.setGeometry(relativeDegrees)
+        if (::technicalOverlay.isInitialized) {
+            technicalOverlay.setGeometry(relativeDegrees, bufferSize.width, bufferSize.height)
+        }
     }
 
     private fun cameraErrorLabel(error: Int): String {
@@ -5884,7 +5904,9 @@ class MainActivity : Activity() {
         private const val PREF_FOCUS_DIOPTERS = "focus_diopters"
         private const val PREF_AUDIO_ENABLED = "audio_enabled"
         private val FPS_OPTIONS = CAPTURE_PROFILE.frameRates
-        private val PREVIEW_SIZES = CAPTURE_PROFILE.previewSizes.map { Size(it.width, it.height) }
+        private val PREVIEW_SIZES_4X3 = CAPTURE_PROFILE.previewSizes.map { Size(it.width, it.height) }
+        private val PREVIEW_SIZES_16X9 = CAPTURE_PROFILE.previewSizes16x9.map { Size(it.width, it.height) }
+        private val PREVIEW_SIZES = PREVIEW_SIZES_4X3
         private val STANDARD_VIDEO_SHUTTER_DENOMINATORS = listOf(
             8000, 6400, 5000, 4000, 3200, 2500, 2000, 1600, 1250, 1000,
             800, 640, 500, 400, 320, 250, 240, 200, 160, 125, 120, 100,

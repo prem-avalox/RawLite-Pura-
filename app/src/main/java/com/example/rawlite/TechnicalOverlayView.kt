@@ -54,6 +54,9 @@ internal class TechnicalOverlayView(context: Context) : View(context) {
     @Volatile
     private var thermalStatus = PowerManager.THERMAL_STATUS_NONE
     private var rotationDegrees = 0
+    private var videoWidth = 0
+    private var videoHeight = 0
+    private val frameRect = RectF()
 
     @Volatile
     var mode: TechnicalOverlayMode = TechnicalOverlayMode.OFF
@@ -93,9 +96,45 @@ internal class TechnicalOverlayView(context: Context) : View(context) {
         visibility = if (mode == TechnicalOverlayMode.OFF && !thirdsGridEnabled && !histogramEnabled) GONE else VISIBLE
     }
 
-    fun setGeometry(rotationDegrees: Int) {
-        synchronized(lock) { this.rotationDegrees = ((rotationDegrees % 360) + 360) % 360 }
+    fun setGeometry(rotationDegrees: Int, videoWidth: Int = 0, videoHeight: Int = 0) {
+        synchronized(lock) {
+            this.rotationDegrees = ((rotationDegrees % 360) + 360) % 360
+            if (videoWidth > 0 && videoHeight > 0) {
+                this.videoWidth = videoWidth
+                this.videoHeight = videoHeight
+            }
+            updateFrameRectLocked()
+        }
         invalidate()
+    }
+
+    fun getVisibleFrameRect(): RectF = synchronized(lock) { RectF(frameRect) }
+
+    private fun updateFrameRectLocked() {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        if (w <= 0f || h <= 0f) {
+            frameRect.set(0f, 0f, 0f, 0f)
+            return
+        }
+        val rotated = rotationDegrees == 90 || rotationDegrees == 270
+        val vWidth = if (videoWidth > 0) videoWidth else analysisWidth
+        val vHeight = if (videoHeight > 0) videoHeight else analysisHeight
+        if (vWidth <= 0 || vHeight <= 0) {
+            frameRect.set(0f, 0f, w, h)
+            return
+        }
+        val orientedWidth = if (rotated) vHeight.toFloat() else vWidth.toFloat()
+        val orientedHeight = if (rotated) vWidth.toFloat() else vHeight.toFloat()
+        val fit = CaptureMath.fitWithin(w, h, orientedWidth, orientedHeight)
+        frameRect.set(fit.left, fit.top, fit.right, fit.bottom)
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        synchronized(lock) {
+            updateFrameRectLocked()
+        }
     }
 
     fun setThermalStatus(status: Int) {
@@ -129,10 +168,14 @@ internal class TechnicalOverlayView(context: Context) : View(context) {
             }
         }
         synchronized(lock) {
+            val sizeChanged = analysisWidth != outputWidth || analysisHeight != outputHeight
             analysisWidth = outputWidth
             analysisHeight = outputHeight
             luma = nextLuma
             previewHistogram = nextHistogram
+            if (sizeChanged && (videoWidth <= 0 || videoHeight <= 0)) {
+                updateFrameRectLocked()
+            }
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
                 if (mode != TechnicalOverlayMode.HISTOGRAM) renderOverlayLocked()
             }
@@ -178,21 +221,29 @@ internal class TechnicalOverlayView(context: Context) : View(context) {
     }
 
     private fun drawThirdsGrid(canvas: Canvas) {
-        val x1 = width / 3f
-        val x2 = width * 2f / 3f
-        val y1 = height / 3f
-        val y2 = height * 2f / 3f
-        canvas.drawLine(x1, 0f, x1, height.toFloat(), gridPaint)
-        canvas.drawLine(x2, 0f, x2, height.toFloat(), gridPaint)
-        canvas.drawLine(0f, y1, width.toFloat(), y1, gridPaint)
-        canvas.drawLine(0f, y2, width.toFloat(), y2, gridPaint)
+        val left = frameRect.left
+        val top = frameRect.top
+        val right = frameRect.right
+        val bottom = frameRect.bottom
+        val w = right - left
+        val h = bottom - top
+        if (w <= 0f || h <= 0f) return
+
+        val x1 = left + w / 3f
+        val x2 = left + w * 2f / 3f
+        val y1 = top + h / 3f
+        val y2 = top + h * 2f / 3f
+        canvas.drawLine(x1, top, x1, bottom, gridPaint)
+        canvas.drawLine(x2, top, x2, bottom, gridPaint)
+        canvas.drawLine(left, y1, right, y1, gridPaint)
+        canvas.drawLine(left, y2, right, y2, gridPaint)
     }
 
     private fun buildDisplayMatrixLocked(bitmapWidth: Int, bitmapHeight: Int) {
         val rotated = rotationDegrees == 90 || rotationDegrees == 270
         val orientedWidth = if (rotated) bitmapHeight.toFloat() else bitmapWidth.toFloat()
         val orientedHeight = if (rotated) bitmapWidth.toFloat() else bitmapHeight.toFloat()
-        val scale = max(width / orientedWidth, height / orientedHeight)
+        val scale = min(width / orientedWidth, height / orientedHeight)
         displayMatrix.reset()
         displayMatrix.postTranslate(-bitmapWidth / 2f, -bitmapHeight / 2f)
         displayMatrix.postRotate(rotationDegrees.toFloat())

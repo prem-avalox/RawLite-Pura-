@@ -1,6 +1,8 @@
 package com.example.rawlite
 
 import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.roundToInt
 
 /** Pure capture and playback calculations kept independent from Android for deterministic tests. */
 internal object CaptureMath {
@@ -8,6 +10,71 @@ internal object CaptureMath {
         val frame: Int,
         val cadenceGap: Int
     )
+
+    data class CropRegionResult(
+        val left: Int,
+        val top: Int,
+        val width: Int,
+        val height: Int
+    ) {
+        val right: Int get() = left + width
+        val bottom: Int get() = top + height
+    }
+
+    data class FitResult(
+        val left: Float,
+        val top: Float,
+        val width: Float,
+        val height: Float,
+        val scale: Float
+    ) {
+        val right: Float get() = left + width
+        val bottom: Float get() = top + height
+    }
+
+    fun calculateCropRegion(
+        activeWidth: Int,
+        activeHeight: Int,
+        targetWidth: Int,
+        targetHeight: Int,
+        activeLeft: Int = 0,
+        activeTop: Int = 0
+    ): CropRegionResult {
+        if (activeWidth <= 0 || activeHeight <= 0 || targetWidth <= 0 || targetHeight <= 0) {
+            return CropRegionResult(activeLeft and -2, activeTop and -2, activeWidth and -2, activeHeight and -2)
+        }
+        val targetRatio = targetWidth.toDouble() / targetHeight
+        val activeRatio = activeWidth.toDouble() / activeHeight
+        val cropWidth: Int
+        val cropHeight: Int
+        if (activeRatio > targetRatio) {
+            cropHeight = activeHeight and -2
+            cropWidth = (cropHeight * targetRatio).roundToInt().coerceAtMost(activeWidth) and -2
+        } else {
+            cropWidth = activeWidth and -2
+            cropHeight = (cropWidth / targetRatio).roundToInt().coerceAtMost(activeHeight) and -2
+        }
+        val left = activeLeft + (((activeWidth - cropWidth) / 2) and -2)
+        val top = activeTop + (((activeHeight - cropHeight) / 2) and -2)
+        return CropRegionResult(left and -2, top and -2, cropWidth, cropHeight)
+    }
+
+    fun fitWithin(
+        containerWidth: Float,
+        containerHeight: Float,
+        contentWidth: Float,
+        contentHeight: Float
+    ): FitResult {
+        if (containerWidth <= 0f || containerHeight <= 0f || contentWidth <= 0f || contentHeight <= 0f) {
+            return FitResult(0f, 0f, 0f, 0f, 1f)
+        }
+        val scale = min(containerWidth / contentWidth, containerHeight / contentHeight)
+        val fittedWidth = contentWidth * scale
+        val fittedHeight = contentHeight * scale
+        val left = (containerWidth - fittedWidth) / 2f
+        val top = (containerHeight - fittedHeight) / 2f
+        return FitResult(left, top, fittedWidth, fittedHeight, scale)
+    }
 
     fun rotationDegrees(
         sensorDegrees: Int,

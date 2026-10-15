@@ -44,6 +44,13 @@ class Pixel6ReferenceProfileTest {
             ),
             profile.previewSizes
         )
+        assertEquals(
+            listOf(
+                RawLiteCaptureProfile.Dimensions(1920, 1080),
+                RawLiteCaptureProfile.Dimensions(1280, 720)
+            ),
+            profile.previewSizes16x9
+        )
         assertEquals(512L * 1024L * 1024L, profile.minimumFreeBytes)
         assertEquals(2, profile.checkpointSeconds)
         assertEquals(3_000L, profile.backgroundDrainTimeoutMs)

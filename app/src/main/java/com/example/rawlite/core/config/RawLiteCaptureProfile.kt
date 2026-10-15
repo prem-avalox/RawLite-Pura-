@@ -20,6 +20,10 @@ internal data class RawLiteCaptureProfile(
     val dngImageReaderCapacity: Int,
     val maximumPendingMetadataImages: Int,
     val previewSizes: List<Dimensions>,
+    val previewSizes16x9: List<Dimensions> = listOf(
+        Dimensions(1920, 1080),
+        Dimensions(1280, 720)
+    ),
     val hlg10OutputProfiles: List<Hlg10OutputProfile>,
     val frameRates: List<Int>,
     val minimumFreeBytes: Long,
@@ -79,6 +83,10 @@ internal object Pixel6ReferenceProfile {
         previewSizes = listOf(
             RawLiteCaptureProfile.Dimensions(1280, 960),
             RawLiteCaptureProfile.Dimensions(1024, 768)
+        ),
+        previewSizes16x9 = listOf(
+            RawLiteCaptureProfile.Dimensions(1920, 1080),
+            RawLiteCaptureProfile.Dimensions(1280, 720)
         ),
         hlg10OutputProfiles = listOf(
             Hlg10OutputProfile(
