@@ -46,6 +46,8 @@ class CameraChromeView(context: Context) : View(context) {
     var onWheelChanged: ((Int) -> Unit)? = null
     var onWheelStarted: (() -> Unit)? = null
     var onWheelReleased: (() -> Unit)? = null
+    var onPrecisionStarted: (() -> Unit)? = null
+    var onPrecisionReleased: (() -> Unit)? = null
     var onToolPressed: (() -> Unit)? = null
     var onStep: ((Int) -> Unit)? = null
     var onParameterStep: ((Int) -> Unit)? = null
@@ -290,6 +292,7 @@ class CameraChromeView(context: Context) : View(context) {
     private var dPadAxisLocked = false
     private var dPadStrictYAxisLocked = false
     private var dPadLockedParameterAxis: Boolean? = null
+    private var precisionValueActive = false
     private val dPadTouchOrigin = PointF()
     private var dPadLastAxisCoordinate = 0f
     private var dPadLastMoveUptime = 0L
@@ -1017,7 +1020,7 @@ class CameraChromeView(context: Context) : View(context) {
         CameraParameter.FOCUS -> "PEAK"
         CameraParameter.SHUTTER -> "ZEBRA"
         CameraParameter.ISO -> "FALSE"
-        CameraParameter.WHITE_BALANCE -> "HIST"
+        CameraParameter.WHITE_BALANCE -> "GREY"
         else -> null
     }
 
@@ -1223,7 +1226,7 @@ class CameraChromeView(context: Context) : View(context) {
         val dPad = precisionRect(landscape)
 
         drawPushAutoControl(canvas, pushAutoCenter.x, pushAutoCenter.y)
-        val galleryVisibility = if (contentIsVertical()) galleryRecordingVisibility else 1f
+        val galleryVisibility = if (chromeReveal <= 0.001f) 0f else if (contentIsVertical()) galleryRecordingVisibility else 1f
         if (galleryVisibility > 0.001f) {
             drawGalleryButton(canvas, galleryDisplayRect(landscape), galleryVisibility)
         }
@@ -1457,17 +1460,19 @@ class CameraChromeView(context: Context) : View(context) {
     }
 
     private fun drawBezelButtons(canvas: Canvas, landscape: Boolean) {
-        val lockCenter = if (landscape) PointF(106.5f, 1081f) else PointF(98.5f, 106.5f)
-        val settingsCenter = if (landscape) PointF(106.5f, 884f) else PointF(295.5f, 106.5f)
         val visibilityCenter = visibilityCenter(landscape)
-        val rotationCenter = rotationCenter(landscape)
-        drawToolButton(canvas, lockCenter.x, lockCenter.y, lockIcon,
-            activeProgress = lockAccentProgress)
-        drawToolButton(canvas, settingsCenter.x, settingsCenter.y, settingsIcon, activeProgress = 0f)
+        if (chromeReveal > 0.001f) {
+            val lockCenter = if (landscape) PointF(106.5f, 1081f) else PointF(98.5f, 106.5f)
+            val settingsCenter = if (landscape) PointF(106.5f, 884f) else PointF(295.5f, 106.5f)
+            val rotationCenter = rotationCenter(landscape)
+            drawToolButton(canvas, lockCenter.x, lockCenter.y, lockIcon,
+                activeProgress = lockAccentProgress)
+            drawToolButton(canvas, settingsCenter.x, settingsCenter.y, settingsIcon, activeProgress = 0f)
+            drawToolButton(canvas, rotationCenter.x, rotationCenter.y, rotationIcon,
+                activeProgress = rotationAccentProgress, enabled = rotationControlEnabled)
+        }
         drawToolButton(canvas, visibilityCenter.x, visibilityCenter.y, visibilityIcon,
             activeProgress = chromeReveal)
-        drawToolButton(canvas, rotationCenter.x, rotationCenter.y, rotationIcon,
-            activeProgress = rotationAccentProgress, enabled = rotationControlEnabled)
     }
 
     private fun drawToolButton(
@@ -1583,6 +1588,14 @@ class CameraChromeView(context: Context) : View(context) {
     }
 
     private fun handleDown(point: PointF): Boolean {
+        if (insideCircle(point, visibilityCenter(layoutLandscape), 48f)) {
+            touchTarget = TARGET_VISIBILITY
+            return true
+        }
+        if (chromeReveal <= 0.001f) {
+            touchTarget = TARGET_NONE
+            return false
+        }
         if (lockMenuOpen) {
             for (index in 0..2) {
                 if (lockMenuRect(index, layoutLandscape).contains(point.x, point.y)) {
@@ -1597,10 +1610,6 @@ class CameraChromeView(context: Context) : View(context) {
         }
         if (insideToolButton(point, lock = false)) {
             touchTarget = TARGET_SETTINGS
-            return true
-        }
-        if (insideCircle(point, visibilityCenter(layoutLandscape), 48f)) {
-            touchTarget = TARGET_VISIBILITY
             return true
         }
         if (insideCircle(point, rotationCenter(layoutLandscape), 48f)) {
@@ -1798,6 +1807,10 @@ class CameraChromeView(context: Context) : View(context) {
             dPadLockedParameterAxis = null
             dPadDragAccumulator = 0f
             parent?.requestDisallowInterceptTouchEvent(false)
+            if (precisionValueActive) {
+                precisionValueActive = false
+                onPrecisionReleased?.invoke()
+            }
             return true
         }
         if (target == TARGET_PUSH_AUTO) {
@@ -1948,6 +1961,10 @@ class CameraChromeView(context: Context) : View(context) {
         dPadLastAxisCoordinate = dPadAxisCoordinate(point, action.parameterAxis)
         dPadLastMoveUptime = android.os.SystemClock.uptimeMillis()
         dPadDragAccumulator = 0f
+        if (!action.parameterAxis && !precisionValueActive) {
+            precisionValueActive = true
+            onPrecisionStarted?.invoke()
+        }
         startRepeating(action, dPadIntensity(point, rect, action.parameterAxis), immediate = true)
     }
 

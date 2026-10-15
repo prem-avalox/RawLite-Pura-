@@ -407,9 +407,11 @@ class MainActivity : Activity() {
     private var activeOverlay = ActiveOverlay.NONE
     private var activeOverlayAlwaysOn = false
     private var activeOverlayMomentary = false
+    private var preFocusRestoreOverlay: ActiveOverlay? = null
     private var toolAlwaysOn = false
     private var toolMomentaryActive = false
     private var thirdsGridEnabled = false
+    private var histogramEnabled = false
     private var leftHandedMode = false
     private var lastStatusUpdateMs = 0L
     private var telemetryMonitoring = false
@@ -689,6 +691,26 @@ class MainActivity : Activity() {
     private fun loadUserPreferences() {
         val prefs = getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE)
         thirdsGridEnabled = prefs.getBoolean(PREF_THIRDS_GRID, false)
+        histogramEnabled = prefs.getBoolean(PREF_HISTOGRAM_ENABLED, false)
+        val savedAlwaysOn = prefs.getBoolean(PREF_ACTIVE_OVERLAY_ALWAYS_ON, false)
+        val savedOverlay = runCatching {
+            ActiveOverlay.valueOf(
+                prefs.getString(PREF_ACTIVE_OVERLAY, ActiveOverlay.NONE.name) ?: ActiveOverlay.NONE.name
+            )
+        }.getOrDefault(ActiveOverlay.NONE)
+        if (savedAlwaysOn && savedOverlay != ActiveOverlay.NONE) {
+            activeOverlay = savedOverlay
+            activeOverlayAlwaysOn = true
+            activeOverlayMomentary = false
+            toolAlwaysOn = true
+            toolMomentaryActive = false
+        } else {
+            activeOverlay = ActiveOverlay.NONE
+            activeOverlayAlwaysOn = false
+            activeOverlayMomentary = false
+            toolAlwaysOn = false
+            toolMomentaryActive = false
+        }
         leftHandedMode = prefs.getBoolean(PREF_LEFT_HANDED, false)
         selectedCameraIndex = prefs.getInt(PREF_CAMERA_INDEX, selectedCameraIndex).coerceAtLeast(0)
         selectedRawIndex = prefs.getInt(PREF_RAW_INDEX, selectedRawIndex).coerceAtLeast(0)
@@ -729,6 +751,9 @@ class MainActivity : Activity() {
     private fun saveUserPreferencesNow() {
         getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE).edit()
             .putBoolean(PREF_THIRDS_GRID, thirdsGridEnabled)
+            .putBoolean(PREF_HISTOGRAM_ENABLED, histogramEnabled)
+            .putBoolean(PREF_ACTIVE_OVERLAY_ALWAYS_ON, activeOverlayAlwaysOn)
+            .putString(PREF_ACTIVE_OVERLAY, if (activeOverlayAlwaysOn) activeOverlay.name else ActiveOverlay.NONE.name)
             .putBoolean(PREF_LEFT_HANDED, leftHandedMode)
             .putInt(PREF_CAMERA_INDEX, selectedCameraIndex)
             .putInt(PREF_RAW_INDEX, selectedRawIndex)
@@ -768,6 +793,7 @@ class MainActivity : Activity() {
         technicalOverlay = TechnicalOverlayView(this).apply {
             mode = TechnicalOverlayMode.OFF
             thirdsGridEnabled = this@MainActivity.thirdsGridEnabled
+            histogramEnabled = this@MainActivity.histogramEnabled
             isClickable = false
         }
         root.addView(technicalOverlay, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
@@ -820,19 +846,8 @@ class MainActivity : Activity() {
         }
         wheelView = ParameterWheelView(this).apply {
             onProgressChanged = { progress -> applyWheelProgress(progress) }
-            onTouchStart = {
-                if (!toolAlwaysOn) {
-                    toolMomentaryActive = true
-                    updateTechnicalOverlayState()
-                }
-            }
-            onTouchRelease = {
-                if (!toolAlwaysOn) {
-                    toolMomentaryActive = false
-                    updateTechnicalOverlayState()
-                }
-                scheduleControlApply(forceImmediate = true)
-            }
+            onTouchStart = { handleManualAdjustmentStarted() }
+            onTouchRelease = { handleManualAdjustmentReleased() }
         }
         wheelPanel.addView(wheelView, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
         wheelAutoButton = selectorText("AUTO").apply {
@@ -950,10 +965,14 @@ class MainActivity : Activity() {
                     } else {
                         setActiveOverlay(tool, alwaysOn = true, momentary = false)
                     }
+                    scheduleUserPreferencesSave()
                 }
             }
             onParameterLongPressed = { index ->
                 CameraParameter.entries.getOrNull(index)?.let { param ->
+                    if (this@MainActivity.selectedParameter != param) {
+                        selectParameter(param)
+                    }
                     val tool = overlayForParameter(param)
                     if (tool != null) {
                         if (activeOverlay == tool && activeOverlayAlwaysOn) {
@@ -961,24 +980,15 @@ class MainActivity : Activity() {
                         } else {
                             setActiveOverlay(tool, alwaysOn = true, momentary = false)
                         }
+                        scheduleUserPreferencesSave()
                     }
                 }
             }
-            onWheelStarted = {
-                if (!activeOverlayAlwaysOn) {
-                    val tool = overlayForParameter(this@MainActivity.selectedParameter)
-                    if (tool != null) {
-                        setActiveOverlay(tool, alwaysOn = false, momentary = true)
-                    }
-                }
-            }
+            onWheelStarted = { handleManualAdjustmentStarted() }
             onWheelChanged = { progress -> applyWheelProgress(progress) }
-            onWheelReleased = {
-                if (activeOverlayMomentary) {
-                    setActiveOverlay(ActiveOverlay.NONE, alwaysOn = false, momentary = false)
-                }
-                scheduleControlApply(forceImmediate = true)
-            }
+            onWheelReleased = { handleManualAdjustmentReleased() }
+            onPrecisionStarted = { handleManualAdjustmentStarted() }
+            onPrecisionReleased = { handleManualAdjustmentReleased() }
             onStep = { direction -> stepSelectedParameter(direction) }
             onParameterStep = { direction -> stepParameterSelection(direction) }
             onRecordPressed = {
@@ -1036,7 +1046,7 @@ class MainActivity : Activity() {
 
         setContentView(root)
         wireUiEvents()
-        selectParameter(CameraParameter.ISO)
+        selectParameter(selectedParameter)
         updateMicrophoneUi()
         root.post { updatePanelLayout(resources.configuration.orientation) }
     }
@@ -1142,6 +1152,12 @@ class MainActivity : Activity() {
         panel.addView(settingsSwitch("CUADRÍCULA DE TERCIOS", "Guía blanca sobre la previsualización", thirdsGridEnabled) { _, checked ->
                 thirdsGridEnabled = checked
                 technicalOverlay.thirdsGridEnabled = checked
+                scheduleUserPreferencesSave()
+            })
+        panel.addView(settingsDivider())
+        panel.addView(settingsSwitch("HISTOGRAMA GLOBAL", "Instrumentación técnica en esquina superior", histogramEnabled) { _, checked ->
+                histogramEnabled = checked
+                technicalOverlay.histogramEnabled = checked
                 scheduleUserPreferencesSave()
             })
         panel.addView(settingsDivider())
@@ -1251,18 +1267,12 @@ class MainActivity : Activity() {
     }
 
     private fun selectParameter(parameter: CameraParameter) {
-        selectedParameter = parameter
-
-        // Conmutación Inteligente al tocar Focus:
-        // Si hay una herramienta activa (ej. False Color) y el usuario selecciona Focus,
-        // el visor conmuta inmediatamente a Focus Peaking (respetando si está en Always-ON o momentáneo).
-        if (parameter == CameraParameter.FOCUS && activeOverlay != ActiveOverlay.NONE &&
-            activeOverlay != ActiveOverlay.FOCUS_PEAKING
-        ) {
-            val wasAlwaysOn = activeOverlayAlwaysOn
-            val wasMomentary = activeOverlayMomentary
-            setActiveOverlay(ActiveOverlay.FOCUS_PEAKING, alwaysOn = wasAlwaysOn, momentary = wasMomentary)
+        if (preFocusRestoreOverlay != null) {
+            val restore = preFocusRestoreOverlay!!
+            preFocusRestoreOverlay = null
+            setActiveOverlay(restore, alwaysOn = true, momentary = false)
         }
+        selectedParameter = parameter
 
         if (::cameraChrome.isInitialized) cameraChrome.selectedParameter = parameter.ordinal
         selectorButtons.forEach { (candidate, button) ->
@@ -4847,6 +4857,39 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun handleManualAdjustmentStarted() {
+        if (selectedParameter == CameraParameter.FOCUS) {
+            if (activeOverlayAlwaysOn && activeOverlay != ActiveOverlay.FOCUS_PEAKING) {
+                preFocusRestoreOverlay = activeOverlay
+                setActiveOverlay(ActiveOverlay.FOCUS_PEAKING, alwaysOn = false, momentary = true)
+            } else if (!activeOverlayAlwaysOn) {
+                preFocusRestoreOverlay = null
+                setActiveOverlay(ActiveOverlay.FOCUS_PEAKING, alwaysOn = false, momentary = true)
+            }
+        } else {
+            if (!activeOverlayAlwaysOn) {
+                preFocusRestoreOverlay = null
+                val tool = overlayForParameter(selectedParameter)
+                if (tool != null) {
+                    setActiveOverlay(tool, alwaysOn = false, momentary = true)
+                }
+            }
+        }
+    }
+
+    private fun handleManualAdjustmentReleased() {
+        if (activeOverlayMomentary) {
+            val restore = preFocusRestoreOverlay
+            if (restore != null) {
+                preFocusRestoreOverlay = null
+                setActiveOverlay(restore, alwaysOn = true, momentary = false)
+            } else {
+                setActiveOverlay(ActiveOverlay.NONE, alwaysOn = false, momentary = false)
+            }
+        }
+        scheduleControlApply(forceImmediate = true)
+    }
+
     private fun setActiveOverlay(
         overlay: ActiveOverlay,
         alwaysOn: Boolean,
@@ -5556,6 +5599,9 @@ class MainActivity : Activity() {
         private const val PREF_SAVE_DELAY_MS = 250L
         private const val UI_PREFS = "ui_preferences"
         private const val PREF_THIRDS_GRID = "thirds_grid"
+        private const val PREF_HISTOGRAM_ENABLED = "histogram_enabled"
+        private const val PREF_ACTIVE_OVERLAY = "active_overlay"
+        private const val PREF_ACTIVE_OVERLAY_ALWAYS_ON = "active_overlay_always_on"
         private const val PREF_LEFT_HANDED = "left_handed"
         private const val PREF_CAMERA_INDEX = "camera_index"
         private const val PREF_RAW_INDEX = "raw_index"

@@ -79,8 +79,15 @@ internal class TechnicalOverlayView(context: Context) : View(context) {
             invalidate()
         }
 
+    var histogramEnabled: Boolean = false
+        set(value) {
+            field = value
+            updateVisibility()
+            invalidate()
+        }
+
     private fun updateVisibility() {
-        visibility = if (mode == TechnicalOverlayMode.OFF && !thirdsGridEnabled) GONE else VISIBLE
+        visibility = if (mode == TechnicalOverlayMode.OFF && !thirdsGridEnabled && !histogramEnabled) GONE else VISIBLE
     }
 
     fun setGeometry(rotationDegrees: Int) {
@@ -94,7 +101,7 @@ internal class TechnicalOverlayView(context: Context) : View(context) {
     }
 
     fun submitPreview(image: Image) {
-        if (mode == TechnicalOverlayMode.OFF || thermalStatus >= PowerManager.THERMAL_STATUS_SEVERE) {
+        if ((mode == TechnicalOverlayMode.OFF && !histogramEnabled) || thermalStatus >= PowerManager.THERMAL_STATUS_SEVERE) {
             return
         }
         val plane = image.planes.firstOrNull() ?: return
@@ -150,15 +157,16 @@ internal class TechnicalOverlayView(context: Context) : View(context) {
                 drawThermalSuppressed(canvas)
             } else {
                 synchronized(lock) {
-                    if (mode == TechnicalOverlayMode.HISTOGRAM) {
-                        drawHistogramLocked(canvas)
-                    } else {
-                        overlayBitmap?.let { bitmap ->
-                            buildDisplayMatrixLocked(bitmap.width, bitmap.height)
-                            canvas.drawBitmap(bitmap, displayMatrix, bitmapPaint)
-                        }
+                    overlayBitmap?.let { bitmap ->
+                        buildDisplayMatrixLocked(bitmap.width, bitmap.height)
+                        canvas.drawBitmap(bitmap, displayMatrix, bitmapPaint)
                     }
                 }
+            }
+        }
+        if (histogramEnabled) {
+            synchronized(lock) {
+                drawHistogramLocked(canvas)
             }
         }
         if (thirdsGridEnabled) drawThirdsGrid(canvas)
@@ -261,16 +269,16 @@ internal class TechnicalOverlayView(context: Context) : View(context) {
 
     private fun drawHistogramLocked(canvas: Canvas) {
         val density = resources.displayMetrics.density
-        val panelWidth = min(width * 0.72f, 360f * density)
-        val panelHeight = 120f * density
-        val left = 12f * density
-        val top = max(72f * density, height * 0.14f)
+        val panelWidth = 120f * density
+        val panelHeight = 60f * density
+        val left = 16f * density
+        val top = 12f * density
         val bounds = RectF(left, top, left + panelWidth, top + panelHeight)
         canvas.drawRoundRect(bounds, 4f * density, 4f * density, panelPaint)
         val histogram = rawHistogram ?: previewHistogram
         val peak = histogram.maxOrNull()?.coerceAtLeast(1) ?: 1
-        val baseline = bounds.bottom - 22f * density
-        val graphHeight = bounds.height() - 34f * density
+        val baseline = bounds.bottom - 10f * density
+        val graphHeight = bounds.height() - 18f * density
         val step = bounds.width() / histogram.size
         linePaint.style = Paint.Style.STROKE
         linePaint.color = 0xff7ccec6.toInt()
@@ -282,7 +290,7 @@ internal class TechnicalOverlayView(context: Context) : View(context) {
             if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
         }
         canvas.drawPath(path, linePaint)
-        canvas.drawText("HIST $histogramSource", bounds.left + 8f * density, bounds.bottom - 7f * density, textPaint)
+        canvas.drawText("HIST $histogramSource", bounds.left + 6f * density, bounds.bottom - 3f * density, textPaint)
     }
 
     private fun drawThermalSuppressed(canvas: Canvas) {

@@ -373,6 +373,28 @@ P010RowWorkerPool* p010_row_workers() {
     return workers.get();
 }
 
+struct P010WorkerScratchpad {
+    std::vector<uint16_t> quad_rf;
+    std::vector<uint16_t> quad_bf;
+    std::vector<uint16_t> quad_gf;
+    std::vector<uint16_t> quad_y;
+    std::vector<int16_t> quad_g_diff;
+    std::vector<int16_t> quad_mod_g;
+
+    void ensure_capacity(size_t total_quads) {
+        if (quad_rf.size() < total_quads) {
+            quad_rf.resize(total_quads);
+            quad_bf.resize(total_quads);
+            quad_gf.resize(total_quads);
+            quad_y.resize(total_quads);
+            quad_g_diff.resize(total_quads);
+            quad_mod_g.resize(total_quads);
+        }
+    }
+};
+
+thread_local P010WorkerScratchpad p010_scratchpad;
+
 void set_error(const std::string& message) {
     last_error = message;
     __android_log_print(ANDROID_LOG_ERROR, kLogTag, "%s", message.c_str());
@@ -1568,10 +1590,14 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
         const int num_row_pairs = (end_y - first_y) / 2;
         const int num_quads = output_width / 2;
         const size_t total_quads = static_cast<size_t>(num_row_pairs) * num_quads;
-        std::vector<uint16_t> quad_rf(total_quads);
-        std::vector<uint16_t> quad_bf(total_quads);
-        std::vector<uint16_t> quad_gf(total_quads);
-        std::vector<uint16_t> quad_y(total_quads);
+        p010_scratchpad.ensure_capacity(total_quads);
+
+        uint16_t* quad_rf = p010_scratchpad.quad_rf.data();
+        uint16_t* quad_bf = p010_scratchpad.quad_bf.data();
+        uint16_t* quad_gf = p010_scratchpad.quad_gf.data();
+        uint16_t* quad_y = p010_scratchpad.quad_y.data();
+        int16_t* quad_g_diff = p010_scratchpad.quad_g_diff.data();
+        int16_t* quad_mod_g = p010_scratchpad.quad_mod_g.data();
 
         // Pass 1a: extract raw samples, apply lookup tables and lens shading
         for (int ry = 0; ry < num_row_pairs; ++ry) {
@@ -1653,6 +1679,7 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
                 quad_rf[idx] = static_cast<uint16_t>(rf);
                 quad_bf[idx] = static_cast<uint16_t>(bf);
                 quad_gf[idx] = static_cast<uint16_t>((gf0 + gf1 + 1) >> 1);
+                quad_g_diff[idx] = static_cast<int16_t>(gf0 - gf1);
             }
         }
 
@@ -1710,9 +1737,9 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
 
                 const int gf = static_cast<int>(curr_g[qx]);
 
-                // Pass 1c: Guided color-difference fringe suppression (Method B)
-                // Evaluates green guide gradient to detect and suppress spurious
-                // chromatic fringing / dispersion along high-contrast boundaries.
+                // Pass 1c: Green-Guided Optical Despilling and chromatic fringe suppression.
+                // Evaluates the green guide gradient to cure lens chromatic aberration (LoCA)
+                // and subpixel CFA bleeding along high-contrast highlight boundaries.
                 const int qx_prev = qx > 0 ? qx - 1 : qx;
                 const int qx_next = qx + 1 < num_quads ? qx + 1 : qx;
 
@@ -1743,18 +1770,73 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
                     const int d_bg_up = static_cast<int>(prev_b[qx]) - g_up;
                     const int d_bg_down = static_cast<int>(next_b[qx]) - g_down;
 
-                    const int margin = std::max(64, (grad_g >> 3));
+                    const int g_neighbors[4] = { g_left, g_right, g_up, g_down };
+                    const int d_rg_neighbors[4] = { d_rg_left, d_rg_right, d_rg_up, d_rg_down };
+                    const int d_bg_neighbors[4] = { d_bg_left, d_bg_right, d_bg_up, d_bg_down };
 
-                    const int min_rg = std::min({d_rg_left, d_rg_right, d_rg_up, d_rg_down}) - margin;
-                    const int max_rg = std::max({d_rg_left, d_rg_right, d_rg_up, d_rg_down}) + margin;
-                    const int filtered_delta_rg = std::clamp(delta_rg, min_rg, max_rg);
+                    const int g_max_neighbor = std::max({g_left, g_right, g_up, g_down});
+                    const int g_min_neighbor = std::min({g_left, g_right, g_up, g_down});
+                    const int edge_midpoint = (g_max_neighbor + g_min_neighbor) >> 1;
 
-                    const int min_bg = std::min({d_bg_left, d_bg_right, d_bg_up, d_bg_down}) - margin;
-                    const int max_bg = std::max({d_bg_left, d_bg_right, d_bg_up, d_bg_down}) + margin;
-                    const int filtered_delta_bg = std::clamp(delta_bg, min_bg, max_bg);
+                    // Optical despill check: if adjacent to a bright highlight and the current
+                    // pixel is on the darker side of the boundary, red/blue photons spilling
+                    // over green represent optical dispersion (chromatic bleed). Bound them strictly
+                    // to the photometric peer neighbors on the dark side of the edge.
+                    constexpr int kHighlightThreshold = 1200; // ~30% linear sensor saturation
+                    if (g_max_neighbor >= kHighlightThreshold &&
+                        (g_max_neighbor - g_min_neighbor) >= 300 &&
+                        gf < edge_midpoint) {
+                        int dark_min_rg = 4096, dark_max_rg = -4096;
+                        int dark_min_bg = 4096, dark_max_bg = -4096;
+                        int dark_count = 0;
 
-                    rf_final = std::clamp(gf + filtered_delta_rg, 0, 4096);
-                    bf_final = std::clamp(gf + filtered_delta_bg, 0, 4096);
+                        for (int i = 0; i < 4; ++i) {
+                            if (g_neighbors[i] <= edge_midpoint) {
+                                dark_min_rg = std::min(dark_min_rg, d_rg_neighbors[i]);
+                                dark_max_rg = std::max(dark_max_rg, d_rg_neighbors[i]);
+                                dark_min_bg = std::min(dark_min_bg, d_bg_neighbors[i]);
+                                dark_max_bg = std::max(dark_max_bg, d_bg_neighbors[i]);
+                                dark_count++;
+                            }
+                        }
+
+                        if (dark_count == 0) {
+                            int best_idx = 0;
+                            int best_diff = std::abs(g_neighbors[0] - gf);
+                            for (int i = 1; i < 4; ++i) {
+                                const int diff = std::abs(g_neighbors[i] - gf);
+                                if (diff < best_diff) {
+                                    best_diff = diff;
+                                    best_idx = i;
+                                }
+                            }
+                            dark_min_rg = d_rg_neighbors[best_idx];
+                            dark_max_rg = d_rg_neighbors[best_idx];
+                            dark_min_bg = d_bg_neighbors[best_idx];
+                            dark_max_bg = d_bg_neighbors[best_idx];
+                        }
+
+                        const int despill_margin = std::max(24, (std::abs(gf - g_min_neighbor) >> 3));
+                        const int filtered_delta_rg = std::clamp(delta_rg, dark_min_rg - despill_margin, dark_max_rg + despill_margin);
+                        const int filtered_delta_bg = std::clamp(delta_bg, dark_min_bg - despill_margin, dark_max_bg + despill_margin);
+
+                        rf_final = std::clamp(gf + filtered_delta_rg, 0, 4096);
+                        bf_final = std::clamp(gf + filtered_delta_bg, 0, 4096);
+                    } else {
+                        // Standard bilateral edge filtering for normal contrast edges & highlight interiors
+                        const int margin = std::max(48, (grad_g >> 4));
+
+                        const int min_rg = std::min({d_rg_left, d_rg_right, d_rg_up, d_rg_down}) - margin;
+                        const int max_rg = std::max({d_rg_left, d_rg_right, d_rg_up, d_rg_down}) + margin;
+                        const int filtered_delta_rg = std::clamp(delta_rg, min_rg, max_rg);
+
+                        const int min_bg = std::min({d_bg_left, d_bg_right, d_bg_up, d_bg_down}) - margin;
+                        const int max_bg = std::max({d_bg_left, d_bg_right, d_bg_up, d_bg_down}) + margin;
+                        const int filtered_delta_bg = std::clamp(delta_bg, min_bg, max_bg);
+
+                        rf_final = std::clamp(gf + filtered_delta_rg, 0, 4096);
+                        bf_final = std::clamp(gf + filtered_delta_bg, 0, 4096);
+                    }
                 }
 
                 const std::array<int64_t, 3> red_blue_contribution = {
@@ -1780,21 +1862,102 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
                     hlg_lut[channel(6)]
                 };
                 const uint16_t y_val = luma(rgb);
-                quad_y[static_cast<size_t>(ry) * num_quads + qx] = y_val;
+                const size_t quad_idx = static_cast<size_t>(ry) * num_quads + qx;
+                quad_y[quad_idx] = y_val;
 
-                const uint16_t cb = limited_chroma(
-                    ((static_cast<int>(rgb[2]) - static_cast<int>(y_val)) * 557) >> 10
-                );
-                const uint16_t cr = limited_chroma(
-                    ((static_cast<int>(rgb[0]) - static_cast<int>(y_val)) * 711) >> 10
-                );
+                // High-frequency green retention:
+                // Modulate luminance using raw G0 vs G1 intra-cell variation
+                const int g_diff = quad_g_diff[quad_idx];
+                if (std::abs(static_cast<int>(g_diff)) > 4) {
+                    const int base_ch_g = channel(3);
+                    const int delta_ch_g = static_cast<int>(
+                        (static_cast<int64_t>(camera_to_rec2020_q[4]) * g_diff + (kMatrixScale >> 1)) / kMatrixScale
+                    );
+                    const int half_delta = (delta_ch_g + (delta_ch_g >= 0 ? 1 : -1)) >> 1;
+                    const int ch_g0 = std::clamp(base_ch_g + half_delta, 0, kLinearScale);
+                    const int ch_g1 = std::clamp(base_ch_g - half_delta, 0, kLinearScale);
+                    const int hlg_g0 = hlg_lut[ch_g0];
+                    const int hlg_g1 = hlg_lut[ch_g1];
+                    const int delta_luma_green = ((hlg_g0 - hlg_g1) * 694 + 512) >> 10;
+                    quad_mod_g[quad_idx] = static_cast<int16_t>(
+                        (delta_luma_green + (delta_luma_green >= 0 ? 1 : -1)) >> 1
+                    );
+                } else {
+                    quad_mod_g[quad_idx] = 0;
+                }
+
+                int raw_cb_delta = ((static_cast<int>(rgb[2]) - static_cast<int>(y_val)) * 557) >> 10;
+                int raw_cr_delta = ((static_cast<int>(rgb[0]) - static_cast<int>(y_val)) * 711) >> 10;
+
+                // Highlight Desaturation & Magenta Fringing Roll-off
+                // Fast path: Only evaluate in mid-to-high luminance (> 580) or when a channel is hot (> 650)
+                const int max_c = std::max({static_cast<int>(rgb[0]), static_cast<int>(rgb[1]), static_cast<int>(rgb[2])});
+                if (max_c > 650 || static_cast<int>(y_val) > 580) {
+                    constexpr int kHighlightKnee = 700;
+                    constexpr int kHighlightMax = 880;
+                    int desat_scale_q8 = 256;
+                    if (static_cast<int>(y_val) > kHighlightKnee) {
+                        const int luma_scale = std::clamp(
+                            ((kHighlightMax - static_cast<int>(y_val)) << 8) / (kHighlightMax - kHighlightKnee),
+                            0,
+                            256
+                        );
+                        desat_scale_q8 = std::min(desat_scale_q8, luma_scale);
+                    }
+
+                    constexpr int kChannelKnee = 820;
+                    constexpr int kChannelMax = 940;
+                    if (max_c > kChannelKnee) {
+                        const int chan_scale = std::clamp(
+                            ((kChannelMax - max_c) << 8) / (kChannelMax - kChannelKnee),
+                            0,
+                            256
+                        );
+                        desat_scale_q8 = std::min(desat_scale_q8, chan_scale);
+                    }
+
+                    if (raw_cb_delta > 0 && raw_cr_delta > 0) {
+                        constexpr int kMagentaLumaKnee = 580;
+                        constexpr int kMagentaLumaMax = 740;
+                        constexpr int kMagentaChanKnee = 650;
+                        constexpr int kMagentaChanMax = 800;
+
+                        int mag_scale_q8 = 256;
+                        if (static_cast<int>(y_val) > kMagentaLumaKnee) {
+                            const int luma_mag = std::clamp(
+                                ((kMagentaLumaMax - static_cast<int>(y_val)) << 8) / (kMagentaLumaMax - kMagentaLumaKnee),
+                                0,
+                                256
+                            );
+                            mag_scale_q8 = std::min(mag_scale_q8, luma_mag);
+                        }
+                        if (max_c > kMagentaChanKnee) {
+                            const int chan_mag = std::clamp(
+                                ((kMagentaChanMax - max_c) << 8) / (kMagentaChanMax - kMagentaChanKnee),
+                                0,
+                                256
+                            );
+                            mag_scale_q8 = std::min(mag_scale_q8, chan_mag);
+                        }
+                        const int final_mag_scale = (desat_scale_q8 * mag_scale_q8 + 128) >> 8;
+                        raw_cb_delta = (raw_cb_delta * final_mag_scale + 128) >> 8;
+                        raw_cr_delta = (raw_cr_delta * final_mag_scale + 128) >> 8;
+                    } else if (desat_scale_q8 < 256) {
+                        raw_cb_delta = (raw_cb_delta * desat_scale_q8 + 128) >> 8;
+                        raw_cr_delta = (raw_cr_delta * desat_scale_q8 + 128) >> 8;
+                    }
+                }
+
+                const uint16_t cb = limited_chroma(raw_cb_delta);
+                const uint16_t cr = limited_chroma(raw_cr_delta);
                 const size_t uv = static_cast<size_t>(y / 2) * output_stride_pixels + (qx * 2);
                 uv_plane[uv] = static_cast<uint16_t>(cb << 6);
                 uv_plane[uv + 1] = static_cast<uint16_t>(cr << 6);
             }
         }
 
-        // Pass 2: continuous 2D spatial bilinear interpolation for luminance.
+        // Pass 2: continuous 2D spatial bilinear interpolation with native green modulation.
+        // Directly writes to y_plane in a single cache-efficient streaming pass (zero intermediate buffers).
         for (int ry = 0; ry < num_row_pairs; ++ry) {
             const int y = first_y + ry * 2;
             const int prev_ry = ry > 0 ? ry - 1 : ry;
@@ -1802,6 +1965,7 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
             const auto* curr_row = &quad_y[static_cast<size_t>(ry) * num_quads];
             const auto* prev_row = &quad_y[static_cast<size_t>(prev_ry) * num_quads];
             const auto* next_row = &quad_y[static_cast<size_t>(next_ry) * num_quads];
+            const auto* curr_mod = &quad_mod_g[static_cast<size_t>(ry) * num_quads];
 
             const size_t top = static_cast<size_t>(y) * output_stride_pixels;
             const size_t bottom = top + output_stride_pixels;
@@ -1819,16 +1983,33 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
                 const uint32_t down_left = (static_cast<uint32_t>(next_row[qx]) * 3 + next_row[prev_qx] + 2) >> 2;
                 const uint32_t down_right = (static_cast<uint32_t>(next_row[qx]) * 3 + next_row[next_qx] + 2) >> 2;
 
-                const uint16_t y00 = static_cast<uint16_t>(((h_left * 3 + up_left + 2) >> 2) << 6);
-                const uint16_t y01 = static_cast<uint16_t>(((h_right * 3 + up_right + 2) >> 2) << 6);
-                const uint16_t y10 = static_cast<uint16_t>(((h_left * 3 + down_left + 2) >> 2) << 6);
-                const uint16_t y11 = static_cast<uint16_t>(((h_right * 3 + down_right + 2) >> 2) << 6);
+                const int y00_base = static_cast<int>((h_left * 3 + up_left + 2) >> 2);
+                const int y01_base = static_cast<int>((h_right * 3 + up_right + 2) >> 2);
+                const int y10_base = static_cast<int>((h_left * 3 + down_left + 2) >> 2);
+                const int y11_base = static_cast<int>((h_right * 3 + down_right + 2) >> 2);
+
+                const int mod_g = curr_mod[qx];
+                int y00 = y00_base;
+                int y01 = y01_base;
+                int y10 = y10_base;
+                int y11 = y11_base;
+
+                // Modulate native green sites based on CFA mosaic
+                if (cfa == 1 || cfa == 2) {
+                    // GRBG (1) / GBRG (2, Samsung GN1): G0 at (0,0), G1 at (1,1)
+                    y00 = std::clamp(y00_base + mod_g, 64, 940);
+                    y11 = std::clamp(y11_base - mod_g, 64, 940);
+                } else {
+                    // RGGB (0) / BGGR (3): G0 at (0,1), G1 at (1,0)
+                    y01 = std::clamp(y01_base + mod_g, 64, 940);
+                    y10 = std::clamp(y10_base - mod_g, 64, 940);
+                }
 
                 const size_t px = static_cast<size_t>(qx * 2);
-                y_plane[top + px] = y00;
-                y_plane[top + px + 1] = y01;
-                y_plane[bottom + px] = y10;
-                y_plane[bottom + px + 1] = y11;
+                y_plane[top + px] = static_cast<uint16_t>(y00 << 6);
+                y_plane[top + px + 1] = static_cast<uint16_t>(y01 << 6);
+                y_plane[bottom + px] = static_cast<uint16_t>(y10 << 6);
+                y_plane[bottom + px + 1] = static_cast<uint16_t>(y11 << 6);
             }
         }
     };

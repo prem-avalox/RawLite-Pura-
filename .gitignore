@@ -24,6 +24,7 @@ RawLite_*/
 RawLite_Test_*/
 captures/
 test-output/
+outputs/*investigation*/
 
 # Native build intermediates
 .cxx/
