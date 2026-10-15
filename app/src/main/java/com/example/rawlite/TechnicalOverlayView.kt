@@ -48,6 +48,8 @@ internal class TechnicalOverlayView(context: Context) : View(context) {
     private var previewHistogram = IntArray(HISTOGRAM_BINS)
     private var rawHistogram: IntArray? = null
     private var histogramSource = "PREV"
+    private val histogramBounds = RectF()
+    private val histogramPath = android.graphics.Path()
     @Volatile
     private var thermalStatus = PowerManager.THERMAL_STATUS_NONE
     private var rotationDegrees = 0
@@ -273,24 +275,24 @@ internal class TechnicalOverlayView(context: Context) : View(context) {
         val panelHeight = 60f * density
         val left = 16f * density
         val top = 12f * density
-        val bounds = RectF(left, top, left + panelWidth, top + panelHeight)
-        canvas.drawRoundRect(bounds, 4f * density, 4f * density, panelPaint)
+        histogramBounds.set(left, top, left + panelWidth, top + panelHeight)
+        canvas.drawRoundRect(histogramBounds, 4f * density, 4f * density, panelPaint)
         val histogram = rawHistogram ?: previewHistogram
         val peak = histogram.maxOrNull()?.coerceAtLeast(1) ?: 1
-        val baseline = bounds.bottom - 10f * density
-        val graphHeight = bounds.height() - 18f * density
-        val step = bounds.width() / histogram.size
+        val baseline = histogramBounds.bottom - 10f * density
+        val graphHeight = histogramBounds.height() - 18f * density
+        val step = histogramBounds.width() / histogram.size
         linePaint.style = Paint.Style.STROKE
         linePaint.color = 0xff7ccec6.toInt()
-        val path = android.graphics.Path()
+        histogramPath.reset()
         histogram.forEachIndexed { index, value ->
-            val x = bounds.left + index * step
+            val x = histogramBounds.left + index * step
             val normalized = kotlin.math.ln(1.0 + value) / kotlin.math.ln(1.0 + peak)
             val y = baseline - graphHeight * normalized.toFloat()
-            if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
+            if (index == 0) histogramPath.moveTo(x, y) else histogramPath.lineTo(x, y)
         }
-        canvas.drawPath(path, linePaint)
-        canvas.drawText("HIST $histogramSource", bounds.left + 6f * density, bounds.bottom - 3f * density, textPaint)
+        canvas.drawPath(histogramPath, linePaint)
+        canvas.drawText("HIST $histogramSource", histogramBounds.left + 6f * density, histogramBounds.bottom - 3f * density, textPaint)
     }
 
     private fun drawThermalSuppressed(canvas: Canvas) {

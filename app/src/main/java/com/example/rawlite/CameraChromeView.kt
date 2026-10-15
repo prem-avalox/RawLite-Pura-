@@ -736,18 +736,18 @@ class CameraChromeView(context: Context) : View(context) {
             scaledAlpha(CHROME_OVERLAY, chromeReveal))
         fill(canvas, WHEEL_END, 0f, LANDSCAPE_WIDTH, LANDSCAPE_HEIGHT, Color.BLACK)
 
-        drawSelectors(canvas, landscape = true)
         if (chromeReveal > 0.001f) {
+            drawSelectors(canvas, landscape = true)
             drawRuler(canvas, landscape = true)
             drawAuto(canvas, autoRect(landscape = true))
             drawTool(canvas, toolRect(landscape = true))
+            drawParameterName(canvas, landscape = true)
+            drawStabilizerGuide(canvas, landscape = true)
+            drawFocusReticle(canvas)
         }
-        drawParameterName(canvas, landscape = true)
-        drawStabilizerGuide(canvas, landscape = true)
-        drawFocusReticle(canvas)
         drawCaptureControls(canvas, landscape = true)
         drawBezelButtons(canvas, landscape = true)
-        if (lockMenuProgress > 0.001f) drawLockMenu(canvas, landscape = true)
+        if (lockMenuProgress > 0.001f && chromeReveal > 0.001f) drawLockMenu(canvas, landscape = true)
     }
 
     private fun drawPortrait(canvas: Canvas) {
@@ -758,18 +758,18 @@ class CameraChromeView(context: Context) : View(context) {
             scaledAlpha(CHROME_OVERLAY, chromeReveal))
         fill(canvas, 0f, WHEEL_END, PORTRAIT_WIDTH, PORTRAIT_HEIGHT, Color.BLACK)
 
-        drawSelectors(canvas, landscape = false)
         if (chromeReveal > 0.001f) {
+            drawSelectors(canvas, landscape = false)
             drawRuler(canvas, landscape = false)
             drawAuto(canvas, autoRect(landscape = false))
             drawTool(canvas, toolRect(landscape = false))
+            drawParameterName(canvas, landscape = false)
+            drawStabilizerGuide(canvas, landscape = false)
+            drawFocusReticle(canvas)
         }
-        drawParameterName(canvas, landscape = false)
-        drawStabilizerGuide(canvas, landscape = false)
-        drawFocusReticle(canvas)
         drawCaptureControls(canvas, landscape = false)
         drawBezelButtons(canvas, landscape = false)
-        if (lockMenuProgress > 0.001f) drawLockMenu(canvas, landscape = false)
+        if (lockMenuProgress > 0.001f && chromeReveal > 0.001f) drawLockMenu(canvas, landscape = false)
     }
 
     private fun drawSelectors(canvas: Canvas, landscape: Boolean) {
@@ -838,11 +838,13 @@ class CameraChromeView(context: Context) : View(context) {
         val fittedGap = gap * scale
         var x = cx - (fittedValueWidth + fittedGap + fittedUnitWidth) / 2f
         val baseline = centeredBaseline(cy, valueSize)
-        val textAlpha = if (controlsEnabled) 255 else 158
-        drawSelectorText(canvas, parts.first, x, baseline, valueSize, color, textAlpha)
-        x += fittedValueWidth + fittedGap
-        if (parts.second.isNotEmpty()) {
-            drawSelectorText(canvas, parts.second, x, baseline, unitSize, color, textAlpha)
+        val textAlpha = ((if (controlsEnabled) 255 else 158) * chromeReveal).roundToInt()
+        if (textAlpha > 0) {
+            drawSelectorText(canvas, parts.first, x, baseline, valueSize, color, textAlpha)
+            x += fittedValueWidth + fittedGap
+            if (parts.second.isNotEmpty()) {
+                drawSelectorText(canvas, parts.second, x, baseline, unitSize, color, textAlpha)
+            }
         }
         paint.style = Paint.Style.FILL
         paint.alpha = 255
@@ -858,15 +860,6 @@ class CameraChromeView(context: Context) : View(context) {
         fillAlpha: Int
     ) {
         paint.textSize = textSize
-        val hiddenHudProgress = (1f - chromeReveal).coerceIn(0f, 1f)
-        if (hiddenHudProgress > 0.001f) {
-            paint.style = Paint.Style.STROKE
-            paint.strokeWidth = HIDDEN_HUD_TEXT_OUTLINE_WIDTH
-            paint.strokeJoin = Paint.Join.ROUND
-            paint.color = Color.BLACK
-            paint.alpha = (fillAlpha * hiddenHudProgress).roundToInt()
-            canvas.drawText(text, x, baseline, paint)
-        }
         paint.style = Paint.Style.FILL
         paint.color = color
         paint.alpha = fillAlpha
@@ -1225,7 +1218,9 @@ class CameraChromeView(context: Context) : View(context) {
         val timerCenter = recordingTimerCenter(landscape)
         val dPad = precisionRect(landscape)
 
-        drawPushAutoControl(canvas, pushAutoCenter.x, pushAutoCenter.y)
+        if (chromeReveal > 0.001f) {
+            drawPushAutoControl(canvas, pushAutoCenter.x, pushAutoCenter.y)
+        }
         val galleryVisibility = if (chromeReveal <= 0.001f) 0f else if (contentIsVertical()) galleryRecordingVisibility else 1f
         if (galleryVisibility > 0.001f) {
             drawGalleryButton(canvas, galleryDisplayRect(landscape), galleryVisibility)
@@ -1268,26 +1263,28 @@ class CameraChromeView(context: Context) : View(context) {
             }
         } else if (saving) {
             drawSavingStatus(canvas, timerCenter)
-        } else {
+        } else if (chromeReveal > 0.001f) {
             drawStatusPopup(canvas, timerCenter)
         }
 
-        withContentRotation(canvas, timerCenter.x, timerCenter.y) {
-            drawOutlinedCenterText(
-                canvas, audioInputLabel, timerCenter.x, timerCenter.y - 62f,
-                24f, if (audioInputLabel.contains("!") || audioInputLabel == "MIC ERROR")
-                    RawLiteDesign.RECORD else Color.WHITE, 1f, 4f
-            )
-        }
+        if (chromeReveal > 0.001f) {
+            withContentRotation(canvas, timerCenter.x, timerCenter.y) {
+                drawOutlinedCenterText(
+                    canvas, audioInputLabel, timerCenter.x, timerCenter.y - 62f,
+                    24f, if (audioInputLabel.contains("!") || audioInputLabel == "MIC ERROR")
+                        RawLiteDesign.RECORD else Color.WHITE, chromeReveal, 4f
+                )
+            }
 
-        drawDPadBackground(canvas, dPad)
-        withContentRotation(canvas, dPad.centerX(), dPad.centerY()) {
-            drawDPadArrows(canvas, dPad)
+            drawDPadBackground(canvas, dPad)
+            withContentRotation(canvas, dPad.centerX(), dPad.centerY()) {
+                drawDPadArrows(canvas, dPad)
+            }
         }
     }
 
     private fun drawStatusPopup(canvas: Canvas, center: PointF) {
-        val visibility = statusPopupVisibility.coerceIn(0f, 1f)
+        val visibility = (statusPopupVisibility * chromeReveal).coerceIn(0f, 1f)
         if (visibility <= 0.001f || statusPopupText.isEmpty()) return
         withContentRotation(canvas, center.x, center.y) {
             paint.style = Paint.Style.FILL
@@ -1337,44 +1334,47 @@ class CameraChromeView(context: Context) : View(context) {
     private fun drawPushAutoControl(canvas: Canvas, cx: Float, cy: Float) {
         val active = pushAutoAccentProgress.coerceIn(0f, 1f)
         paint.style = Paint.Style.FILL
-        paint.color = blendColor(RawLiteDesign.SURFACE, RawLiteDesign.ACCENT, active)
-        paint.alpha = if (pushAutoEnabled) 255 else 115
+        paint.color = scaledAlpha(blendColor(RawLiteDesign.SURFACE, RawLiteDesign.ACCENT, active), chromeReveal)
+        paint.alpha = ((if (pushAutoEnabled) 255 else 115) * chromeReveal).roundToInt()
         canvas.drawCircle(cx, cy, 92f, paint)
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = 2.5f
-        paint.color = blendColor(0xBFFFFFFF.toInt(), RawLiteDesign.ACCENT, active)
+        paint.color = scaledAlpha(blendColor(0xBFFFFFFF.toInt(), RawLiteDesign.ACCENT, active), chromeReveal)
         canvas.drawCircle(cx, cy, 97f, paint)
         paint.strokeWidth = 1.5f
-        paint.color = blendColor(0x45FFFFFF, 0x99000000.toInt(), active)
+        paint.color = scaledAlpha(blendColor(0x45FFFFFF, 0x99000000.toInt(), active), chromeReveal)
         canvas.drawCircle(cx, cy, 79f, paint)
         paint.style = Paint.Style.FILL
         paint.alpha = 255
         withContentRotation(canvas, cx, cy) {
-            val textColor = if (!pushAutoEnabled) {
+            val baseColor = if (!pushAutoEnabled) {
                 RawLiteDesign.TEXT_DISABLED
             } else {
                 blendColor(Color.WHITE, Color.BLACK, active)
             }
+            val textColor = scaledAlpha(baseColor, chromeReveal)
             drawCenteredText(canvas, "PUSH", cx, cy - 19f, 20f, textColor)
             drawCenteredText(canvas, "AUTO", cx, cy + 17f, 29f, textColor)
         }
     }
 
     private fun drawGalleryButton(canvas: Canvas, rect: RectF, visibility: Float) {
+        val effectiveVisibility = visibility * chromeReveal
+        if (effectiveVisibility <= 0.001f) return
         withContentRotation(canvas, rect.centerX(), rect.centerY()) {
             paint.style = Paint.Style.FILL
             paint.color = scaledAlpha(if (touchTarget == TARGET_REVIEW) {
                 RawLiteDesign.SURFACE_ACTIVE
             } else {
                 RawLiteDesign.SURFACE
-            }, visibility)
+            }, effectiveVisibility)
             canvas.drawRoundRect(rect, 6f, 6f, paint)
             paint.style = Paint.Style.STROKE
             paint.strokeWidth = 2f
-            paint.color = scaledAlpha(RawLiteDesign.OUTLINE, visibility)
+            paint.color = scaledAlpha(RawLiteDesign.OUTLINE, effectiveVisibility)
             canvas.drawRoundRect(rect, 6f, 6f, paint)
             paint.style = Paint.Style.FILL
-            paint.color = scaledAlpha(RawLiteDesign.ACCENT, visibility)
+            paint.color = scaledAlpha(RawLiteDesign.ACCENT, effectiveVisibility)
             canvas.drawRect(rect.left, rect.top, rect.left + 5f, rect.bottom, paint)
             drawCenteredText(
                 canvas,
@@ -1382,7 +1382,7 @@ class CameraChromeView(context: Context) : View(context) {
                 rect.centerX() + 3f,
                 rect.centerY(),
                 24f,
-                scaledAlpha(Color.WHITE, visibility)
+                scaledAlpha(Color.WHITE, effectiveVisibility)
             )
         }
     }
@@ -1407,28 +1407,29 @@ class CameraChromeView(context: Context) : View(context) {
         path.close()
         paint.pathEffect = CornerPathEffect(14f)
         paint.style = Paint.Style.FILL
-        paint.color = Color.BLACK
+        paint.color = scaledAlpha(Color.BLACK, chromeReveal)
         canvas.drawPath(path, paint)
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = 2.5f
         paint.strokeJoin = Paint.Join.ROUND
-        paint.color = 0x99FFFFFF.toInt()
+        paint.color = scaledAlpha(0x99FFFFFF.toInt(), chromeReveal)
         canvas.drawPath(path, paint)
         paint.pathEffect = null
         paint.strokeJoin = Paint.Join.MITER
         paint.style = Paint.Style.FILL
+        paint.alpha = 255
     }
 
     private fun drawDPadArrows(canvas: Canvas, rect: RectF) {
         val offset = DPAD_ARROW_OFFSET
         drawChevron(canvas, rect.centerX(), rect.centerY() - offset, up = true,
-            color = blendColor(Color.WHITE, ACCENT, dPadAccentProgress[DPAD_UP]))
+            color = scaledAlpha(blendColor(Color.WHITE, ACCENT, dPadAccentProgress[DPAD_UP]), chromeReveal))
         drawChevron(canvas, rect.centerX(), rect.centerY() + offset, up = false,
-            color = blendColor(Color.WHITE, ACCENT, dPadAccentProgress[DPAD_DOWN]))
+            color = scaledAlpha(blendColor(Color.WHITE, ACCENT, dPadAccentProgress[DPAD_DOWN]), chromeReveal))
         drawChevronHorizontal(canvas, rect.centerX() - offset, rect.centerY(), left = true,
-            color = blendColor(Color.WHITE, ACCENT, dPadAccentProgress[DPAD_LEFT]))
+            color = scaledAlpha(blendColor(Color.WHITE, ACCENT, dPadAccentProgress[DPAD_LEFT]), chromeReveal))
         drawChevronHorizontal(canvas, rect.centerX() + offset, rect.centerY(), left = false,
-            color = blendColor(Color.WHITE, ACCENT, dPadAccentProgress[DPAD_RIGHT]))
+            color = scaledAlpha(blendColor(Color.WHITE, ACCENT, dPadAccentProgress[DPAD_RIGHT]), chromeReveal))
     }
 
     private fun drawChevron(canvas: Canvas, cx: Float, cy: Float, up: Boolean, color: Int) {
@@ -1466,13 +1467,14 @@ class CameraChromeView(context: Context) : View(context) {
             val settingsCenter = if (landscape) PointF(106.5f, 884f) else PointF(295.5f, 106.5f)
             val rotationCenter = rotationCenter(landscape)
             drawToolButton(canvas, lockCenter.x, lockCenter.y, lockIcon,
-                activeProgress = lockAccentProgress)
-            drawToolButton(canvas, settingsCenter.x, settingsCenter.y, settingsIcon, activeProgress = 0f)
+                activeProgress = lockAccentProgress, alphaScale = chromeReveal)
+            drawToolButton(canvas, settingsCenter.x, settingsCenter.y, settingsIcon,
+                activeProgress = 0f, alphaScale = chromeReveal)
             drawToolButton(canvas, rotationCenter.x, rotationCenter.y, rotationIcon,
-                activeProgress = rotationAccentProgress, enabled = rotationControlEnabled)
+                activeProgress = rotationAccentProgress, enabled = rotationControlEnabled, alphaScale = chromeReveal)
         }
         drawToolButton(canvas, visibilityCenter.x, visibilityCenter.y, visibilityIcon,
-            activeProgress = chromeReveal)
+            activeProgress = chromeReveal, alphaScale = 1f)
     }
 
     private fun drawToolButton(
@@ -1481,14 +1483,15 @@ class CameraChromeView(context: Context) : View(context) {
         cy: Float,
         icon: Drawable?,
         activeProgress: Float,
-        enabled: Boolean = true
+        enabled: Boolean = true,
+        alphaScale: Float = 1f
     ) {
         val color = scaledAlpha(
             blendColor(Color.WHITE, ACCENT, activeProgress),
-            if (enabled) 1f else 0.48f
+            (if (enabled) 1f else 0.48f) * alphaScale
         )
         paint.style = Paint.Style.FILL
-        paint.color = RawLiteDesign.SURFACE
+        paint.color = scaledAlpha(RawLiteDesign.SURFACE, alphaScale)
         canvas.drawCircle(cx, cy, 33f, paint)
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = 2f
@@ -1592,6 +1595,11 @@ class CameraChromeView(context: Context) : View(context) {
             touchTarget = TARGET_VISIBILITY
             return true
         }
+        if (insideRecordButton(point, layoutLandscape)) {
+            touchTarget = TARGET_RECORD
+            animateRecordPress(true)
+            return true
+        }
         if (chromeReveal <= 0.001f) {
             touchTarget = TARGET_NONE
             return false
@@ -1664,11 +1672,6 @@ class CameraChromeView(context: Context) : View(context) {
                 touchTarget = TARGET_NONE
                 return true
             }
-        }
-        if (insideRecordButton(point, layoutLandscape)) {
-            touchTarget = TARGET_RECORD
-            animateRecordPress(true)
-            return true
         }
         if (galleryRecordingVisibility > 0.5f &&
             (!recording || !contentIsVertical()) &&
@@ -1794,6 +1797,7 @@ class CameraChromeView(context: Context) : View(context) {
         stopRepeating()
         val target = touchTarget
         touchTarget = TARGET_NONE
+        if (target == TARGET_NONE) return false
         if (target == TARGET_AUTO) repeatHandler.removeCallbacks(autoLongPressRunnable)
         if (target in TARGET_SELECTOR_BASE until TARGET_SELECTOR_BASE + 7) {
             repeatHandler.removeCallbacks(selectorLongPressRunnable)

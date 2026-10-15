@@ -2863,7 +2863,7 @@ class MainActivity : Activity() {
 
     private fun maybeUpdateRawHistogram(image: android.media.Image, frame: Int) {
         if (pure10Recording && isPure10UhdSelected()) return
-        if (technicalMode != TechnicalOverlayMode.HISTOGRAM) return
+        if (!histogramEnabled) return
         val interval = max(1, selectedFps / 4)
         if (frame % interval != 0) return
         val plane = image.planes.firstOrNull() ?: return

@@ -36,12 +36,17 @@ Todo desarrollo sigue el protocolo de tres entidades definido en [`AGENTS.md`](A
     * **Persistencia en SharedPreferences:** `PREF_ACTIVE_OVERLAY` y `PREF_ACTIVE_OVERLAY_ALWAYS_ON` serializados y restaurados al inicio.
 * **Auditoría QA:** Dictamen **APROBADO** (PASS en QG-2.1 a QG-2.7). Build limpio e instalado en Pixel 6 (`1C061FDF60063K`).
 
-### Sprint 3: Desacoplar Histograma de Kelvin, Moverlo a Configuración y Corregir Modo Clean Feed
-* **Objetivo:** Limpieza del Head-Up Display (HUD) eliminando saturación visual innecesaria.
-* **Componentes Afectados:**
-  - `TechnicalOverlayView.kt`: Redimensionar y reposicionar el histograma técnico (120×60 dp en la esquina superior) como instrumento desacoplado de la visualización de balance de blancos (Kelvin).
-  - `MainActivity.kt`: Mover el interruptor del histograma al panel de Ajustes / Configuración (`HISTOGRAMA GLOBAL`), persistiendo en `SharedPreferences`.
-  - `CameraChromeView.kt`: Asegurar que el modo *Clean Feed* (ocultar interfaz / visibilidad reducida) oculte todos los elementos no esenciales dejando únicamente el sensor visible sin interferencias táctiles fantasmas.
+### Sprint 3: Desacoplar Histograma de Kelvin y Modo Clean Feed Real — [COMPLETADO Y AUDITADO]
+* **Objetivo:** Limpieza del Head-Up Display (HUD) eliminando saturación visual innecesaria e independizando el histograma técnico.
+* **Componentes Afectados y Resultados:**
+  - `CameraChromeView.kt`:
+    * **Clean Feed Real:** Supresión total de D-pad, Push Auto, selectores, reglas y labels cuando `chromeReveal <= 0.001f`. Solo preview, botón de visibilidad y botón de disparo quedan visibles.
+    * **Disparo Operativo y Aislamiento:** El botón de grabación (`TARGET_RECORD`) se evalúa antes de la guarda de Clean Feed, permitiendo grabar/detener con la pantalla despejada. Cero toques fantasma en el resto de la pantalla.
+  - `MainActivity.kt` / `TechnicalOverlayView.kt`:
+    * **Histograma RAW en Tiempo Real:** Guarda corregida a `if (!histogramEnabled) return` en `maybeUpdateRawHistogram`, computando bins RAW10 en segundo plano.
+    * **Geometría y Rendimiento:** Panel compacto de $120\text{ dp} \times 60\text{ dp}$ en esquina superior. Reutilización de `histogramBounds` y `histogramPath` para cero alocaciones dinámicas de memoria en `onDraw`.
+    * **Persistencia:** Switch `HISTOGRAMA GLOBAL` en Ajustes serializado y restaurado en `SharedPreferences`.
+* **Auditoría QA:** Dictamen **APROBADO** (PASS en QG-3.1 a QG-3.7).
 
 
 ### Sprint 4: Arquitectura de Visor Técnico Neutro a 30 Hz Desacoplado en GPU
