@@ -141,6 +141,28 @@ class ValidateClipTest(unittest.TestCase):
             self.assertEqual([], report.errors)
             self.assertEqual(1, len(report.warnings))
 
+    def test_eight_bit_can_be_checked_without_ffprobe(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / "eight_bit.mp4").write_bytes(b"fixture")
+            self.write_json(
+                directory / "clip.json",
+                {
+                    "format": "rawlite-8bit",
+                    "frame_rate": 30,
+                    "video_file": "eight_bit.mp4",
+                    "submitted_frames": 2,
+                    "encoded_frames": 2,
+                    "finalized": True,
+                },
+            )
+
+            with mock.patch.object(validate_clip.shutil, "which", return_value=None):
+                report = validate_clip.validate(directory)
+
+            self.assertEqual([], report.errors)
+            self.assertEqual(1, len(report.warnings))
+
     def test_invalid_numbers_are_reported_instead_of_crashing(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)

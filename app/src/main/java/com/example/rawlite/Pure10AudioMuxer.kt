@@ -30,13 +30,28 @@ internal object Pure10AudioMuxer {
     const val MUX_IN_PROGRESS_FILE = ".pure10_muxing"
 
     fun mux(directory: File): Pure10AudioMuxResult {
-        val sourceVideo = File(directory, Pure10Encoder.VIDEO_FILE)
+        val descriptionFile = File(directory, "clip.json")
+        val clipFormat = runCatching {
+            JSONObject(descriptionFile.readText()).optString("format")
+        }.getOrDefault("")
+        val isEightBit = clipFormat == "rawlite-8bit"
+        val sourceVideoName = if (isEightBit) {
+            if (File(directory, EightBitRec709Encoder.VIDEO_FILE).isFile) {
+                EightBitRec709Encoder.VIDEO_FILE
+            } else {
+                Pure10Encoder.VIDEO_FILE
+            }
+        } else {
+            Pure10Encoder.VIDEO_FILE
+        }
+        val sourceVideo = File(directory, sourceVideoName)
         val wavFile = File(directory, PcmAudioRecorder.AUDIO_FILE)
-        val output = File(directory, FINAL_VIDEO_FILE)
-        val temporary = File(directory, "$FINAL_VIDEO_FILE.tmp")
+        val finalVideoName = if (isEightBit) "eight_bit_final.mp4" else FINAL_VIDEO_FILE
+        val output = File(directory, finalVideoName)
+        val temporary = File(directory, "$finalVideoName.tmp")
         return try {
-            require(sourceVideo.isFile && sourceVideo.length() > 0L) { "PURE 10 sin video HEVC" }
-            require(wavFile.isFile && wavFile.length() > 0L) { "PURE 10 sin WAV para integrar" }
+            require(sourceVideo.isFile && sourceVideo.length() > 0L) { "Video origen faltante" }
+            require(wavFile.isFile && wavFile.length() > 0L) { "WAV faltante para integrar" }
             val wav = requireNotNull(PcmWavPlayer.inspect(wavFile)) { "WAV PCM inválido" }
             val sync = readSync(directory)
             val rotation = readRotation(directory)
@@ -47,7 +62,8 @@ internal object Pure10AudioMuxer {
                 wav = wav,
                 audioOffsetNs = sync,
                 rotationDegrees = rotation,
-                outputFile = temporary
+                outputFile = temporary,
+                isEightBit = isEightBit
             )
             require(temporary.isFile && temporary.length() > 0L) { "MP4 final vacío" }
             if (output.exists() && !output.delete()) {
@@ -59,14 +75,14 @@ internal object Pure10AudioMuxer {
             } else {
                 sourceVideo.delete().also { deleted ->
                     if (!deleted && sourceVideo.exists()) {
-                        Log.w(TAG, "Could not delete intermediate PURE 10 video ${sourceVideo.name}")
+                        Log.w(TAG, "Could not delete intermediate video ${sourceVideo.name}")
                     }
                 }
             }
             if (wavFile.exists() && output.isFile && output.length() > 0L) {
                 wavFile.delete().also { deleted ->
                     if (!deleted && wavFile.exists()) {
-                        Log.w(TAG, "Could not delete intermediate PURE 10 audio ${wavFile.name}")
+                        Log.w(TAG, "Could not delete intermediate audio ${wavFile.name}")
                     }
                 }
             }
@@ -79,7 +95,7 @@ internal object Pure10AudioMuxer {
                 finalized = true,
                 error = null
             )
-            updateClipMetadata(directory, result)
+            updateClipMetadata(directory, result, sourceVideoName)
             result
         } catch (error: Throwable) {
             runCatching { temporary.delete() }
@@ -92,8 +108,8 @@ internal object Pure10AudioMuxer {
                 finalized = false,
                 error = error.message ?: error.javaClass.simpleName
             )
-            updateClipMetadata(directory, result)
-            Log.e(TAG, "Could not mux PURE 10 audio", error)
+            updateClipMetadata(directory, result, sourceVideoName)
+            Log.e(TAG, "Could not mux video audio", error)
             result
         }
     }
@@ -104,9 +120,10 @@ internal object Pure10AudioMuxer {
         wav: WavPcmInfo,
         audioOffsetNs: Long,
         rotationDegrees: Int,
-        outputFile: File
+        outputFile: File,
+        isEightBit: Boolean
     ) {
-        val videoInfo = inspectVideoTrack(sourceVideo)
+        val videoInfo = inspectVideoTrack(sourceVideo, isEightBit)
         val muxer = MediaMuxer(
             outputFile.absolutePath,
             MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4
@@ -316,7 +333,7 @@ internal object Pure10AudioMuxer {
         return flags
     }
 
-    private fun inspectVideoTrack(sourceVideo: File): VideoTrackInfo {
+    private fun inspectVideoTrack(sourceVideo: File, isEightBit: Boolean): VideoTrackInfo {
         val extractor = MediaExtractor()
         try {
             extractor.setDataSource(sourceVideo.absolutePath)
@@ -325,10 +342,10 @@ internal object Pure10AudioMuxer {
                 val mime = format.getString(MediaFormat.KEY_MIME) ?: continue
                 if (mime.startsWith("video/")) return VideoTrackInfo(
                     index,
-                    format.applyPure10ColorMetadata()
+                    if (isEightBit) format.applyEightBitColorMetadata() else format.applyPure10ColorMetadata()
                 )
             }
-            error("MP4 PURE 10 sin pista de video")
+            error("MP4 sin pista de video")
         } finally {
             extractor.release()
         }
@@ -337,6 +354,12 @@ internal object Pure10AudioMuxer {
     private fun MediaFormat.applyPure10ColorMetadata(): MediaFormat = apply {
         setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT2020)
         setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_HLG)
+        setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED)
+    }
+
+    private fun MediaFormat.applyEightBitColorMetadata(): MediaFormat = apply {
+        setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT709)
+        setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_SDR_VIDEO)
         setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED)
     }
 
@@ -357,7 +380,11 @@ internal object Pure10AudioMuxer {
         }.getOrDefault(0)
     }
 
-    private fun updateClipMetadata(directory: File, result: Pure10AudioMuxResult) {
+    private fun updateClipMetadata(
+        directory: File,
+        result: Pure10AudioMuxResult,
+        sourceVideoName: String
+    ) {
         val descriptionFile = File(directory, "clip.json")
         val description = runCatching { JSONObject(descriptionFile.readText()) }
             .getOrElse { JSONObject() }
@@ -369,11 +396,11 @@ internal object Pure10AudioMuxer {
         description.put("audio_codec", "AAC-LC")
         if (result.finalized) {
             description.put("video_file", result.outputFile.name)
-            description.put("intermediate_video_file", Pure10Encoder.VIDEO_FILE)
+            description.put("intermediate_video_file", sourceVideoName)
             description.put("intermediate_video_deleted", result.sourceVideoDeleted)
             description.remove("audio_mux_error")
         } else {
-            description.put("video_file", Pure10Encoder.VIDEO_FILE)
+            description.put("video_file", sourceVideoName)
             description.put("intermediate_video_deleted", false)
             result.error?.let { description.put("audio_mux_error", it) }
         }

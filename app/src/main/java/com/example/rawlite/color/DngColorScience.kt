@@ -64,6 +64,34 @@ internal object DngColorScience {
         return FloatArray(MATRIX_SIZE) { cameraToRec2020[it].toFloat() }
     }
 
+    fun cameraToLinearRec709(
+        profile: DualIlluminantColorProfile,
+        asShotNeutral: DoubleArray
+    ): FloatArray {
+        require(asShotNeutral.size == 3)
+        val neutral = normalizeMaximum(asShotNeutral)
+        require(neutral.all { it.isFinite() && it > 0.0 })
+
+        val sceneWhite = neutralToXy(profile, neutral)
+        val xyzToCamera = interpolatedColorMatrix(profile, sceneWhite)
+        var pcsToCamera = multiply3x3(
+            xyzToCamera,
+            mapWhiteMatrix(D50, sceneWhite)
+        )
+        val cameraWhite = multiply3x3Vector(pcsToCamera, xyToXyz(D50))
+        val scale = cameraWhite.maxOrNull()?.takeIf { it > EPSILON }
+            ?: error("Invalid DNG camera white")
+        pcsToCamera = DoubleArray(MATRIX_SIZE) { pcsToCamera[it] / scale }
+
+        val cameraToPcsD50 = invert3x3(pcsToCamera)
+        val cameraToXyzD65 = multiply3x3(
+            mapWhiteMatrix(D50, D65),
+            cameraToPcsD50
+        )
+        val cameraToRec709 = multiply3x3(XYZ_D65_TO_REC709, cameraToXyzD65)
+        return FloatArray(MATRIX_SIZE) { cameraToRec709[it].toFloat() }
+    }
+
     fun whiteBalancedCameraToLinearRec2020(
         profile: DualIlluminantColorProfile,
         asShotNeutral: DoubleArray
@@ -94,6 +122,38 @@ internal object DngColorScience {
         val whiteScale = white.average().takeIf { it > EPSILON }
             ?: error("Invalid Rec.2020 white")
         return FloatArray(MATRIX_SIZE) { (cameraToRec2020[it] / whiteScale).toFloat() }
+    }
+
+    fun whiteBalancedCameraToLinearRec709(
+        profile: DualIlluminantColorProfile,
+        asShotNeutral: DoubleArray
+    ): FloatArray {
+        require(asShotNeutral.size == 3)
+        val neutral = normalizeMaximum(asShotNeutral)
+        require(neutral.all { it.isFinite() && it > 0.0 })
+
+        val sceneWhite = neutralToXy(profile, neutral)
+        val xyzToCamera = interpolatedColorMatrix(profile, sceneWhite)
+        val cameraToXyzScene = invert3x3(xyzToCamera)
+        val cameraNeutral = multiply3x3Vector(xyzToCamera, xyToXyz(sceneWhite))
+        val neutralScale = cameraNeutral.maxOrNull()?.takeIf { it > EPSILON }
+            ?: error("Invalid DNG camera neutral")
+        val normalizedNeutral = DoubleArray(3) { cameraNeutral[it] / neutralScale }
+        val unbalanceWhitePoint = doubleArrayOf(
+            normalizedNeutral[0], 0.0, 0.0,
+            0.0, normalizedNeutral[1], 0.0,
+            0.0, 0.0, normalizedNeutral[2]
+        )
+        val balancedCameraToXyzScene = multiply3x3(cameraToXyzScene, unbalanceWhitePoint)
+        val cameraToXyzD65 = multiply3x3(
+            mapWhiteMatrix(sceneWhite, D65),
+            balancedCameraToXyzScene
+        )
+        val cameraToRec709 = multiply3x3(XYZ_D65_TO_REC709, cameraToXyzD65)
+        val white = multiply3x3Vector(cameraToRec709, doubleArrayOf(1.0, 1.0, 1.0))
+        val whiteScale = white.average().takeIf { it > EPSILON }
+            ?: error("Invalid Rec.709 white")
+        return FloatArray(MATRIX_SIZE) { (cameraToRec709[it] / whiteScale).toFloat() }
     }
 
     fun asShotNeutralFromGains(
@@ -303,6 +363,11 @@ internal object DngColorScience {
         1.716651187971268, -0.355670783776393, -0.253366281373660,
         -0.666684351832489, 1.616481236634939, 0.015768545813911,
         0.017639857445311, -0.042770613257809, 0.942103121235474
+    )
+    private val XYZ_D65_TO_REC709 = doubleArrayOf(
+        3.2404542, -1.5371385, -0.4985314,
+        -0.9692660, 1.8760108, 0.0415560,
+        0.0556434, -0.2040259, 1.0572252
     )
     // Wyszecki & Stiles reciprocal-temperature table used by the Adobe DNG SDK.
     private val TEMPERATURE_TABLE = arrayOf(

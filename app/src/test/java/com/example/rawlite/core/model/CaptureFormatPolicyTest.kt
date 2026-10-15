@@ -16,9 +16,16 @@ class CaptureFormatPolicyTest {
     }
 
     @Test
-    fun `pure10 accepts full or reduced source`() {
-        assertEquals(CaptureOutput.PURE10, CaptureFormatPolicy.output(CaptureMode.PURE10, 1))
-        assertTrue(CaptureFormatPolicy.selectionIsValid(CaptureMode.PURE10, 0))
-        assertTrue(CaptureFormatPolicy.selectionIsValid(CaptureMode.PURE10, 1))
+    fun `ten-bit maps to TEN_BIT output and accepts full or reduced source`() {
+        assertEquals(CaptureOutput.TEN_BIT, CaptureFormatPolicy.output(CaptureMode.TEN_BIT, 1))
+        assertTrue(CaptureFormatPolicy.selectionIsValid(CaptureMode.TEN_BIT, 0))
+        assertTrue(CaptureFormatPolicy.selectionIsValid(CaptureMode.TEN_BIT, 1))
+    }
+
+    @Test
+    fun `eight-bit maps to EIGHT_BIT output and accepts full or reduced source`() {
+        assertEquals(CaptureOutput.EIGHT_BIT, CaptureFormatPolicy.output(CaptureMode.EIGHT_BIT, 1))
+        assertTrue(CaptureFormatPolicy.selectionIsValid(CaptureMode.EIGHT_BIT, 0))
+        assertTrue(CaptureFormatPolicy.selectionIsValid(CaptureMode.EIGHT_BIT, 1))
     }
 }

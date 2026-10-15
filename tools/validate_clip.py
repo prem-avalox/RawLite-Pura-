@@ -318,6 +318,63 @@ def validate_pure10(directory: Path, metadata: dict, report: Report) -> None:
     )
 
 
+def validate_8bit(directory: Path, metadata: dict, report: Report) -> None:
+    video = directory / metadata.get("video_file", "eight_bit.mp4")
+    report.check(video.is_file() and video.stat().st_size > 0,
+                 f"MP4 presente ({video.stat().st_size} bytes)" if video.is_file() else "",
+                 "Falta eight_bit.mp4 o está vacío")
+    if not video.is_file():
+        return
+    encoded = as_int(metadata.get("encoded_frames"))
+    submitted = as_int(metadata.get("submitted_frames"), encoded)
+    report.check(encoded > 0, f"Frames codificados: {encoded}", "8-BIT no contiene frames")
+    report.check(encoded == submitted, "Todos los frames enviados fueron codificados",
+                 f"Frames enviados/codificados: {submitted}/{encoded}")
+    report.check(not metadata.get("encoder_error"), "Sin error del encoder",
+                 f"Error del encoder: {metadata.get('encoder_error')}")
+    report.check(metadata.get("finalized") is True, "MP4 finalizado", "MP4 no finalizado")
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        report.warnings.append("ffprobe no disponible; no se validó el bitstream AVC")
+        return
+    command = [ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries",
+               "stream=codec_name,profile,pix_fmt,color_space,color_transfer,color_primaries,width,height",
+               "-of", "json", str(video)]
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        report.errors.append(f"ffprobe no pudo leer MP4: {result.stderr.strip()}")
+        return
+    try:
+        stream = (json.loads(result.stdout).get("streams") or [{}])[0]
+    except (AttributeError, json.JSONDecodeError, TypeError) as error:
+        report.errors.append(f"Respuesta ffprobe inválida: {error}")
+        return
+    report.check(stream.get("codec_name") in {"h264", "avc"}, "Codec AVC (H.264)", f"El video no es AVC: {stream.get('codec_name')}")
+    report.check("yuv420p" in str(stream.get("pix_fmt", "")) or "nv12" in str(stream.get("pix_fmt", "")),
+                 f"Pixel format 8-bit: {stream.get('pix_fmt')}",
+                 "ffprobe no confirma 8 bits")
+    report.check(stream.get("color_transfer") in {"bt709", "sdr"},
+                 "Transferencia BT.709/SDR", f"Transferencia inesperada: {stream.get('color_transfer')}")
+    report.check(stream.get("color_primaries") == "bt709",
+                 "Primarias BT.709",
+                 f"Primarias inesperadas: {stream.get('color_primaries')}")
+    report.check(stream.get("color_space") == "bt709",
+                 "Matriz BT.709",
+                 f"Matriz inesperada: {stream.get('color_space')}")
+    expected_width = as_int(metadata.get("width"))
+    expected_height = as_int(metadata.get("height"))
+    report.check(
+        expected_width <= 0 or as_int(stream.get("width")) == expected_width,
+        f"Ancho codificado: {stream.get('width')}",
+        f"Ancho MP4/metadata: {stream.get('width')}/{expected_width}",
+    )
+    report.check(
+        expected_height <= 0 or as_int(stream.get("height")) == expected_height,
+        f"Alto codificado: {stream.get('height')}",
+        f"Alto MP4/metadata: {stream.get('height')}/{expected_height}",
+    )
+
+
 def validate_dng(directory: Path, metadata: dict, report: Report) -> int:
     conversion = load_json(directory / "conversion_report.json", report, required=False)
     fps = as_int(metadata.get("frame_rate"), as_int(conversion.get("fps")))
@@ -396,8 +453,10 @@ def validate(directory: Path) -> Report:
                  f"Cadencia nominal inválida: {fps}")
     if capture_format == "rawlite-raw10":
         validate_raw10(directory, metadata, report)
-    elif capture_format == "rawlite-pure10":
+    elif capture_format in {"rawlite-pure10", "rawlite-10bit"}:
         validate_pure10(directory, metadata, report)
+    elif capture_format == "rawlite-8bit":
+        validate_8bit(directory, metadata, report)
     else:
         report.errors.append(f"Formato no reconocido: {capture_format!r}")
     validate_audio(directory, metadata, fps, report)

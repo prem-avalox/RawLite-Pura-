@@ -350,11 +350,13 @@ class MainActivity : Activity() {
     private var nativeWriterHandle = 0L
     private var lensShadingWriter: LensShadingMetadataWriter? = null
     private var pure10Encoder: Pure10Encoder? = null
+    private var eightBitEncoder: EightBitRec709Encoder? = null
     private var pure10LensShading: LensShadingSample? = null
     private var telemetryStream: FileOutputStream? = null
     private var sessionStartElapsedMs = 0L
     private var packedRawRecording = false
     private var pure10Recording = false
+    private var eightBitRecording = false
     private var dngRecording = false
     private var lastTimelineFrame = -1
     private var cadenceGaps = 0
@@ -720,7 +722,13 @@ class MainActivity : Activity() {
         selectedFps = prefs.getInt(PREF_FPS, selectedFps)
             .takeIf { FPS_OPTIONS.contains(it) } ?: selectedFps
         captureMode = runCatching {
-            CaptureMode.valueOf(prefs.getString(PREF_CAPTURE_MODE, captureMode.name) ?: captureMode.name)
+            val rawMode = prefs.getString(PREF_CAPTURE_MODE, captureMode.name) ?: captureMode.name
+            when (rawMode) {
+                "PURE10", "HLG 10", CaptureMode.TEN_BIT.name -> CaptureMode.TEN_BIT
+                CaptureMode.EIGHT_BIT.name -> CaptureMode.EIGHT_BIT
+                CaptureMode.RAW.name -> CaptureMode.RAW
+                else -> CaptureMode.valueOf(rawMode)
+            }
         }.getOrDefault(captureMode)
         selectedParameter = runCatching {
             CameraParameter.valueOf(
@@ -1794,9 +1802,17 @@ class MainActivity : Activity() {
         if (recording || switchingSession || finalizingOutput ||
             finalizingAudio || pure10MuxInProgress()
         ) return
-        val next = if (captureMode == CaptureMode.RAW) CaptureMode.PURE10 else CaptureMode.RAW
-        if (next == CaptureMode.PURE10 && !currentPure10Availability()) {
-            cameraChrome.showStatusPopup("HLG 10 NO DISPONIBLE")
+        val next = when (captureMode) {
+            CaptureMode.RAW -> CaptureMode.TEN_BIT
+            CaptureMode.TEN_BIT -> CaptureMode.EIGHT_BIT
+            CaptureMode.EIGHT_BIT -> CaptureMode.RAW
+        }
+        if (next == CaptureMode.TEN_BIT && !currentPure10Availability()) {
+            cameraChrome.showStatusPopup("10-BIT NO DISPONIBLE")
+            return
+        }
+        if (next == CaptureMode.EIGHT_BIT && !currentPure10Availability()) {
+            cameraChrome.showStatusPopup("8-BIT NO DISPONIBLE")
             return
         }
         captureMode = next
@@ -1805,10 +1821,10 @@ class MainActivity : Activity() {
         updateChromeValues()
         syncWheelToSelectedParameter()
         scheduleUserPreferencesSave()
-        val label = if (captureMode == CaptureMode.PURE10) {
-            "HLG 10 · HEVC MAIN10"
-        } else {
-            "RAW"
+        val label = when (captureMode) {
+            CaptureMode.RAW -> "RAW"
+            CaptureMode.TEN_BIT -> "10-BIT"
+            CaptureMode.EIGHT_BIT -> "8-BIT"
         }
         cameraChrome.showStatusPopup(label)
         rawModeButton.announceForAccessibility(label)
@@ -1841,7 +1857,11 @@ class MainActivity : Activity() {
         selectorButtons.forEach { (parameter, button) ->
             button.setTextColor(parameterTextColor(parameter))
         }
-        val modeLabel = if (captureMode == CaptureMode.RAW) "RAW" else "HLG 10"
+        val modeLabel = when (captureMode) {
+            CaptureMode.RAW -> "RAW"
+            CaptureMode.TEN_BIT -> "10-BIT"
+            CaptureMode.EIGHT_BIT -> "8-BIT"
+        }
         rawModeButton.text = modeLabel
         rawModeButton.setTextColor(ACCENT)
         if (::cameraChrome.isInitialized) {
@@ -2221,7 +2241,7 @@ class MainActivity : Activity() {
         if (!availableControls.manualExposure) manualExposure = false
         if (!availableControls.manualWhiteBalance) manualWb = false
         if (!availableControls.manualFocus) manualFocus = false
-        if (captureMode == CaptureMode.PURE10 && !currentPure10Availability()) {
+        if ((captureMode == CaptureMode.TEN_BIT || captureMode == CaptureMode.EIGHT_BIT) && !currentPure10Availability()) {
             captureMode = CaptureMode.RAW
         }
         manualWbGains = null
@@ -2229,7 +2249,7 @@ class MainActivity : Activity() {
         suppressSpinnerEvents = true
         selectedRawIndex = selectedRawIndex.coerceIn(option.rawSizes.indices)
         val hlgProfiles = availableHlg10Profiles()
-        if (captureMode == CaptureMode.PURE10 && hlgProfiles.isEmpty()) {
+        if ((captureMode == CaptureMode.TEN_BIT || captureMode == CaptureMode.EIGHT_BIT) && hlgProfiles.isEmpty()) {
             captureMode = CaptureMode.RAW
         }
         selectedHlg10Index = selectedHlg10Index.coerceIn(
@@ -2578,15 +2598,15 @@ class MainActivity : Activity() {
     }
 
     private fun createRawReader(size: Size): ImageReader {
-        val configuredPure10 = captureMode == CaptureMode.PURE10
+        val configuredProcessed = captureMode == CaptureMode.TEN_BIT || captureMode == CaptureMode.EIGHT_BIT
         val configuredPackedRaw = captureMode == CaptureMode.RAW && selectedRawIndex > 0
-        val imageFormat = if (configuredPackedRaw || configuredPure10) {
+        val imageFormat = if (configuredPackedRaw || configuredProcessed) {
             ImageFormat.RAW10
         } else {
             ImageFormat.RAW_SENSOR
         }
         val maxImages = when {
-            configuredPure10 -> PURE10_MAX_IMAGES
+            configuredProcessed -> PURE10_MAX_IMAGES
             configuredPackedRaw -> CAPTURE_PROFILE.packedRawImageReaderCapacity
             else -> CAPTURE_PROFILE.dngImageReaderCapacity
         }
@@ -2646,7 +2666,7 @@ class MainActivity : Activity() {
         }
 
         val maxPending = when {
-            pure10Recording -> PURE10_MAX_PENDING_WRITES
+            pure10Recording || eightBitRecording -> PURE10_MAX_PENDING_WRITES
             packedRawRecording -> CAPTURE_PROFILE.packedRawMaximumPendingWrites
             else -> 1
         }
@@ -2667,7 +2687,49 @@ class MainActivity : Activity() {
         val pendingCount = pendingWrites.incrementAndGet()
         peakPendingWrites.updateAndGet { previous -> max(previous, pendingCount) }
         val currentFrame = timelineFrameForTimestamp(metadata.timestampNs)
-        if (pure10Recording) {
+        if (eightBitRecording) {
+            val encoder = eightBitEncoder
+            if (encoder == null) {
+                pendingWrites.decrementAndGet()
+                writeErrorDrops++
+                droppedFrames++
+                image.close()
+                updateStatus()
+                return
+            }
+            val queuedAtNs = System.nanoTime()
+            ioExecutor.execute {
+                try {
+                    maybeUpdateRawHistogram(image, currentFrame)
+                    val accepted = encoder.submit(
+                        image = image,
+                        timestampNs = metadata.timestampNs,
+                        redGain = metadata.wbRed,
+                        greenEvenGain = metadata.wbGreenEven,
+                        greenOddGain = metadata.wbGreenOdd,
+                        blueGain = metadata.wbBlue,
+                        lensShading = metadata.lensShading,
+                        exposureGain = Pixel6MainDngColorProfile.DEFAULT_RENDER_GAIN *
+                            postRawGain / 100f,
+                        queuedAtNs = queuedAtNs
+                    )
+                    if (accepted) {
+                        savedFrames++
+                    } else {
+                        writerBusyDrops++
+                        droppedFrames++
+                    }
+                } catch (error: Throwable) {
+                    Log.e(TAG, "8-BIT write failed", error)
+                    writeErrorDrops++
+                    droppedFrames++
+                } finally {
+                    image.close()
+                    pendingWrites.decrementAndGet()
+                    updateStatus()
+                }
+            }
+        } else if (pure10Recording) {
             val encoder = pure10Encoder
             if (encoder == null) {
                 pendingWrites.decrementAndGet()
@@ -2792,7 +2854,7 @@ class MainActivity : Activity() {
 
     private fun frameMetadata(result: CaptureResult): FrameMetadata {
         val gains = result.get(CaptureResult.COLOR_CORRECTION_GAINS)
-        val lensShading = if (pure10Recording) {
+        val lensShading = if (pure10Recording || eightBitRecording) {
             pure10LensShading ?: readLensShadingSample(result)?.also {
                 pure10LensShading = it
             }
@@ -2864,7 +2926,7 @@ class MainActivity : Activity() {
     }
 
     private fun maybeUpdateRawHistogram(image: android.media.Image, frame: Int) {
-        if (pure10Recording && isPure10UhdSelected()) return
+        if ((pure10Recording || eightBitRecording) && isPure10UhdSelected()) return
         if (!histogramEnabled) return
         val interval = max(1, selectedFps / 4)
         if (frame % interval != 0) return
@@ -3243,13 +3305,15 @@ class MainActivity : Activity() {
         sessionStartElapsedMs = SystemClock.elapsedRealtime()
         activeCaptureMode = captureMode
         val output = CaptureFormatPolicy.output(activeCaptureMode, selectedRawIndex)
-        pure10Recording = output == CaptureOutput.PURE10
+        pure10Recording = output == CaptureOutput.TEN_BIT
+        eightBitRecording = output == CaptureOutput.EIGHT_BIT
         pure10LensShading = null
         packedRawRecording = output == CaptureOutput.RAW10
         dngRecording = output == CaptureOutput.CINEMA_DNG
         if (!CaptureFormatPolicy.selectionIsValid(activeCaptureMode, selectedRawIndex)) {
             setStatusText("Formato de captura no disponible")
             pure10Recording = false
+            eightBitRecording = false
             return
         }
         val base = getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: filesDir
@@ -3280,6 +3344,7 @@ class MainActivity : Activity() {
         val setupStartedNs = SystemClock.elapsedRealtimeNanos()
         ioExecutor.execute {
             val outputOpened = when {
+                eightBitRecording -> openEightBitOutputs()
                 pure10Recording -> openPure10Outputs()
                 packedRawRecording -> openPackedOutputs()
                 dngRecording -> openDngOutputs()
@@ -3304,6 +3369,7 @@ class MainActivity : Activity() {
                     recording = false
                     switchingSession = false
                     pure10Recording = false
+                    eightBitRecording = false
                     packedRawRecording = false
                     dngRecording = false
                     recordButton.isEnabled = cameraDevice != null &&
@@ -3535,12 +3601,81 @@ class MainActivity : Activity() {
             Log.e(TAG, "Could not create PURE 10 outputs", error)
             runCatching { encoder?.abort() }
             pure10Encoder = null
-            setStatusText("HLG 10 no pudo iniciar el encoder Main10")
+            setStatusText("10-BIT no pudo iniciar el encoder Main10")
+            false
+        }
+    }
+
+    private fun openEightBitOutputs(): Boolean {
+        val dir = sessionDir ?: return false
+        val fallbackSize = currentRawSize() ?: return false
+        val outputSize = currentResolutionSize() ?: return false
+        val sourceSize = pure10SourceSize(outputSize, fallbackSize)
+        val option = currentOption() ?: return false
+        var encoder: EightBitRec709Encoder? = null
+        return try {
+            encoder = EightBitRec709Encoder(
+                outputFile = File(dir, EightBitRec709Encoder.VIDEO_FILE),
+                sourceSize = sourceSize,
+                outputSize = outputSize,
+                fps = selectedFps,
+                bitRate = EightBitRec709Encoder.BIT_RATE,
+                rotationDegrees = PURE10_CONTAINER_ROTATION_DEGREES,
+                characteristics = option.characteristics
+            )
+            encoder.start()
+            eightBitEncoder = encoder
+            File(dir, "clip.json").writeText(
+                buildEightBitDescription(sourceSize, outputSize).toString(2)
+            )
+            true
+        } catch (error: Throwable) {
+            Log.e(TAG, "Could not create 8-BIT outputs", error)
+            runCatching { encoder?.abort() }
+            eightBitEncoder = null
+            setStatusText("8-BIT no pudo iniciar el encoder AVC")
             false
         }
     }
 
     private fun finishPackedOutputs() {
+        val eightEncoder = eightBitEncoder
+        if (eightEncoder != null) {
+            eightBitEncoder = null
+            finalizingOutput = true
+            logStopMeasurement("8BIT_ENCODER_FINISH_START")
+            runOnUiThread {
+                recordButton.isEnabled = false
+                updateControlModes()
+                updateStatus(force = true)
+            }
+            ioExecutor.execute {
+                val summary = runCatching { eightEncoder.finish() }
+                    .onFailure { Log.e(TAG, "Could not finalize 8-BIT output", it) }
+                    .getOrNull()
+                logStopMeasurement(
+                    "8BIT_ENCODER_FINISH_DONE",
+                    "encoded=${summary?.encodedFrames ?: -1} submitted=${summary?.submittedFrames ?: -1} " +
+                        "video_bytes=${sessionDir?.let { File(it, EightBitRec709Encoder.VIDEO_FILE).length() } ?: -1L}"
+                )
+                val directory = sessionDir
+                if (directory != null) {
+                    updateEightBitDescription(directory, summary)
+                    logStopMeasurement("8BIT_DESCRIPTION_DONE")
+                    schedulePure10AudioMuxIfReady(directory)
+                }
+                eightBitRecording = false
+                finalizingOutput = false
+                runOnUiThread {
+                    recordButton.isEnabled = cameraDevice != null && !switchingSession &&
+                        !recording && !finalizingAudio &&
+                        rawVideoSupportedForCurrentCamera()
+                    updateControlModes()
+                    updateStatus(force = true)
+                }
+            }
+            return
+        }
         val pureEncoder = pure10Encoder
         if (pureEncoder != null) {
             pure10Encoder = null
@@ -3832,6 +3967,31 @@ class MainActivity : Activity() {
             .put("lens_shading_correction", "camera2-capture-start-cached")
     }
 
+    private fun buildEightBitDescription(sourceSize: Size, outputSize: Size): JSONObject {
+        val profile = currentHlg10Profile()
+        return CaptureMetadataFactory.eightBit(
+            captureMetadataContext(outputSize),
+            postRawGain,
+            kelvin
+        )
+            .put("raw_source_width", sourceSize.width)
+            .put("raw_source_height", sourceSize.height)
+            .put("eight_bit_crop_x", ((sourceSize.width - outputSize.width) / 2) and -2)
+            .put("eight_bit_crop_y", ((sourceSize.height - outputSize.height) / 2) and -2)
+            .put("eight_bit_experimental_4k", profile?.status == Hlg10OutputProfile.Status.EXPERIMENTAL)
+            .put("eight_bit_profile_id", profile?.id ?: "unknown")
+            .put("eight_bit_output_width", outputSize.width)
+            .put("eight_bit_output_height", outputSize.height)
+            .put("eight_bit_aspect_ratio", profile?.aspectLabel ?: aspectRatioLabel(outputSize))
+            .put("eight_bit_profile_status", profile?.status?.name ?: "UNKNOWN")
+            .put("sensor_capture_rotation_degrees", captureRotationDegrees(currentOption()!!.characteristics))
+            .put("rotation_degrees", PURE10_CONTAINER_ROTATION_DEGREES)
+            .put("requested_frame_duration_ns", sessionRequestedFrameDurationNs)
+            .put("recording_exposure_policy", sessionExposurePolicy)
+            .put("auto_cadence_lock", sessionAutoCadenceLock)
+            .put("lens_shading_correction", "camera2-capture-start-cached")
+    }
+
     private fun captureMetadataContext(size: Size): CaptureMetadataContext {
         val option = currentOption() ?: error("No selected camera")
         return CaptureMetadataContext(
@@ -3920,13 +4080,64 @@ class MainActivity : Activity() {
             .onFailure { Log.e(TAG, "Could not update PURE 10 metadata", it) }
     }
 
+    private fun updateEightBitDescription(directory: File, summary: Pure10Summary?) {
+        val descriptionFile = File(directory, "clip.json")
+        val description = runCatching { JSONObject(descriptionFile.readText()) }
+            .getOrElse { JSONObject() }
+        description.put("finalized", summary?.finalized == true)
+        description.put("video_bytes", File(directory, EightBitRec709Encoder.VIDEO_FILE).length())
+        description.put("saved_frames", savedFrames)
+        description.put("dropped_frames", droppedFrames)
+        description.put("cadence_gaps", cadenceGaps)
+        description.put("peak_pending_writes", peakPendingWrites.get())
+        description.put("no_metadata_drops", noMetadataDrops)
+        description.put("writer_busy_drops", writerBusyDrops)
+        description.put("write_error_drops", writeErrorDrops)
+        description.put("requested_frame_duration_ns", sessionRequestedFrameDurationNs)
+        description.put("recording_exposure_policy", sessionExposurePolicy)
+        description.put("auto_cadence_lock", sessionAutoCadenceLock)
+        description.put("capture_interval_count", captureIntervalCount)
+        description.put("capture_long_intervals", captureLongIntervals)
+        if (captureIntervalCount > 0) {
+            description.put("capture_interval_average_ns", captureIntervalTotalNs / captureIntervalCount)
+            description.put("capture_interval_min_ns", captureIntervalMinNs)
+            description.put("capture_interval_max_ns", captureIntervalMaxNs)
+            description.put(
+                "capture_effective_fps",
+                1_000_000_000.0 / (captureIntervalTotalNs.toDouble() / captureIntervalCount)
+            )
+        } else {
+            description.put("capture_interval_average_ns", JSONObject.NULL)
+            description.put("capture_interval_min_ns", JSONObject.NULL)
+            description.put("capture_interval_max_ns", JSONObject.NULL)
+            description.put("capture_effective_fps", JSONObject.NULL)
+        }
+        if (summary != null) {
+            description.put("submitted_frames", summary.submittedFrames)
+            description.put("encoded_frames", summary.encodedFrames)
+            description.put("encoder_drops", summary.encoderDrops)
+            description.put("queue_average_ms", summary.queueAverageMs)
+            description.put("queue_max_ms", summary.queueMaxMs)
+            description.put("conversion_average_ms", summary.conversionAverageMs)
+            description.put("conversion_max_ms", summary.conversionMaxMs)
+            description.put("processing_average_ms", summary.processingAverageMs)
+            description.put("processing_max_ms", summary.processingMaxMs)
+            description.put("encoder_first_timestamp_ns", summary.firstTimestampNs)
+            description.put("encoder_last_timestamp_ns", summary.lastTimestampNs)
+            description.put("capture_failure_drops", captureFailureDrops)
+            summary.error?.let { description.put("encoder_error", it) }
+        }
+        runCatching { descriptionFile.writeText(description.toString(2)) }
+            .onFailure { Log.e(TAG, "Could not update 8-BIT metadata", it) }
+    }
+
     private fun schedulePure10AudioMuxIfReady(directory: File) {
         if (!isPure10AudioMuxReady(directory)) return
         val directoryKey = directory.absolutePath
         if (!pure10MuxQueuedDirectories.add(directoryKey)) return
         val inProgressFile = File(directory, Pure10AudioMuxer.MUX_IN_PROGRESS_FILE)
         runCatching { inProgressFile.writeText(System.currentTimeMillis().toString()) }
-        logStopMeasurement("PURE10_AUDIO_MUX_START")
+        logStopMeasurement("AUDIO_MUX_START")
         runOnUiThread {
             updateControlModes()
             updateRecordingChrome()
@@ -3935,11 +4146,11 @@ class MainActivity : Activity() {
         postProcessExecutor.execute {
             val result = Pure10AudioMuxer.mux(directory)
             logStopMeasurement(
-                "PURE10_AUDIO_MUX_DONE",
-                "finalized=${result.finalized} final_bytes=${File(directory, "pure10_final.mp4").length()}"
+                "AUDIO_MUX_DONE",
+                "finalized=${result.finalized} final_bytes=${result.outputFile.length()}"
             )
             if (!result.finalized) {
-                Log.e(TAG, "PURE 10 audio mux failed: ${result.error}")
+                Log.e(TAG, "Audio mux failed: ${result.error}")
             }
             runCatching { inProgressFile.delete() }
             pure10MuxQueuedDirectories.remove(directoryKey)
@@ -3963,14 +4174,17 @@ class MainActivity : Activity() {
         val audioFile = File(directory, PcmAudioRecorder.AUDIO_FILE)
         val audioMetadataFile = File(directory, PcmAudioRecorder.AUDIO_METADATA_FILE)
         val syncFile = File(directory, "sync.json")
-        val videoFile = File(directory, Pure10Encoder.VIDEO_FILE)
-        if (!clipFile.isFile || !audioFile.isFile || !audioMetadataFile.isFile ||
-            !syncFile.isFile || !videoFile.isFile || videoFile.length() <= 0L
-        ) {
+        if (!clipFile.isFile || !audioFile.isFile || !audioMetadataFile.isFile || !syncFile.isFile) {
             return false
         }
         val clip = runCatching { JSONObject(clipFile.readText()) }.getOrNull() ?: return false
-        if (clip.optString("format") != "rawlite-pure10") return false
+        val format = clip.optString("format")
+        if (format != "rawlite-pure10" && format != "rawlite-10bit" && format != "rawlite-8bit") return false
+        val videoFileName = if (format == "rawlite-8bit") EightBitRec709Encoder.VIDEO_FILE else Pure10Encoder.VIDEO_FILE
+        val videoFile = File(directory, videoFileName)
+        if (!videoFile.isFile || videoFile.length() <= 0L) {
+            return false
+        }
         if (!clip.optBoolean("finalized", false)) return false
         if (clip.optBoolean(Pure10AudioMuxer.FINAL_VIDEO_HAS_AUDIO, false) &&
             File(directory, clip.optString("final_video_file", "")).isFile
@@ -4341,7 +4555,11 @@ class MainActivity : Activity() {
             }
         }
         val previewSize = currentPreviewSize()
-        val captureLabel = if (captureMode == CaptureMode.PURE10) "HLG 10" else "RAW"
+        val captureLabel = when (captureMode) {
+            CaptureMode.RAW -> "RAW"
+            CaptureMode.TEN_BIT -> "10-BIT"
+            CaptureMode.EIGHT_BIT -> "8-BIT"
+        }
         val rawAvailability = if (rawVideoSupportedForCurrentCamera()) {
             captureLabel
         } else {
@@ -4353,9 +4571,13 @@ class MainActivity : Activity() {
     }
 
     private fun estimatedRecordingBytesPerSecond(): Long {
-        if (captureMode == CaptureMode.PURE10) {
+        if (captureMode == CaptureMode.TEN_BIT) {
             val audioBytesPerSecond = if (audioEnabled) 48_000L * 2L * 3L else 0L
             return Pure10Encoder.BIT_RATE / 8L + audioBytesPerSecond
+        }
+        if (captureMode == CaptureMode.EIGHT_BIT) {
+            val audioBytesPerSecond = if (audioEnabled) 48_000L * 2L * 3L else 0L
+            return EightBitRec709Encoder.BIT_RATE / 8L + audioBytesPerSecond
         }
         val size = currentRawSize() ?: return 0L
         val bytesPerFrame = if (selectedRawIndex > 0) {
@@ -4620,27 +4842,27 @@ class MainActivity : Activity() {
     private fun currentHlg10Profile(): Hlg10OutputProfile? =
         availableHlg10Profiles().getOrNull(selectedHlg10Index)
 
-    private fun currentResolutionIndex(): Int = if (captureMode == CaptureMode.PURE10) {
+    private fun currentResolutionIndex(): Int = if (captureMode != CaptureMode.RAW) {
         selectedHlg10Index
     } else {
         selectedRawIndex
     }
 
-    private fun currentResolutionCount(): Int = if (captureMode == CaptureMode.PURE10) {
+    private fun currentResolutionCount(): Int = if (captureMode != CaptureMode.RAW) {
         availableHlg10Profiles().size
     } else {
         currentOption()?.rawSizes?.size ?: 0
     }
 
     private fun setCurrentResolutionIndex(index: Int) {
-        if (captureMode == CaptureMode.PURE10) {
+        if (captureMode != CaptureMode.RAW) {
             selectedHlg10Index = index.coerceIn(0, (availableHlg10Profiles().size - 1).coerceAtLeast(0))
         } else {
             selectedRawIndex = index.coerceIn(0, ((currentOption()?.rawSizes?.size ?: 1) - 1))
         }
     }
 
-    private fun resolutionLabelAt(index: Int): String? = if (captureMode == CaptureMode.PURE10) {
+    private fun resolutionLabelAt(index: Int): String? = if (captureMode != CaptureMode.RAW) {
         availableHlg10Profiles().getOrNull(index)?.exactLabel
     } else {
         currentOption()?.rawSizes?.getOrNull(index)?.let(::resolutionDisplayLabel)
@@ -4649,13 +4871,13 @@ class MainActivity : Activity() {
     private fun currentResolutionLabel(): String =
         resolutionLabelAt(currentResolutionIndex()) ?: "—"
 
-    private fun currentResolutionSize(): Size? = if (captureMode == CaptureMode.PURE10) {
+    private fun currentResolutionSize(): Size? = if (captureMode != CaptureMode.RAW) {
         currentHlg10Profile()?.let { Size(it.width, it.height) }
     } else {
         currentRawSize()
     }
 
-    private fun currentFpsOptions(): List<Int> = if (captureMode == CaptureMode.PURE10) {
+    private fun currentFpsOptions(): List<Int> = if (captureMode != CaptureMode.RAW) {
         currentHlg10Profile()?.frameRates.orEmpty().ifEmpty { FPS_OPTIONS }
     } else {
         FPS_OPTIONS
@@ -4680,15 +4902,24 @@ class MainActivity : Activity() {
         if (!::resolutionSpinner.isInitialized || !::fpsSpinner.isInitialized) return
         val previousSuppression = suppressSpinnerEvents
         suppressSpinnerEvents = true
-        val labels = if (captureMode == CaptureMode.PURE10) {
-            availableHlg10Profiles().map { profile ->
-                "HLG 10 · ${profile.exactLabel} · ${profile.aspectLabel} · " +
-                    hlg10StatusLabel(profile.status)
+        val labels = when (captureMode) {
+            CaptureMode.TEN_BIT -> {
+                availableHlg10Profiles().map { profile ->
+                    "10-BIT · ${profile.exactLabel} · ${profile.aspectLabel} · " +
+                        hlg10StatusLabel(profile.status)
+                }
             }
-        } else {
-            currentOption()?.rawSizes.orEmpty().mapIndexed { index, size ->
-                val format = if (index == 0) "CinemaDNG FULL" else "RAW10"
-                "$format · ${resolutionDisplayLabel(size)} · ${aspectRatioLabel(size)}"
+            CaptureMode.EIGHT_BIT -> {
+                availableHlg10Profiles().map { profile ->
+                    "8-BIT · ${profile.exactLabel} · ${profile.aspectLabel} · " +
+                        hlg10StatusLabel(profile.status)
+                }
+            }
+            CaptureMode.RAW -> {
+                currentOption()?.rawSizes.orEmpty().mapIndexed { index, size ->
+                    val format = if (index == 0) "CinemaDNG FULL" else "RAW10"
+                    "$format · ${resolutionDisplayLabel(size)} · ${aspectRatioLabel(size)}"
+                }
             }
         }
         resolutionSpinner.adapter = spinnerAdapter(labels)
@@ -4715,7 +4946,7 @@ class MainActivity : Activity() {
     }
 
     private fun showCurrentResolutionStatus() {
-        if (captureMode != CaptureMode.PURE10 || !::cameraChrome.isInitialized) return
+        if (captureMode == CaptureMode.RAW || !::cameraChrome.isInitialized) return
         val profile = currentHlg10Profile() ?: return
         cameraChrome.showStatusPopup(
             "${profile.exactLabel} · ${profile.aspectLabel} · ${hlg10StatusLabel(profile.status)}"
@@ -4725,7 +4956,7 @@ class MainActivity : Activity() {
     private fun currentRawSize(): Size? = currentOption()?.rawSizes?.getOrNull(selectedRawIndex)
     private fun currentCaptureRawSize(): Size? {
         val fallback = currentRawSize() ?: return null
-        if (captureMode != CaptureMode.PURE10) return fallback
+        if (captureMode == CaptureMode.RAW) return fallback
         val outputSize = currentResolutionSize() ?: return null
         return pure10SourceSize(outputSize, fallback)
     }
@@ -4740,7 +4971,7 @@ class MainActivity : Activity() {
     }
 
     private fun isPure10UhdSelected(): Boolean {
-        if (captureMode != CaptureMode.PURE10) return false
+        if (captureMode == CaptureMode.RAW) return false
         val profile = currentHlg10Profile() ?: return false
         return profile.width == 3840 && profile.height == 2160
     }
@@ -4771,36 +5002,52 @@ class MainActivity : Activity() {
 
     private fun updateFormatHint() {
         if (!::formatHint.isInitialized) return
-        formatHint.text = if (captureMode == CaptureMode.PURE10) {
-            val profile = currentHlg10Profile()
-            if (profile != null) {
-                "HLG 10 · ${profile.exactLabel} · ${profile.aspectLabel} · " +
-                    "${selectedFps} FPS · HEVC MAIN10 · " +
-                    "${Pure10Encoder.BIT_RATE / 1_000_000} Mb/s · " +
-                    hlg10StatusLabel(profile.status)
-            } else {
-                "HLG 10 no disponible"
+        formatHint.text = when (captureMode) {
+            CaptureMode.TEN_BIT -> {
+                val profile = currentHlg10Profile()
+                if (profile != null) {
+                    "10-BIT · ${profile.exactLabel} · ${profile.aspectLabel} · " +
+                        "${selectedFps} FPS · HEVC MAIN10 · " +
+                        "${Pure10Encoder.BIT_RATE / 1_000_000} Mb/s · " +
+                        hlg10StatusLabel(profile.status)
+                } else {
+                    "10-BIT no disponible"
+                }
             }
-        } else if (selectedRawIndex > 0) {
-            val size = currentRawSize()
-            val megabytesPerSecond = size?.let {
-                ((it.width.toLong() * it.height * 10L + 7L) / 8L) * selectedFps / 1_000_000.0
+            CaptureMode.EIGHT_BIT -> {
+                val profile = currentHlg10Profile()
+                if (profile != null) {
+                    "8-BIT · ${profile.exactLabel} · ${profile.aspectLabel} · " +
+                        "${selectedFps} FPS · AVC HIGH · " +
+                        "${EightBitRec709Encoder.BIT_RATE / 1_000_000} Mb/s · " +
+                        hlg10StatusLabel(profile.status)
+                } else {
+                    "8-BIT no disponible"
+                }
             }
-            if (megabytesPerSecond != null) {
-                String.format(
-                    Locale.US,
-                    "RAW10 · %s · %s · %.1f MB/s",
-                    size?.let(::resolutionDisplayLabel) ?: "—",
-                    size?.let(::aspectRatioLabel) ?: "—",
-                    megabytesPerSecond
-                )
-            } else {
-                "RAW10 secuencial"
+            CaptureMode.RAW -> {
+                if (selectedRawIndex > 0) {
+                    val size = currentRawSize()
+                    val megabytesPerSecond = size?.let {
+                        ((it.width.toLong() * it.height * 10L + 7L) / 8L) * selectedFps / 1_000_000.0
+                    }
+                    if (megabytesPerSecond != null) {
+                        String.format(
+                            Locale.US,
+                            "RAW10 · %s · %s · %.1f MB/s",
+                            size?.let(::resolutionDisplayLabel) ?: "—",
+                            size?.let(::aspectRatioLabel) ?: "—",
+                            megabytesPerSecond
+                        )
+                    } else {
+                        "RAW10 secuencial"
+                    }
+                } else {
+                    val size = currentRawSize()
+                    "CinemaDNG · ${size?.let(::resolutionDisplayLabel) ?: "—"} · " +
+                        "${size?.let(::aspectRatioLabel) ?: "—"}"
+                }
             }
-        } else {
-            val size = currentRawSize()
-            "CinemaDNG · ${size?.let(::resolutionDisplayLabel) ?: "—"} · " +
-                "${size?.let(::aspectRatioLabel) ?: "—"}"
         }
     }
 
@@ -5553,7 +5800,8 @@ class MainActivity : Activity() {
         stopMeasureId += 1
         stopMeasureStartMs = SystemClock.elapsedRealtime()
         stopMeasureMode = when {
-            pure10Recording -> "PURE10"
+            eightBitRecording -> "8BIT"
+            pure10Recording -> "10BIT"
             packedRawRecording -> "RAW10"
             dngRecording -> "DNG"
             else -> activeCaptureMode.name

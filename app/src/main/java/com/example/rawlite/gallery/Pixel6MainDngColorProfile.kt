@@ -29,6 +29,8 @@ internal object Pixel6MainDngColorProfile {
 
     /** D65 camera RGB to linear Rec.2020 using the DNG white-point model. */
     val CAMERA_RGB_TO_REC2020_D65: FloatArray = cameraRgbToRec2020(6500)
+    /** D65 camera RGB to linear Rec.709 using the DNG white-point model. */
+    val CAMERA_RGB_TO_REC709_D65: FloatArray = cameraRgbToRec709(6500)
     const val BASELINE_EXPOSURE_EV = 0.59
     const val DEFAULT_RENDER_GAIN = 1.505247f
 
@@ -101,6 +103,41 @@ internal object Pixel6MainDngColorProfile {
             blueGain
         )
         return DngColorScience.whiteBalancedCameraToLinearRec2020(PROFILE, neutral)
+    }
+
+    fun cameraRgbToRec709(kelvin: Int): FloatArray {
+        val neutral = DngColorScience.neutralForTemperature(PROFILE, kelvin.toDouble())
+        return DngColorScience.cameraToLinearRec709(PROFILE, neutral)
+    }
+
+    fun cameraRgbToRec709(
+        redGain: Float,
+        greenEvenGain: Float,
+        greenOddGain: Float,
+        blueGain: Float
+    ): FloatArray {
+        val neutral = DngColorScience.asShotNeutralFromGains(
+            redGain,
+            greenEvenGain,
+            greenOddGain,
+            blueGain
+        )
+        return DngColorScience.cameraToLinearRec709(PROFILE, neutral)
+    }
+
+    fun whiteBalancedCameraRgbToRec709(
+        redGain: Float,
+        greenEvenGain: Float,
+        greenOddGain: Float,
+        blueGain: Float
+    ): FloatArray {
+        val neutral = DngColorScience.asShotNeutralFromGains(
+            redGain,
+            greenEvenGain,
+            greenOddGain,
+            blueGain
+        )
+        return DngColorScience.whiteBalancedCameraToLinearRec709(PROFILE, neutral)
     }
 
     fun cameraRgbToRec2020Json(kelvin: Int): JSONArray = JSONArray().apply {

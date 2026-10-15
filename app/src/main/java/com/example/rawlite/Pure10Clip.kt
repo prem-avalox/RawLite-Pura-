@@ -11,7 +11,8 @@ internal object Pure10Clip {
         if (!descriptionFile.isFile) return null
         return runCatching {
             val metadata = JSONObject(descriptionFile.readText())
-            if (metadata.optString("format") != "rawlite-pure10") return null
+            val format = metadata.optString("format")
+            if (format != "rawlite-pure10" && format != "rawlite-10bit" && format != "rawlite-8bit") return null
             val finalVideoName = metadata.optString("final_video_file", "")
             val finalVideo = if (metadata.optBoolean(Pure10AudioMuxer.FINAL_VIDEO_HAS_AUDIO, false) &&
                 finalVideoName.isNotBlank()
@@ -20,10 +21,15 @@ internal object Pure10Clip {
             } else {
                 null
             }
+            val fallbackVideo = if (format == "rawlite-8bit") {
+                EightBitRec709Encoder.VIDEO_FILE
+            } else {
+                Pure10Encoder.VIDEO_FILE
+            }
             val videoName = if (finalVideo?.isFile == true && finalVideo.length() > 0L) {
                 finalVideo.name
             } else {
-                metadata.optString("video_file", Pure10Encoder.VIDEO_FILE)
+                metadata.optString("video_file", fallbackVideo)
             }
             val video = File(directory, videoName)
             if (!video.isFile || video.length() <= 0L) return null
@@ -100,7 +106,7 @@ internal object Pure10Clip {
                 byteCount = directory.listFiles()?.sumOf { it.length() } ?: video.length(),
                 finalized = metadata.optBoolean("finalized", false),
                 audioDescription = audio,
-                captureFormat = "PURE 10",
+                captureFormat = if (format == "rawlite-8bit") "8-BIT" else "10-BIT",
                 videoFileName = videoName,
                 integratedAudio = integratedAudio,
                 postProcessing = muxInProgress

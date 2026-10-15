@@ -8,10 +8,11 @@ import java.util.Locale
 
 /** Creates capture directories without ever reusing an existing take. */
 internal object CaptureStorage {
-    private val legacyPrefixes = listOf("RawLite_")
+    private val legacyPrefixes = listOf("RawLite_", "PURE10_")
     private val capturePrefixes = mapOf(
         CaptureOutput.RAW10 to "RAW10",
-        CaptureOutput.PURE10 to "PURE10",
+        CaptureOutput.TEN_BIT to "10BIT",
+        CaptureOutput.EIGHT_BIT to "8BIT",
         CaptureOutput.CINEMA_DNG to "CINEMADNG"
     )
 

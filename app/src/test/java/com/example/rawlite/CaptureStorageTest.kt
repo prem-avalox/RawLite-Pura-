@@ -14,8 +14,12 @@ class CaptureStorageTest {
             CaptureStorage.captureStem(CaptureOutput.RAW10, "20260808_142000")
         )
         assertEquals(
-            "PURE10_20260808_142000",
-            CaptureStorage.captureStem(CaptureOutput.PURE10, "20260808_142000")
+            "10BIT_20260808_142000",
+            CaptureStorage.captureStem(CaptureOutput.TEN_BIT, "20260808_142000")
+        )
+        assertEquals(
+            "8BIT_20260808_142000",
+            CaptureStorage.captureStem(CaptureOutput.EIGHT_BIT, "20260808_142000")
         )
         assertEquals(
             "CINEMADNG_20260808_142000",
@@ -26,6 +30,8 @@ class CaptureStorageTest {
     @Test
     fun displayName_removesKnownCapturePrefixes() {
         assertEquals("20260808_142000", CaptureStorage.displayName("RAW10_20260808_142000"))
+        assertEquals("20260808_142000", CaptureStorage.displayName("10BIT_20260808_142000"))
+        assertEquals("20260808_142000", CaptureStorage.displayName("8BIT_20260808_142000"))
         assertEquals("20260808_142000", CaptureStorage.displayName("PURE10_20260808_142000"))
         assertEquals("20260808_142000", CaptureStorage.displayName("CINEMADNG_20260808_142000"))
         assertEquals("20260808_142000", CaptureStorage.displayName("RawLite_20260808_142000"))

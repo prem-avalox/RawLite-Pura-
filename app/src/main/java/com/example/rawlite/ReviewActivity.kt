@@ -545,7 +545,8 @@ class ReviewActivity : Activity() {
     }
 
     private fun formatLongName(summary: ClipSummary): String = when (summary.captureFormat) {
-        "PURE 10" -> "HEVC MAIN10 HLG"
+        "10-BIT", "PURE 10" -> "HEVC MAIN10 HLG"
+        "8-BIT" -> "AVC HIGH REC.709"
         "CinemaDNG" -> "SECUENCIA DNG"
         else -> "BAYER RAW10C"
     }
@@ -566,7 +567,11 @@ class ReviewActivity : Activity() {
     }
 
     private fun galleryClipTitle(summary: ClipSummary): String {
-        val format = if (summary.captureFormat == "PURE 10") "PURE10" else summary.captureFormat.uppercase(Locale.getDefault())
+        val format = when (summary.captureFormat) {
+            "8-BIT" -> "8-BIT"
+            "10-BIT", "PURE 10" -> "10-BIT"
+            else -> summary.captureFormat.uppercase(Locale.getDefault())
+        }
         val captured = SimpleDateFormat("dd MMM · HH:mm", Locale("es", "EC"))
             .format(Date(CaptureStorage.captureTimeMillis(summary.directory)))
             .uppercase(Locale("es", "EC"))
@@ -620,7 +625,7 @@ class ReviewActivity : Activity() {
 
     private fun decodeThumbnail(summary: ClipSummary): Bitmap? {
         return when (summary.captureFormat) {
-            "PURE 10" -> {
+            "10-BIT", "8-BIT", "PURE 10" -> {
                 val retriever = MediaMetadataRetriever()
                 try {
                     retriever.setDataSource(
@@ -648,7 +653,7 @@ class ReviewActivity : Activity() {
         subtitleView.text = "${formatLongName(summary)} · ${summary.width}×${summary.height} · ${summary.fps} FPS"
         backButton.contentDescription = "Volver a tomas"
         when (summary.captureFormat) {
-            "PURE 10" -> buildPure10Player(summary)
+            "10-BIT", "8-BIT", "PURE 10" -> buildPure10Player(summary)
             "CinemaDNG" -> openSequence(summary, PlaybackKind.DNG)
             else -> openSequence(summary, PlaybackKind.RAW10)
         }
@@ -880,7 +885,11 @@ class ReviewActivity : Activity() {
         detailView = TextView(this).apply {
             text = "${summary.captureFormat.uppercase(Locale.getDefault())}   " +
                 "${summary.width}×${summary.height}   ${summary.fps} FPS" +
-                (if (summary.captureFormat == "PURE 10") "   HEVC MAIN10 · HLG" else "")
+                (when (summary.captureFormat) {
+                    "10-BIT", "PURE 10" -> "   HEVC MAIN10 · HLG"
+                    "8-BIT" -> "   AVC HIGH · REC.709"
+                    else -> ""
+                })
             textSize = 10f
             typeface = uiTypeface
             isSingleLine = true
@@ -2029,7 +2038,7 @@ class ReviewActivity : Activity() {
             .setTitle("Sin RAW10")
             .setMessage(
                 "La conversión disponible para este flujo es RAW10 → CinemaDNG 2K.\n\n" +
-                    "PURE 10 ya es video MP4 y CinemaDNG ya es una secuencia DNG; no se convierten aquí."
+                    "10-BIT y 8-BIT ya son video MP4 y CinemaDNG ya es una secuencia DNG; no se convierten aquí."
             )
             .setPositiveButton("ENTENDIDO", null)
             .create()

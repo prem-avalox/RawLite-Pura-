@@ -4,6 +4,7 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.params.ColorSpaceTransform
 import android.util.Size
 import com.example.rawlite.DngSequenceClip
+import com.example.rawlite.EightBitRec709Encoder
 import com.example.rawlite.PcmAudioRecorder
 import com.example.rawlite.Pure10Encoder
 import com.example.rawlite.gallery.Pixel6MainDngColorProfile
@@ -74,7 +75,7 @@ internal object CaptureMetadataFactory {
         common(context).apply {
             put("format", "rawlite-pure10")
             put("version", 1)
-            put("mode", "PURE 10")
+            put("mode", "10-BIT")
             put("container", "MP4")
             put("video_file", Pure10Encoder.VIDEO_FILE)
             put("codec", "HEVC")
@@ -105,6 +106,47 @@ internal object CaptureMetadataFactory {
             )
             put("baseline_exposure", Pixel6MainDngColorProfile.BASELINE_EXPOSURE_EV)
             put("bit_rate", Pure10Encoder.BIT_RATE)
+            put("source", "Camera2 RAW10")
+            put("demosaic", "native 2x2")
+            put("finalized", false)
+            Pixel6MainDngColorProfile.apply(this)
+        }
+
+    fun eightBit(
+        context: CaptureMetadataContext,
+        postRawGain: Int,
+        colorTemperatureKelvin: Int
+    ): JSONObject =
+        common(context).apply {
+            put("format", "rawlite-8bit")
+            put("version", 1)
+            put("mode", "8-BIT")
+            put("container", "MP4")
+            put("video_file", EightBitRec709Encoder.VIDEO_FILE)
+            put("codec", "AVC")
+            put("codec_profile", "High")
+            put("encoder", EightBitRec709Encoder.CODEC_NAME)
+            put("bits_per_sample", 8)
+            put("pixel_format", "NV12")
+            put("color_primaries", "BT.709")
+            put("color_space", "Rec.709")
+            put("transfer", "Rec.709 Cine Gamma S-Curve")
+            put("gamma", "Rec.709 Cine Gamma")
+            put("range", "limited")
+            put("color_temperature_kelvin", colorTemperatureKelvin)
+            put(
+                "color_pipeline",
+                "RAW10 -> DNG AsShotNeutral gains -> dual-illuminant ColorMatrix -> " +
+                    "Bradford D50/D65 -> linear Rec.709 -> Cine Gamma S-Curve"
+            )
+            put("color_transform_strategy", "white-balanced DNG camera space")
+            put("color_adjustment", "none")
+            put(
+                "scene_linear_gain",
+                Pixel6MainDngColorProfile.DEFAULT_RENDER_GAIN * postRawGain / 100f
+            )
+            put("baseline_exposure", Pixel6MainDngColorProfile.BASELINE_EXPOSURE_EV)
+            put("bit_rate", EightBitRec709Encoder.BIT_RATE)
             put("source", "Camera2 RAW10")
             put("demosaic", "native 2x2")
             put("finalized", false)

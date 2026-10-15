@@ -10,6 +10,36 @@ internal object NativeTenBitConverter {
 
     external fun resetP010HlgCaches()
 
+    external fun resetNv12Rec709Caches()
+
+    external fun raw10ToNv12Rec709(
+        raw: ByteBuffer,
+        rawOffset: Int,
+        rawLimit: Int,
+        rawRowStride: Int,
+        output: ByteBuffer,
+        sourceWidth: Int,
+        sourceHeight: Int,
+        cropX: Int,
+        cropY: Int,
+        outputWidth: Int,
+        outputHeight: Int,
+        outputRowStrideBytes: Int,
+        outputSliceHeight: Int,
+        colorFilterArrangement: Int,
+        blackLevel: Int,
+        whiteLevel: Int,
+        exposureGain: Float,
+        redGain: Float,
+        greenEvenGain: Float,
+        greenOddGain: Float,
+        blueGain: Float,
+        cameraRgbToRec709: FloatArray,
+        lensShadingGains: FloatArray?,
+        lensShadingRows: Int,
+        lensShadingColumns: Int
+    ): Long
+
     external fun raw10ToP010Hlg(
         raw: ByteBuffer,
         rawOffset: Int,

@@ -272,6 +272,108 @@ std::shared_ptr<const P010HlgLookupTables> p010_hlg_lookup_tables(
     return tables;
 }
 
+struct Nv12Rec709LookupTables {
+    int black_level = 0;
+    int white_level = 0;
+    float exposure_gain = 1.0f;
+    float red_gain = 1.0f;
+    float green_even_gain = 1.0f;
+    float green_odd_gain = 1.0f;
+    float blue_gain = 1.0f;
+    std::array<int, 1024> red{};
+    std::array<int, 1024> green_even{};
+    std::array<int, 1024> green_odd{};
+    std::array<int, 1024> blue{};
+    std::array<uint8_t, 4097> rec709_cine{};
+};
+
+std::mutex nv12_rec709_lookup_mutex;
+std::shared_ptr<const Nv12Rec709LookupTables> nv12_rec709_lookup_cache;
+LensShadingCache nv12_rec709_lens_shading_cache;
+
+std::shared_ptr<const Nv12Rec709LookupTables> nv12_rec709_lookup_tables(
+    int black_level,
+    int white_level,
+    float exposure_gain,
+    float red_gain,
+    float green_even_gain,
+    float green_odd_gain,
+    float blue_gain
+) {
+    std::lock_guard<std::mutex> lock(nv12_rec709_lookup_mutex);
+    const auto cached = nv12_rec709_lookup_cache;
+    if (cached != nullptr && cached->black_level == black_level &&
+        cached->white_level == white_level && cached->exposure_gain == exposure_gain &&
+        cached->red_gain == red_gain && cached->green_even_gain == green_even_gain &&
+        cached->green_odd_gain == green_odd_gain && cached->blue_gain == blue_gain) {
+        return cached;
+    }
+
+    constexpr int kLinearScale = 4096;
+    auto tables = std::make_shared<Nv12Rec709LookupTables>();
+    tables->black_level = black_level;
+    tables->white_level = white_level;
+    tables->exposure_gain = exposure_gain;
+    tables->red_gain = red_gain;
+    tables->green_even_gain = green_even_gain;
+    tables->green_odd_gain = green_odd_gain;
+    tables->blue_gain = blue_gain;
+
+    const auto normalized_linear = [black_level, white_level](int value, float gain) -> int {
+        const float linear = std::clamp(
+            (value - black_level) / static_cast<float>(white_level - black_level),
+            0.0f,
+            1.0f
+        );
+        return static_cast<int>(
+            std::lround(std::clamp(linear * gain, 0.0f, 1.0f) * kLinearScale)
+        );
+    };
+
+    // Rec.709 Cine Gamma S-Curve:
+    // Gentle shadow toe (< 0.02), 18% neutral gray anchored at ~40% IRE (~102-104 in 8-bit),
+    // soft shoulder roll-off starting around 75% IRE (~190) with asymptotic compression towards 254.
+    constexpr float k = 0.395f / 0.4242640687f; // 0.395 / sqrt(0.18)
+    constexpr float toe_limit = 0.02f;
+    constexpr float knee = 0.795f; // ~190 in 8-bit limited range: 16 + 0.795 * 219 = 190.1
+    constexpr float max_norm = (254.0f - 16.0f) / 219.0f; // 1.08675799f -> 254 in 8-bit
+    constexpr float shoulder_headroom = max_norm - knee;
+
+    for (int value = 0; value <= kLinearScale; ++value) {
+        const float linear = std::max(
+            0.0f,
+            exposure_gain * static_cast<float>(value) / kLinearScale
+        );
+        if (linear <= 0.0f) {
+            tables->rec709_cine[value] = 16;
+            continue;
+        }
+        float base = k * std::sqrt(linear);
+        if (linear < toe_limit) {
+            const float t = linear / toe_limit;
+            const float smooth_t = t * t * (3.0f - 2.0f * t);
+            base = base * smooth_t + (linear / toe_limit) * (base * 0.5f) * (1.0f - smooth_t);
+        }
+        if (base > knee) {
+            const float excess = base - knee;
+            base = knee + shoulder_headroom * (excess / (excess + shoulder_headroom * 0.75f));
+        }
+        const float y8_f = 16.0f + base * 219.0f;
+        tables->rec709_cine[value] = static_cast<uint8_t>(
+            std::clamp(std::lround(y8_f), 16L, 254L)
+        );
+    }
+
+    for (int value = 0; value < 1024; ++value) {
+        tables->red[value] = normalized_linear(value, red_gain);
+        tables->green_even[value] = normalized_linear(value, green_even_gain);
+        tables->green_odd[value] = normalized_linear(value, green_odd_gain);
+        tables->blue[value] = normalized_linear(value, blue_gain);
+    }
+    nv12_rec709_lookup_cache = tables;
+    return tables;
+}
+
 class P010RowWorkerPool {
 public:
     P010RowWorkerPool() {
@@ -1440,6 +1542,21 @@ Java_com_example_rawlite_NativeTenBitConverter_resetP010HlgCaches(
     }
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_example_rawlite_NativeTenBitConverter_resetNv12Rec709Caches(
+    JNIEnv*,
+    jobject
+) {
+    {
+        std::lock_guard<std::mutex> lock(nv12_rec709_lens_shading_cache.mutex);
+        nv12_rec709_lens_shading_cache.correction.reset();
+    }
+    {
+        std::lock_guard<std::mutex> lock(nv12_rec709_lookup_mutex);
+        nv12_rec709_lookup_cache.reset();
+    }
+}
+
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
     JNIEnv* env,
@@ -2062,6 +2179,622 @@ Java_com_example_rawlite_NativeTenBitConverter_raw10ToP010Hlg(
         const size_t start = static_cast<size_t>(y) * output_stride_pixels;
         if (start >= uv_capacity_pixels) break;
         const size_t end = std::min(start + output_stride_pixels, uv_capacity_pixels);
+        std::fill(uv_plane + start, uv_plane + end, neutral_chroma);
+    }
+
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count();
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_example_rawlite_NativeTenBitConverter_raw10ToNv12Rec709(
+    JNIEnv* env,
+    jobject,
+    jobject raw_buffer,
+    jint raw_offset,
+    jint raw_limit,
+    jint raw_row_stride,
+    jobject output_buffer,
+    jint source_width,
+    jint source_height,
+    jint crop_x,
+    jint crop_y,
+    jint output_width,
+    jint output_height,
+    jint output_row_stride_bytes,
+    jint output_slice_height,
+    jint cfa,
+    jint black_level,
+    jint white_level,
+    jfloat exposure_gain,
+    jfloat red_gain,
+    jfloat green_even_gain,
+    jfloat green_odd_gain,
+    jfloat blue_gain,
+    jfloatArray camera_to_rec709_array,
+    jfloatArray lens_shading_gains_array,
+    jint lens_shading_rows,
+    jint lens_shading_columns
+) {
+    const auto started = std::chrono::steady_clock::now();
+    auto* raw_base = static_cast<uint8_t*>(env->GetDirectBufferAddress(raw_buffer));
+    auto* output_base = static_cast<uint8_t*>(env->GetDirectBufferAddress(output_buffer));
+    const jlong raw_capacity = env->GetDirectBufferCapacity(raw_buffer);
+    const jlong output_capacity = env->GetDirectBufferCapacity(output_buffer);
+    if (raw_base == nullptr || output_base == nullptr ||
+        source_width <= 0 || source_height <= 0 ||
+        crop_x < 0 || crop_y < 0 ||
+        output_width <= 0 || output_height <= 0 ||
+        (source_width & 1) != 0 || (source_height & 1) != 0 ||
+        (crop_x & 1) != 0 || (crop_y & 1) != 0 ||
+        (output_width & 1) != 0 || (output_height & 1) != 0 ||
+        crop_x + output_width > source_width ||
+        crop_y + output_height > source_height) {
+        return -EINVAL;
+    }
+
+    const int packed_row_bytes = (source_width * 10 + 7) / 8;
+    const int64_t required_raw = static_cast<int64_t>(raw_offset) +
+        static_cast<int64_t>(source_height - 1) * raw_row_stride + packed_row_bytes;
+    const int64_t required_output =
+        static_cast<int64_t>(output_row_stride_bytes) * output_slice_height +
+        static_cast<int64_t>(output_row_stride_bytes) * (output_height / 2 - 1) +
+        static_cast<int64_t>(output_width);
+    if (raw_offset < 0 || raw_limit > raw_capacity || raw_row_stride < packed_row_bytes ||
+        required_raw > raw_limit || output_row_stride_bytes < output_width ||
+        output_slice_height < output_height ||
+        required_output > output_capacity ||
+        white_level <= black_level) {
+        return -EINVAL;
+    }
+
+    std::array<float, 9> camera_to_rec709{
+        1.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 1.0f
+    };
+    if (camera_to_rec709_array != nullptr &&
+        env->GetArrayLength(camera_to_rec709_array) >= 9) {
+        env->GetFloatArrayRegion(camera_to_rec709_array, 0, 9, camera_to_rec709.data());
+    }
+    const auto safe_gain = [](float value) -> float {
+        return std::isfinite(value) ? std::clamp(value, 0.125f, 8.0f) : 1.0f;
+    };
+    const float safe_red_gain = safe_gain(red_gain);
+    const float safe_green_even_gain = safe_gain(green_even_gain);
+    const float safe_green_odd_gain = safe_gain(green_odd_gain);
+    const float safe_blue_gain = safe_gain(blue_gain);
+    const auto lens_shading = lens_shading_correction(
+        nv12_rec709_lens_shading_cache,
+        true,
+        env,
+        lens_shading_gains_array,
+        lens_shading_rows,
+        lens_shading_columns,
+        source_width,
+        source_height,
+        crop_x,
+        crop_y,
+        output_width / 2,
+        output_height / 2,
+        2,
+        cfa
+    );
+
+    constexpr int kLinearScale = 4096;
+    constexpr int kMatrixScale = 16384;
+    std::array<int, 9> camera_to_rec709_q{};
+    for (size_t i = 0; i < camera_to_rec709.size(); ++i) {
+        camera_to_rec709_q[i] = static_cast<int>(
+            std::lround(camera_to_rec709[i] * kMatrixScale)
+        );
+    }
+
+    const float safe_exposure_gain = std::clamp(exposure_gain, 0.25f, 8.0f);
+    const auto lookup_tables = nv12_rec709_lookup_tables(
+        black_level,
+        white_level,
+        safe_exposure_gain,
+        safe_red_gain,
+        safe_green_even_gain,
+        safe_green_odd_gain,
+        safe_blue_gain
+    );
+    const auto& red_lut = lookup_tables->red;
+    const auto& green_even_lut = lookup_tables->green_even;
+    const auto& green_odd_lut = lookup_tables->green_odd;
+    const auto& blue_lut = lookup_tables->blue;
+    const auto& rec709_cine_lut = lookup_tables->rec709_cine;
+
+    auto* y_plane = output_base;
+    auto* uv_plane = output_base + static_cast<size_t>(output_row_stride_bytes) * output_slice_height;
+    const size_t y_capacity_bytes = std::min(
+        static_cast<size_t>(output_capacity),
+        static_cast<size_t>(output_row_stride_bytes) * output_slice_height
+    );
+    const size_t uv_offset_bytes = static_cast<size_t>(output_row_stride_bytes) * output_slice_height;
+    const size_t uv_capacity_bytes = output_capacity > static_cast<jlong>(uv_offset_bytes)
+        ? static_cast<size_t>(output_capacity - static_cast<jlong>(uv_offset_bytes))
+        : 0;
+
+    const auto limited_chroma = [](int value) -> uint8_t {
+        return static_cast<uint8_t>(std::clamp(128 + value, 16, 240));
+    };
+
+    const auto luma = [](const std::array<uint8_t, 3>& rgb_in) -> uint8_t {
+        return static_cast<uint8_t>(std::clamp(
+            (218 * static_cast<int>(rgb_in[0]) +
+             732 * static_cast<int>(rgb_in[1]) +
+              74 * static_cast<int>(rgb_in[2]) + 512) >> 10,
+            16,
+            254
+        ));
+    };
+
+    const auto convert_rows = [&](int first_y, int end_y) {
+        if (first_y >= end_y) return;
+        const int num_row_pairs = (end_y - first_y) / 2;
+        const int num_quads = output_width / 2;
+        const size_t total_quads = static_cast<size_t>(num_row_pairs) * num_quads;
+        p010_scratchpad.ensure_capacity(total_quads);
+
+        uint16_t* quad_rf = p010_scratchpad.quad_rf.data();
+        uint16_t* quad_bf = p010_scratchpad.quad_bf.data();
+        uint16_t* quad_gf = p010_scratchpad.quad_gf.data();
+        uint16_t* quad_y = p010_scratchpad.quad_y.data();
+        int16_t* quad_g_diff = p010_scratchpad.quad_g_diff.data();
+        int16_t* quad_mod_g = p010_scratchpad.quad_mod_g.data();
+
+        // Pass 1a: extract raw samples, apply lookup tables and lens shading
+        for (int ry = 0; ry < num_row_pairs; ++ry) {
+            const int y = first_y + ry * 2;
+            const int source_y = crop_y + y;
+            const uint8_t* top_row = raw_base + raw_offset +
+                static_cast<size_t>(source_y) * raw_row_stride;
+            const uint8_t* bottom_row = top_row + raw_row_stride;
+            for (int qx = 0; qx < num_quads; ++qx) {
+                const int x = qx * 2;
+                const int source_x = crop_x + x;
+                const int group = source_x >> 2;
+                const int lane = source_x & 3;
+                const uint8_t* top_packed = top_row + group * 5;
+                const uint8_t* bottom_packed = bottom_row + group * 5;
+                const int p00 = (static_cast<int>(top_packed[lane]) << 2) |
+                    ((top_packed[4] >> (lane * 2)) & 0x03);
+                const int p01 = (static_cast<int>(top_packed[lane + 1]) << 2) |
+                    ((top_packed[4] >> ((lane + 1) * 2)) & 0x03);
+                const int p10 = (static_cast<int>(bottom_packed[lane]) << 2) |
+                    ((bottom_packed[4] >> (lane * 2)) & 0x03);
+                const int p11 = (static_cast<int>(bottom_packed[lane + 1]) << 2) |
+                    ((bottom_packed[4] >> ((lane + 1) * 2)) & 0x03);
+                int r = 0;
+                int b_value = 0;
+                int g0 = 0;
+                int g1 = 0;
+                switch (cfa) {
+                    case 1:  // GRBG
+                        g0 = p00; r = p01; b_value = p10; g1 = p11;
+                        break;
+                    case 2:  // GBRG
+                        g0 = p00; b_value = p01; r = p10; g1 = p11;
+                        break;
+                    case 3:  // BGGR
+                        b_value = p00; g0 = p01; g1 = p10; r = p11;
+                        break;
+                    case 0:  // RGGB
+                    default:
+                        r = p00; g0 = p01; g1 = p10; b_value = p11;
+                        break;
+                }
+
+                int rf = red_lut[std::clamp(r, 0, 1023)];
+                int bf = blue_lut[std::clamp(b_value, 0, 1023)];
+                int gf0 = green_even_lut[std::clamp(g0, 0, 1023)];
+                int gf1 = green_odd_lut[std::clamp(g1, 0, 1023)];
+                if (lens_shading != nullptr) {
+                    const size_t gain_base =
+                        (static_cast<size_t>(y / 2) * (output_width / 2) + qx) * 4;
+                    const auto corrected = [&](int value, int site) -> int {
+                        return std::min(
+                            (value * static_cast<int>(lens_shading->site_gains_q12[gain_base + site]) +
+                                2048) >> 12,
+                            kLinearScale
+                        );
+                    };
+                    switch (cfa) {
+                        case 1:  // GRBG: G0,R,B,G1
+                            gf0 = corrected(gf0, 0); rf = corrected(rf, 1);
+                            bf = corrected(bf, 2); gf1 = corrected(gf1, 3);
+                            break;
+                        case 2:  // GBRG: G0,B,R,G1
+                            gf0 = corrected(gf0, 0); bf = corrected(bf, 1);
+                            rf = corrected(rf, 2); gf1 = corrected(gf1, 3);
+                            break;
+                        case 3:  // BGGR: B,G0,G1,R
+                            bf = corrected(bf, 0); gf0 = corrected(gf0, 1);
+                            gf1 = corrected(gf1, 2); rf = corrected(rf, 3);
+                            break;
+                        case 0:
+                        default:  // RGGB: R,G0,G1,B
+                            rf = corrected(rf, 0); gf0 = corrected(gf0, 1);
+                            gf1 = corrected(gf1, 2); bf = corrected(bf, 3);
+                            break;
+                    }
+                }
+                const size_t idx = static_cast<size_t>(ry) * num_quads + qx;
+                quad_rf[idx] = static_cast<uint16_t>(rf);
+                quad_bf[idx] = static_cast<uint16_t>(bf);
+                quad_gf[idx] = static_cast<uint16_t>((gf0 + gf1 + 1) >> 1);
+                quad_g_diff[idx] = static_cast<int16_t>(gf0 - gf1);
+            }
+        }
+
+        // Pass 1b: Subpixel spatial centering of R and B to match G and Y center
+        const bool r_on_right = (cfa == 1 || cfa == 3);
+        const bool b_on_right = !r_on_right;
+        const bool r_on_bottom = (cfa == 2 || cfa == 3);
+        const bool b_on_bottom = !r_on_bottom;
+
+        for (int ry = 0; ry < num_row_pairs; ++ry) {
+            const int y = first_y + ry * 2;
+            const int r_ry_neighbor = r_on_bottom
+                ? (ry > 0 ? ry - 1 : ry)
+                : (ry + 1 < num_row_pairs ? ry + 1 : ry);
+            const int b_ry_neighbor = b_on_bottom
+                ? (ry > 0 ? ry - 1 : ry)
+                : (ry + 1 < num_row_pairs ? ry + 1 : ry);
+
+            const int prev_ry_g = ry > 0 ? ry - 1 : ry;
+            const int next_ry_g = ry + 1 < num_row_pairs ? ry + 1 : ry;
+
+            const auto* curr_r = &quad_rf[static_cast<size_t>(ry) * num_quads];
+            const auto* v_r = &quad_rf[static_cast<size_t>(r_ry_neighbor) * num_quads];
+            const auto* prev_r = &quad_rf[static_cast<size_t>(prev_ry_g) * num_quads];
+            const auto* next_r = &quad_rf[static_cast<size_t>(next_ry_g) * num_quads];
+
+            const auto* curr_b = &quad_bf[static_cast<size_t>(ry) * num_quads];
+            const auto* v_b = &quad_bf[static_cast<size_t>(b_ry_neighbor) * num_quads];
+            const auto* prev_b = &quad_bf[static_cast<size_t>(prev_ry_g) * num_quads];
+            const auto* next_b = &quad_bf[static_cast<size_t>(next_ry_g) * num_quads];
+
+            const auto* curr_g = &quad_gf[static_cast<size_t>(ry) * num_quads];
+            const auto* prev_g = &quad_gf[static_cast<size_t>(prev_ry_g) * num_quads];
+            const auto* next_g = &quad_gf[static_cast<size_t>(next_ry_g) * num_quads];
+
+            for (int qx = 0; qx < num_quads; ++qx) {
+                const int r_qx_neighbor = r_on_right
+                    ? (qx > 0 ? qx - 1 : qx)
+                    : (qx + 1 < num_quads ? qx + 1 : qx);
+                const int b_qx_neighbor = b_on_right
+                    ? (qx > 0 ? qx - 1 : qx)
+                    : (qx + 1 < num_quads ? qx + 1 : qx);
+
+                const uint32_t r_c = curr_r[qx];
+                const uint32_t r_h = (r_c * 3 + curr_r[r_qx_neighbor] + 2) >> 2;
+                const uint32_t r_v_c = v_r[qx];
+                const uint32_t r_v_h = (r_v_c * 3 + v_r[r_qx_neighbor] + 2) >> 2;
+                const int rf_centered = static_cast<int>((r_h * 3 + r_v_h + 2) >> 2);
+
+                const uint32_t b_c = curr_b[qx];
+                const uint32_t b_h = (b_c * 3 + curr_b[b_qx_neighbor] + 2) >> 2;
+                const uint32_t b_v_c = v_b[qx];
+                const uint32_t b_v_h = (b_v_c * 3 + v_b[b_qx_neighbor] + 2) >> 2;
+                const int bf_centered = static_cast<int>((b_h * 3 + b_v_h + 2) >> 2);
+
+                const int gf = static_cast<int>(curr_g[qx]);
+
+                // Pass 1c: Green-Guided Optical Despilling and chromatic fringe suppression
+                const int qx_prev = qx > 0 ? qx - 1 : qx;
+                const int qx_next = qx + 1 < num_quads ? qx + 1 : qx;
+
+                const int g_left = static_cast<int>(curr_g[qx_prev]);
+                const int g_right = static_cast<int>(curr_g[qx_next]);
+                const int g_up = static_cast<int>(prev_g[qx]);
+                const int g_down = static_cast<int>(next_g[qx]);
+
+                const int grad_g_h = std::abs(g_right - g_left);
+                const int grad_g_v = std::abs(g_down - g_up);
+                const int grad_g = std::max(grad_g_h, grad_g_v);
+
+                int rf_final = rf_centered;
+                int bf_final = bf_centered;
+
+                constexpr int kEdgeMinThreshold = 128; // ~3% contrast threshold in 12-bit linear space
+                if (grad_g > kEdgeMinThreshold) {
+                    const int delta_rg = rf_centered - gf;
+                    const int delta_bg = bf_centered - gf;
+
+                    const int d_rg_left = static_cast<int>(curr_r[qx_prev]) - g_left;
+                    const int d_rg_right = static_cast<int>(curr_r[qx_next]) - g_right;
+                    const int d_rg_up = static_cast<int>(prev_r[qx]) - g_up;
+                    const int d_rg_down = static_cast<int>(next_r[qx]) - g_down;
+
+                    const int d_bg_left = static_cast<int>(curr_b[qx_prev]) - g_left;
+                    const int d_bg_right = static_cast<int>(curr_b[qx_next]) - g_right;
+                    const int d_bg_up = static_cast<int>(prev_b[qx]) - g_up;
+                    const int d_bg_down = static_cast<int>(next_b[qx]) - g_down;
+
+                    const int g_neighbors[4] = { g_left, g_right, g_up, g_down };
+                    const int d_rg_neighbors[4] = { d_rg_left, d_rg_right, d_rg_up, d_rg_down };
+                    const int d_bg_neighbors[4] = { d_bg_left, d_bg_right, d_bg_up, d_bg_down };
+
+                    const int g_max_neighbor = std::max({g_left, g_right, g_up, g_down});
+                    const int g_min_neighbor = std::min({g_left, g_right, g_up, g_down});
+                    const int edge_midpoint = (g_max_neighbor + g_min_neighbor) >> 1;
+
+                    constexpr int kHighlightThreshold = 1200; // ~30% linear sensor saturation
+                    if (g_max_neighbor >= kHighlightThreshold &&
+                        (g_max_neighbor - g_min_neighbor) >= 300 &&
+                        gf < edge_midpoint) {
+                        int dark_min_rg = 4096, dark_max_rg = -4096;
+                        int dark_min_bg = 4096, dark_max_bg = -4096;
+                        int dark_count = 0;
+
+                        for (int i = 0; i < 4; ++i) {
+                            if (g_neighbors[i] <= edge_midpoint) {
+                                dark_min_rg = std::min(dark_min_rg, d_rg_neighbors[i]);
+                                dark_max_rg = std::max(dark_max_rg, d_rg_neighbors[i]);
+                                dark_min_bg = std::min(dark_min_bg, d_bg_neighbors[i]);
+                                dark_max_bg = std::max(dark_max_bg, d_bg_neighbors[i]);
+                                dark_count++;
+                            }
+                        }
+
+                        if (dark_count == 0) {
+                            int best_idx = 0;
+                            int best_diff = std::abs(g_neighbors[0] - gf);
+                            for (int i = 1; i < 4; ++i) {
+                                const int diff = std::abs(g_neighbors[i] - gf);
+                                if (diff < best_diff) {
+                                    best_diff = diff;
+                                    best_idx = i;
+                                }
+                            }
+                            dark_min_rg = d_rg_neighbors[best_idx];
+                            dark_max_rg = d_rg_neighbors[best_idx];
+                            dark_min_bg = d_bg_neighbors[best_idx];
+                            dark_max_bg = d_bg_neighbors[best_idx];
+                        }
+
+                        const int despill_margin = std::max(24, (std::abs(gf - g_min_neighbor) >> 3));
+                        const int filtered_delta_rg = std::clamp(delta_rg, dark_min_rg - despill_margin, dark_max_rg + despill_margin);
+                        const int filtered_delta_bg = std::clamp(delta_bg, dark_min_bg - despill_margin, dark_max_bg + despill_margin);
+
+                        rf_final = std::clamp(gf + filtered_delta_rg, 0, 4096);
+                        bf_final = std::clamp(gf + filtered_delta_bg, 0, 4096);
+                    } else {
+                        const int margin = std::max(48, (grad_g >> 4));
+
+                        const int min_rg = std::min({d_rg_left, d_rg_right, d_rg_up, d_rg_down}) - margin;
+                        const int max_rg = std::max({d_rg_left, d_rg_right, d_rg_up, d_rg_down}) + margin;
+                        const int filtered_delta_rg = std::clamp(delta_rg, min_rg, max_rg);
+
+                        const int min_bg = std::min({d_bg_left, d_bg_right, d_bg_up, d_bg_down}) - margin;
+                        const int max_bg = std::max({d_bg_left, d_bg_right, d_bg_up, d_bg_down}) + margin;
+                        const int filtered_delta_bg = std::clamp(delta_bg, min_bg, max_bg);
+
+                        rf_final = std::clamp(gf + filtered_delta_rg, 0, 4096);
+                        bf_final = std::clamp(gf + filtered_delta_bg, 0, 4096);
+                    }
+                }
+
+                const std::array<int64_t, 3> red_blue_contribution = {
+                    static_cast<int64_t>(camera_to_rec709_q[0]) * rf_final +
+                        static_cast<int64_t>(camera_to_rec709_q[2]) * bf_final,
+                    static_cast<int64_t>(camera_to_rec709_q[3]) * rf_final +
+                        static_cast<int64_t>(camera_to_rec709_q[5]) * bf_final,
+                    static_cast<int64_t>(camera_to_rec709_q[6]) * rf_final +
+                        static_cast<int64_t>(camera_to_rec709_q[8]) * bf_final
+                };
+                const auto channel = [&](int row) -> int {
+                    const int64_t value = red_blue_contribution[row / 3] +
+                        static_cast<int64_t>(camera_to_rec709_q[row + 1]) * gf;
+                    return std::clamp(
+                        static_cast<int>((value + (kMatrixScale >> 1)) / kMatrixScale),
+                        0,
+                        kLinearScale
+                    );
+                };
+                const std::array<uint8_t, 3> rgb = {
+                    rec709_cine_lut[channel(0)],
+                    rec709_cine_lut[channel(3)],
+                    rec709_cine_lut[channel(6)]
+                };
+                const uint8_t y_val = luma(rgb);
+                const size_t quad_idx = static_cast<size_t>(ry) * num_quads + qx;
+                quad_y[quad_idx] = static_cast<uint16_t>(y_val);
+
+                // High-frequency green retention:
+                // Modulate luminance using raw G0 vs G1 intra-cell variation rounded to 8 bits
+                const int g_diff = quad_g_diff[quad_idx];
+                if (std::abs(static_cast<int>(g_diff)) > 4) {
+                    const int base_ch_g = channel(3);
+                    const int delta_ch_g = static_cast<int>(
+                        (static_cast<int64_t>(camera_to_rec709_q[4]) * g_diff + (kMatrixScale >> 1)) / kMatrixScale
+                    );
+                    const int half_delta = (delta_ch_g + (delta_ch_g >= 0 ? 1 : -1)) >> 1;
+                    const int ch_g0 = std::clamp(base_ch_g + half_delta, 0, kLinearScale);
+                    const int ch_g1 = std::clamp(base_ch_g - half_delta, 0, kLinearScale);
+                    const int cine_g0 = rec709_cine_lut[ch_g0];
+                    const int cine_g1 = rec709_cine_lut[ch_g1];
+                    const int delta_luma_green = ((cine_g0 - cine_g1) * 732 + 512) >> 10;
+                    quad_mod_g[quad_idx] = static_cast<int16_t>(
+                        (delta_luma_green + (delta_luma_green >= 0 ? 1 : -1)) >> 1
+                    );
+                } else {
+                    quad_mod_g[quad_idx] = 0;
+                }
+
+                int raw_cb_delta = ((static_cast<int>(rgb[2]) - static_cast<int>(y_val)) * 552) >> 10;
+                int raw_cr_delta = ((static_cast<int>(rgb[0]) - static_cast<int>(y_val)) * 650) >> 10;
+
+                // Highlight Desaturation & Magenta Fringing Roll-off in 8-bit scale
+                const int max_c = std::max({static_cast<int>(rgb[0]), static_cast<int>(rgb[1]), static_cast<int>(rgb[2])});
+                if (max_c > 162 || static_cast<int>(y_val) > 145) {
+                    constexpr int kHighlightKnee = 175;
+                    constexpr int kHighlightMax = 220;
+                    int desat_scale_q8 = 256;
+                    if (static_cast<int>(y_val) > kHighlightKnee) {
+                        const int luma_scale = std::clamp(
+                            ((kHighlightMax - static_cast<int>(y_val)) << 8) / (kHighlightMax - kHighlightKnee),
+                            0,
+                            256
+                        );
+                        desat_scale_q8 = std::min(desat_scale_q8, luma_scale);
+                    }
+
+                    constexpr int kChannelKnee = 205;
+                    constexpr int kChannelMax = 235;
+                    if (max_c > kChannelKnee) {
+                        const int chan_scale = std::clamp(
+                            ((kChannelMax - max_c) << 8) / (kChannelMax - kChannelKnee),
+                            0,
+                            256
+                        );
+                        desat_scale_q8 = std::min(desat_scale_q8, chan_scale);
+                    }
+
+                    if (raw_cb_delta > 0 && raw_cr_delta > 0) {
+                        constexpr int kMagentaLumaKnee = 145;
+                        constexpr int kMagentaLumaMax = 185;
+                        constexpr int kMagentaChanKnee = 162;
+                        constexpr int kMagentaChanMax = 200;
+
+                        int mag_scale_q8 = 256;
+                        if (static_cast<int>(y_val) > kMagentaLumaKnee) {
+                            const int luma_mag = std::clamp(
+                                ((kMagentaLumaMax - static_cast<int>(y_val)) << 8) / (kMagentaLumaMax - kMagentaLumaKnee),
+                                0,
+                                256
+                            );
+                            mag_scale_q8 = std::min(mag_scale_q8, luma_mag);
+                        }
+                        if (max_c > kMagentaChanKnee) {
+                            const int chan_mag = std::clamp(
+                                ((kMagentaChanMax - max_c) << 8) / (kMagentaChanMax - kMagentaChanKnee),
+                                0,
+                                256
+                            );
+                            mag_scale_q8 = std::min(mag_scale_q8, chan_mag);
+                        }
+                        const int final_mag_scale = (desat_scale_q8 * mag_scale_q8 + 128) >> 8;
+                        raw_cb_delta = (raw_cb_delta * final_mag_scale + 128) >> 8;
+                        raw_cr_delta = (raw_cr_delta * final_mag_scale + 128) >> 8;
+                    } else if (desat_scale_q8 < 256) {
+                        raw_cb_delta = (raw_cb_delta * desat_scale_q8 + 128) >> 8;
+                        raw_cr_delta = (raw_cr_delta * desat_scale_q8 + 128) >> 8;
+                    }
+                }
+
+                const uint8_t cb = limited_chroma(raw_cb_delta);
+                const uint8_t cr = limited_chroma(raw_cr_delta);
+                const size_t uv = static_cast<size_t>(y / 2) * static_cast<size_t>(output_row_stride_bytes) + (qx * 2);
+                uv_plane[uv] = cb;
+                uv_plane[uv + 1] = cr;
+            }
+        }
+
+        // Pass 2: continuous 2D spatial bilinear interpolation with native green modulation.
+        for (int ry = 0; ry < num_row_pairs; ++ry) {
+            const int y = first_y + ry * 2;
+            const int prev_ry = ry > 0 ? ry - 1 : ry;
+            const int next_ry = ry + 1 < num_row_pairs ? ry + 1 : ry;
+            const auto* curr_row = &quad_y[static_cast<size_t>(ry) * num_quads];
+            const auto* prev_row = &quad_y[static_cast<size_t>(prev_ry) * num_quads];
+            const auto* next_row = &quad_y[static_cast<size_t>(next_ry) * num_quads];
+            const auto* curr_mod = &quad_mod_g[static_cast<size_t>(ry) * num_quads];
+
+            const size_t top = static_cast<size_t>(y) * static_cast<size_t>(output_row_stride_bytes);
+            const size_t bottom = top + static_cast<size_t>(output_row_stride_bytes);
+
+            for (int qx = 0; qx < num_quads; ++qx) {
+                const int prev_qx = qx > 0 ? qx - 1 : qx;
+                const int next_qx = qx + 1 < num_quads ? qx + 1 : qx;
+
+                const uint32_t c = curr_row[qx];
+                const uint32_t h_left = (c * 3 + curr_row[prev_qx] + 2) >> 2;
+                const uint32_t h_right = (c * 3 + curr_row[next_qx] + 2) >> 2;
+
+                const uint32_t up_left = (static_cast<uint32_t>(prev_row[qx]) * 3 + prev_row[prev_qx] + 2) >> 2;
+                const uint32_t up_right = (static_cast<uint32_t>(prev_row[qx]) * 3 + prev_row[next_qx] + 2) >> 2;
+                const uint32_t down_left = (static_cast<uint32_t>(next_row[qx]) * 3 + next_row[prev_qx] + 2) >> 2;
+                const uint32_t down_right = (static_cast<uint32_t>(next_row[qx]) * 3 + next_row[next_qx] + 2) >> 2;
+
+                const int y00_base = static_cast<int>((h_left * 3 + up_left + 2) >> 2);
+                const int y01_base = static_cast<int>((h_right * 3 + up_right + 2) >> 2);
+                const int y10_base = static_cast<int>((h_left * 3 + down_left + 2) >> 2);
+                const int y11_base = static_cast<int>((h_right * 3 + down_right + 2) >> 2);
+
+                const int mod_g = curr_mod[qx];
+                int y00 = y00_base;
+                int y01 = y01_base;
+                int y10 = y10_base;
+                int y11 = y11_base;
+
+                // Modulate native green sites based on CFA mosaic
+                if (cfa == 1 || cfa == 2) {
+                    // GRBG (1) / GBRG (2, Samsung GN1): G0 at (0,0), G1 at (1,1)
+                    y00 = std::clamp(y00_base + mod_g, 16, 254);
+                    y11 = std::clamp(y11_base - mod_g, 16, 254);
+                } else {
+                    // RGGB (0) / BGGR (3): G0 at (0,1), G1 at (1,0)
+                    y01 = std::clamp(y01_base + mod_g, 16, 254);
+                    y10 = std::clamp(y10_base - mod_g, 16, 254);
+                }
+
+                const size_t px = static_cast<size_t>(qx * 2);
+                y_plane[top + px] = static_cast<uint8_t>(y00);
+                y_plane[top + px + 1] = static_cast<uint8_t>(y01);
+                y_plane[bottom + px] = static_cast<uint8_t>(y10);
+                y_plane[bottom + px + 1] = static_cast<uint8_t>(y11);
+            }
+        }
+    };
+
+    if (static_cast<int64_t>(output_width) * output_height >= 1920LL * 1080LL) {
+        const int first_split_y = (output_height / 3) & ~1;
+        const int second_split_y = ((output_height * 2) / 3) & ~1;
+        if (auto* workers = p010_row_workers()) {
+            workers->run(
+                convert_rows,
+                {{{0, first_split_y}, {first_split_y, second_split_y}}},
+                {second_split_y, output_height}
+            );
+        } else {
+            convert_rows(0, output_height);
+        }
+    } else {
+        convert_rows(0, output_height);
+    }
+
+    // Initialize every padding sample that is actually allocated (QG-8.4).
+    constexpr uint8_t limited_black = 16;
+    constexpr uint8_t neutral_chroma = 128;
+    for (int y = 0; y < output_height; ++y) {
+        const size_t start = static_cast<size_t>(y) * static_cast<size_t>(output_row_stride_bytes) + output_width;
+        const size_t end = std::min(
+            static_cast<size_t>(y + 1) * static_cast<size_t>(output_row_stride_bytes),
+            y_capacity_bytes
+        );
+        if (start < end) std::fill(y_plane + start, y_plane + end, limited_black);
+    }
+    for (int y = output_height; y < output_slice_height; ++y) {
+        const size_t start = static_cast<size_t>(y) * static_cast<size_t>(output_row_stride_bytes);
+        const size_t end = std::min(start + static_cast<size_t>(output_row_stride_bytes), y_capacity_bytes);
+        if (start < end) std::fill(y_plane + start, y_plane + end, limited_black);
+    }
+    for (int y = 0; y < output_height / 2; ++y) {
+        const size_t start = static_cast<size_t>(y) * static_cast<size_t>(output_row_stride_bytes) + output_width;
+        const size_t end = std::min(
+            static_cast<size_t>(y + 1) * static_cast<size_t>(output_row_stride_bytes),
+            uv_capacity_bytes
+        );
+        if (start < end) std::fill(uv_plane + start, uv_plane + end, neutral_chroma);
+    }
+    for (int y = output_height / 2; ; ++y) {
+        const size_t start = static_cast<size_t>(y) * static_cast<size_t>(output_row_stride_bytes);
+        if (start >= uv_capacity_bytes) break;
+        const size_t end = std::min(start + static_cast<size_t>(output_row_stride_bytes), uv_capacity_bytes);
         std::fill(uv_plane + start, uv_plane + end, neutral_chroma);
     }
 

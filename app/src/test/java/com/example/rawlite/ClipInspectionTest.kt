@@ -122,9 +122,33 @@ class ClipInspectionTest {
 
         val summary = requireNotNull(Pure10Clip.inspect(directory))
 
-        assertEquals("PURE 10", summary.captureFormat)
+        assertEquals("10-BIT", summary.captureFormat)
         assertEquals(48, summary.frameCount)
         assertEquals(48, summary.timelineFrameCount)
+        assertTrue(summary.finalized)
+    }
+
+    @Test
+    fun eightBitInspection_usesRecordedFrameCountWithoutDecoderDependency() {
+        val directory = temporaryFolder.newFolder("RawLite_Test_8Bit")
+        directory.resolve("clip.json").writeText(
+            """{
+                "format":"rawlite-8bit",
+                "video_file":"eight_bit.mp4",
+                "width":1920,
+                "height":1080,
+                "frame_rate":30,
+                "encoded_frames":60,
+                "finalized":true
+            }""".trimIndent()
+        )
+        directory.resolve("eight_bit.mp4").writeBytes(byteArrayOf(1))
+
+        val summary = requireNotNull(Pure10Clip.inspect(directory))
+
+        assertEquals("8-BIT", summary.captureFormat)
+        assertEquals(60, summary.frameCount)
+        assertEquals(60, summary.timelineFrameCount)
         assertTrue(summary.finalized)
     }
 
