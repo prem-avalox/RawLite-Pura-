@@ -1085,7 +1085,7 @@ class MainActivity : Activity() {
             letterSpacing = 0.075f
         })
         panel.addView(TextView(this).apply {
-            text = "RAWLITE · ${Build.MODEL.uppercase(Locale.US)}"
+            text = "PURA · ${Build.MODEL.uppercase(Locale.US)}"
             setTextColor(RawLiteDesign.TEXT_MUTED)
             textSize = 9f
             typeface = cameraTypeface(Typeface.NORMAL)
@@ -1179,7 +1179,7 @@ class MainActivity : Activity() {
         panel.addView(settingsSectionHeading("ALMACENAMIENTO", "ESTADO ACTUAL"))
         val movieDir = getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: filesDir
         val availableBytes = runCatching { StatFs(movieDir.absolutePath).availableBytes }.getOrDefault(0L)
-        panel.addView(settingsInformationRow("UBICACIÓN", "DCIM / RawLite"))
+        panel.addView(settingsInformationRow("UBICACIÓN", "DCIM / Pura"))
         panel.addView(settingsDivider())
         panel.addView(settingsInformationRow("DISPONIBLE", formatStorageBytes(availableBytes)))
         panel.addView(settingsDivider())

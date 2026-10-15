@@ -45,7 +45,7 @@ fi
 
 running_pid="$("${adb[@]}" shell pidof "${PRODUCTION_PACKAGE}" 2>/dev/null | tr -d '\r' || true)"
 if [[ -n "${running_pid}" ]]; then
-    echo "ERROR: RawLite está ejecutándose (PID ${running_pid}). Ciérrala antes de instalar."
+    echo "ERROR: Pura está ejecutándose (PID ${running_pid}). Ciérrala antes de instalar."
     echo "No se forzó su cierre para evitar interrumpir una grabación."
     exit 1
 fi
@@ -84,7 +84,7 @@ if [[ "${remote_count}" -gt 0 ]]; then
     } > "${final_backup}/BACKUP_VERIFIED.txt"
     echo "Respaldo verificado: ${final_backup}"
 else
-    echo "No hay tomas en el almacenamiento privado de RawLite que respaldar."
+    echo "No hay tomas en el almacenamiento privado de Pura que respaldar."
 fi
 
 echo "Instalando sin desinstalar ni borrar datos..."
@@ -94,4 +94,4 @@ if [[ -z "${installed_version}" ]]; then
     echo "ERROR: ADB terminó, pero el paquete de producción no aparece instalado."
     exit 1
 fi
-echo "RawLite ${installed_version} instalada de forma segura en ${device_serial}."
+echo "Pura ${installed_version} instalada de forma segura en ${device_serial}."
