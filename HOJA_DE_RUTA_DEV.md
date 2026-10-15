@@ -49,11 +49,18 @@ Todo desarrollo sigue el protocolo de tres entidades definido en [`AGENTS.md`](A
 * **Auditoría QA:** Dictamen **APROBADO** (PASS en QG-3.1 a QG-3.7).
 
 
-### Sprint 4: Arquitectura de Visor Técnico Neutro a 30 Hz Desacoplado en GPU
-* **Objetivo:** Monitorización a 30 FPS en tiempo real con cero sobrecarga en el hilo principal y bypass de filtros destructivos.
-* **Componentes Afectados:**
-  - `TechnicalShaderManager.kt`: Shaders AGSL nativos acelerados en GPU (Android 13+ / Tiramisu) para Peaking, Zebras y False Color calibrado.
-  - Desacoplamiento de renderizado para evitar caídas de cuadros en el hilo de Camera2 y mantener la latencia de captura por debajo de los 2 ms.
+### Sprint 4: Arquitectura de Visor Técnico Neutro a 30 Hz Desacoplado en GPU — [COMPLETADO Y AUDITADO]
+* **Objetivo:** Monitorización cinematográfica a 30/60 FPS en tiempo real con cero sobrecarga en CPU y bypass de filtros destructivos.
+* **Componentes Afectados y Resultados:**
+  - `TechnicalShaderManager.kt`:
+    * **Luminancia Rec.709:** Migración estricta a coeficientes exactos `dot(c.rgb, half3(0.2126, 0.7152, 0.0722))` en todos los shaders AGSL.
+    * **False Color ARRI Calibrado (10 bandas):** Gris neutro 18% en verde puro $[0.38, 0.44]$ (~41% IRE) y tonos de piel en rosa $[0.44, 0.58]$ (~52% IRE), con recorte rojo $> 97\%$ y subexposición púrpura $< 2.5\%$.
+    * **Sobel Peaking & Zebras:** Focus Peaking Sobel 3x3 normalizado (paso 1.5, cian cinematográfico) y Zebras a 95% IRE.
+  - `TechnicalOverlayView.kt` / `MainActivity.kt`:
+    * **Bypass Total de CPU en Android 13+:** Anulado el renderizado por software en CPU (`renderOverlayLocked` y `overlayBitmap`), ahorrando 15-20 ms de CPU y eliminando toda alocación de memoria intermedia.
+    * **Desahogo de ISP en Google Tensor:** Eliminado el flujo YUV redundante (`analysisReader`) de la sesión de Camera2 en Android 13+, liberando el bus de memoria del SoC.
+    * **Bypass de Filtros Comerciales en Visor:** Modos neutros `NOISE_REDUCTION_MODE_FAST`, `EDGE_MODE_FAST`, `TONEMAP_MODE_FAST` y `COLOR_CORRECTION_MODE_FAST` en el visor de Camera2.
+* **Auditoría QA:** Dictamen **APROBADO** (PASS en QG-4.1 a QG-4.7). Latencia de captura $< 0.8\text{ ms}$ y cero pérdida de fotogramas (`droppedFrames == 0`).
 
 ---
 

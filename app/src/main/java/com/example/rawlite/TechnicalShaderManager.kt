@@ -13,7 +13,7 @@ internal object TechnicalShaderManager {
 
         half luma(float2 coord) {
             half4 c = image.eval(coord);
-            return dot(c.rgb, half3(0.299, 0.587, 0.114));
+            return dot(c.rgb, half3(0.2126, 0.7152, 0.0722));
         }
 
         half4 main(float2 fragCoord) {
@@ -45,7 +45,7 @@ internal object TechnicalShaderManager {
 
         half4 main(float2 fragCoord) {
             half4 src = image.eval(fragCoord);
-            half luma = dot(src.rgb, half3(0.299, 0.587, 0.114));
+            half luma = dot(src.rgb, half3(0.2126, 0.7152, 0.0722));
 
             if (luma >= 0.95) {
                 if (mod(fragCoord.x + fragCoord.y, 16.0) < 8.0) {
@@ -63,15 +63,15 @@ internal object TechnicalShaderManager {
 
         half4 main(float2 fragCoord) {
             half4 src = image.eval(fragCoord);
-            half luma = dot(src.rgb, half3(0.299, 0.587, 0.114));
+            half luma = dot(src.rgb, half3(0.2126, 0.7152, 0.0722));
 
             if (luma < 0.025) return half4(0.69, 0.00, 1.00, 1.0);
             if (luma < 0.080) return half4(0.12, 0.30, 1.00, 1.0);
             if (luma < 0.160) return half4(0.00, 0.66, 1.00, 1.0);
-            if (luma < 0.350) return half4(0.44, 0.44, 0.44, 1.0);
-            if (luma < 0.450) return half4(0.09, 0.79, 0.48, 1.0);
+            if (luma < 0.380) return half4(0.44, 0.44, 0.44, 1.0);
+            if (luma < 0.440) return half4(0.09, 0.79, 0.48, 1.0);
             if (luma < 0.580) return half4(1.00, 0.44, 0.66, 1.0);
-            if (luma < 0.720) return half4(0.66, 0.66, 0.66, 1.0);
+            if (luma < 0.780) return half4(0.66, 0.66, 0.66, 1.0);
             if (luma < 0.880) return half4(1.00, 0.88, 0.27, 1.0);
             if (luma < 0.970) return half4(1.00, 0.48, 0.09, 1.0);
             return half4(1.00, 0.12, 0.12, 1.0);

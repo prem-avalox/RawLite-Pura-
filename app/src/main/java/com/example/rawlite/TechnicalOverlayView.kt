@@ -9,6 +9,7 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.media.Image
+import android.os.Build
 import android.os.PowerManager
 import android.view.View
 import kotlin.math.abs
@@ -132,7 +133,9 @@ internal class TechnicalOverlayView(context: Context) : View(context) {
             analysisHeight = outputHeight
             luma = nextLuma
             previewHistogram = nextHistogram
-            if (mode != TechnicalOverlayMode.HISTOGRAM) renderOverlayLocked()
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+                if (mode != TechnicalOverlayMode.HISTOGRAM) renderOverlayLocked()
+            }
         }
         postInvalidateOnAnimation()
     }
@@ -157,7 +160,7 @@ internal class TechnicalOverlayView(context: Context) : View(context) {
         if (mode != TechnicalOverlayMode.OFF) {
             if (thermalStatus >= PowerManager.THERMAL_STATUS_SEVERE) {
                 drawThermalSuppressed(canvas)
-            } else {
+            } else if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
                 synchronized(lock) {
                     overlayBitmap?.let { bitmap ->
                         buildDisplayMatrixLocked(bitmap.width, bitmap.height)

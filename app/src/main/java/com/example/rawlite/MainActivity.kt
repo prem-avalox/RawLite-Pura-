@@ -2415,7 +2415,9 @@ class MainActivity : Activity() {
         option.physicalId?.let { previewOutput.setPhysicalCameraId(it) }
         outputs += previewOutput
 
-        if (allowAnalysis && technicalMode != TechnicalOverlayMode.OFF) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU &&
+            allowAnalysis && technicalMode != TechnicalOverlayMode.OFF
+        ) {
             val analysisSize = currentAnalysisSize()
             Log.d(TAG, "Technical analysis ${analysisSize.width}x${analysisSize.height}")
             analysisReader = createAnalysisReader(analysisSize)
@@ -3188,6 +3190,16 @@ class MainActivity : Activity() {
     }
 
     private fun applyRec709PreviewProcessing(builder: CaptureRequest.Builder) {
+        put(
+            builder,
+            CaptureRequest.NOISE_REDUCTION_MODE,
+            CameraCharacteristics.NOISE_REDUCTION_MODE_FAST
+        )
+        put(
+            builder,
+            CaptureRequest.EDGE_MODE,
+            CameraCharacteristics.EDGE_MODE_FAST
+        )
         put(builder, CaptureRequest.TONEMAP_MODE, CameraCharacteristics.TONEMAP_MODE_FAST)
         put(
             builder,
