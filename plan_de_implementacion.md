@@ -163,9 +163,32 @@ $$\mathbf{4 \rightarrow 6 \rightarrow 8 \rightarrow 10 \rightarrow 12 \rightarro
 
 ---
 
-## 5. Instrucciones para Continuar en un Nuevo Chat
+---
+
+## 5. Historial de Hitos Recientes Implementados y Validados
+
+### A. Rebranding a Pura y Modo 8-BIT Cine Gamma (15 de octubre de 2026)
+* **Nombre de la App:** Actualizado formalmente de RawLite a **Pura** en `strings.xml`, HUD de cabecera y scripts de instalación segura.
+* **Modo 8-BIT (Rec.709 con Curva S Cine Gamma):**
+  - Pipeline C++ de alto rendimiento `raw10ToNv12Rec709` implementado en [`app/src/main/cpp/rawlite_writer.cpp`](file:///Users/martin/RawLite/app/src/main/cpp/rawlite_writer.cpp).
+  - Codificador de hardware AVC High a 45 Mb/s (`EightBitRec709Encoder.kt`).
+  - Estandarización de nomenclatura en la UI: `RAW`, `10-BIT`, `8-BIT`.
+
+### B. Corrección Geométrica Canónica del Visor (Zero Anamorphic Stretch)
+* **Diagnóstico:** El visor presentaba una deformación anamórfica de casi 4:1 debido a la transposición incorrecta de búferes heredada de `Camera2Basic` en actividades landscape y a una compensación invertida de rotación en portrait.
+* **Solución Implementada:**
+  - Derivación matricial canónica en [`CaptureMath.calculatePreviewTransform`](file:///Users/martin/RawLite/app/src/main/java/com/example/rawlite/CaptureMath.kt).
+  - Eliminación de `setRectToRect(..., FILL)` y sustitución por escalado afín uniforme $\text{fitScale}$ y rotación basada estrictamente en la rotación de pantalla (`displayRotationDegrees`).
+  - Sincronización subpíxel de `frameRect` con [`TechnicalOverlayView.kt`](file:///Users/martin/RawLite/app/src/main/java/com/example/rawlite/TechnicalOverlayView.kt).
+  - Cobertura de tests unitarios multidimensionales en [`CaptureMathTest.kt`](file:///Users/martin/RawLite/app/src/test/java/com/example/rawlite/CaptureMathTest.kt).
+  - **Resultado en Mano:** Validado físicamente en el Pixel 6 por el Product Owner ("ya se ve genial").
+
+---
+
+## 6. Instrucciones para Continuar en un Nuevo Chat
 
 Si decides abrir un chat nuevo para tener el contexto limpio:
 1. Pega la siguiente instrucción inicial:
-   > *"Hola, revisa el archivo `plan_de_implementacion.md` en la raíz de mi proyecto `/Users/martin/RawLite` y continúa con la ejecución de los puntos allí descritos."*
-2. El agente leerá este archivo estructurado y procederá de inmediato con la implementación en C++ (`rawlite_writer.cpp`) y la actualización visual en `design/rawlite-ui-language/`.
+   > *"Hola, revisa el archivo `plan_de_implementacion.md` y `AGENTS.md` en la raíz de mi proyecto `/Users/martin/RawLite` y continúa con la ejecución de los puntos allí descritos."*
+2. El agente leerá este archivo estructurado y procederá de inmediato con las siguientes prioridades definidas por el Product Owner.
+
