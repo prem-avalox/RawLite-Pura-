@@ -5415,25 +5415,21 @@ class MainActivity : Activity() {
             ?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
         val frontFacing = currentCharacteristics()?.get(CameraCharacteristics.LENS_FACING) ==
             CameraCharacteristics.LENS_FACING_FRONT
-        val sign = if (frontFacing) 1 else -1
-        val relativeDegrees = (sensorDegrees - displayDegrees * sign + 360) % 360
-        val matrix = Matrix()
-        val viewRect = RectF(0f, 0f, viewWidth.toFloat(), viewHeight.toFloat())
-        val halfWidth = viewRect.centerX()
-        val halfHeight = viewRect.centerY()
-        if (displayRotation == Surface.ROTATION_90 || displayRotation == Surface.ROTATION_270) {
-            val bufferRect = RectF(0f, 0f, bufferSize.height.toFloat(), bufferSize.width.toFloat())
-            bufferRect.offset(halfWidth - bufferRect.centerX(), halfHeight - bufferRect.centerY())
-            matrix.setRectToRect(viewRect, bufferRect, Matrix.ScaleToFit.FILL)
-            val scale = min(
-                viewHeight.toFloat() / bufferSize.height,
-                viewWidth.toFloat() / bufferSize.width
-            )
-            matrix.postScale(scale, scale, halfWidth, halfHeight)
-            val quarterTurn = if (displayRotation == Surface.ROTATION_90) -90f else 90f
-            matrix.postRotate(quarterTurn, halfWidth, halfHeight)
-        } else if (displayRotation == Surface.ROTATION_180) {
-            matrix.postRotate(180f, halfWidth, halfHeight)
+        val relativeDegrees = CaptureMath.rotationDegrees(
+            sensorDegrees = sensorDegrees,
+            displayRotationDegrees = displayDegrees,
+            frontFacing = frontFacing
+        )
+        val transform = CaptureMath.calculatePreviewTransform(
+            viewWidth = viewWidth,
+            viewHeight = viewHeight,
+            bufferWidth = bufferSize.width,
+            bufferHeight = bufferSize.height,
+            relativeDegrees = relativeDegrees
+        )
+        val matrix = Matrix().apply {
+            setScale(transform.scaleX, transform.scaleY, transform.centerX, transform.centerY)
+            postRotate(transform.rotationDegrees, transform.centerX, transform.centerY)
         }
         preview.setTransform(matrix)
         if (::technicalOverlay.isInitialized) {

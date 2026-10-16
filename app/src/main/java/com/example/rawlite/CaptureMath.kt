@@ -32,6 +32,21 @@ internal object CaptureMath {
         val bottom: Float get() = top + height
     }
 
+    data class PreviewTransformResult(
+        val scaleX: Float,
+        val scaleY: Float,
+        val centerX: Float,
+        val centerY: Float,
+        val rotationDegrees: Float,
+        val visibleWidth: Float,
+        val visibleHeight: Float,
+        val left: Float,
+        val top: Float
+    ) {
+        val right: Float get() = left + visibleWidth
+        val bottom: Float get() = top + visibleHeight
+    }
+
     fun calculateCropRegion(
         activeWidth: Int,
         activeHeight: Int,
@@ -74,6 +89,49 @@ internal object CaptureMath {
         val left = (containerWidth - fittedWidth) / 2f
         val top = (containerHeight - fittedHeight) / 2f
         return FitResult(left, top, fittedWidth, fittedHeight, scale)
+    }
+
+    fun calculatePreviewTransform(
+        viewWidth: Int,
+        viewHeight: Int,
+        bufferWidth: Int,
+        bufferHeight: Int,
+        relativeDegrees: Int
+    ): PreviewTransformResult {
+        if (viewWidth <= 0 || viewHeight <= 0 || bufferWidth <= 0 || bufferHeight <= 0) {
+            return PreviewTransformResult(1f, 1f, 0f, 0f, 0f, 0f, 0f, 0f, 0f)
+        }
+        val normalizedRotation = normalizedDegrees(relativeDegrees)
+        val quarterTurn = normalizedRotation % 180 != 0
+        val displayContentWidth = if (quarterTurn) bufferHeight.toFloat() else bufferWidth.toFloat()
+        val displayContentHeight = if (quarterTurn) bufferWidth.toFloat() else bufferHeight.toFloat()
+
+        val fitScale = min(
+            viewWidth.toFloat() / displayContentWidth,
+            viewHeight.toFloat() / displayContentHeight
+        )
+        val visibleWidth = displayContentWidth * fitScale
+        val visibleHeight = displayContentHeight * fitScale
+
+        val scaleX = if (quarterTurn) visibleHeight / viewWidth else visibleWidth / viewWidth
+        val scaleY = if (quarterTurn) visibleWidth / viewHeight else visibleHeight / viewHeight
+        val centerX = viewWidth / 2f
+        val centerY = viewHeight / 2f
+
+        val left = (viewWidth - visibleWidth) / 2f
+        val top = (viewHeight - visibleHeight) / 2f
+
+        return PreviewTransformResult(
+            scaleX = scaleX,
+            scaleY = scaleY,
+            centerX = centerX,
+            centerY = centerY,
+            rotationDegrees = normalizedRotation.toFloat(),
+            visibleWidth = visibleWidth,
+            visibleHeight = visibleHeight,
+            left = left,
+            top = top
+        )
     }
 
     fun rotationDegrees(
