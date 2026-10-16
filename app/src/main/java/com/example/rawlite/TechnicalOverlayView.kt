@@ -96,14 +96,26 @@ internal class TechnicalOverlayView(context: Context) : View(context) {
         visibility = if (mode == TechnicalOverlayMode.OFF && !thirdsGridEnabled && !histogramEnabled) GONE else VISIBLE
     }
 
-    fun setGeometry(rotationDegrees: Int, videoWidth: Int = 0, videoHeight: Int = 0) {
+    fun setGeometry(
+        rotationDegrees: Int,
+        videoWidth: Int = 0,
+        videoHeight: Int = 0,
+        frameLeft: Float = -1f,
+        frameTop: Float = -1f,
+        frameRight: Float = -1f,
+        frameBottom: Float = -1f
+    ) {
         synchronized(lock) {
             this.rotationDegrees = ((rotationDegrees % 360) + 360) % 360
             if (videoWidth > 0 && videoHeight > 0) {
                 this.videoWidth = videoWidth
                 this.videoHeight = videoHeight
             }
-            updateFrameRectLocked()
+            if (frameLeft >= 0f && frameRight > frameLeft && frameTop >= 0f && frameBottom > frameTop) {
+                frameRect.set(frameLeft, frameTop, frameRight, frameBottom)
+            } else {
+                updateFrameRectLocked()
+            }
         }
         invalidate()
     }

@@ -5425,7 +5425,7 @@ class MainActivity : Activity() {
             viewHeight = viewHeight,
             bufferWidth = bufferSize.width,
             bufferHeight = bufferSize.height,
-            relativeDegrees = relativeDegrees
+            displayRotationDegrees = displayDegrees
         )
         val matrix = Matrix().apply {
             setScale(transform.scaleX, transform.scaleY, transform.centerX, transform.centerY)
@@ -5433,7 +5433,15 @@ class MainActivity : Activity() {
         }
         preview.setTransform(matrix)
         if (::technicalOverlay.isInitialized) {
-            technicalOverlay.setGeometry(relativeDegrees, bufferSize.width, bufferSize.height)
+            technicalOverlay.setGeometry(
+                rotationDegrees = relativeDegrees,
+                videoWidth = bufferSize.width,
+                videoHeight = bufferSize.height,
+                frameLeft = transform.left,
+                frameTop = transform.top,
+                frameRight = transform.right,
+                frameBottom = transform.bottom
+            )
         }
     }
 

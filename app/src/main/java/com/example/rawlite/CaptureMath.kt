@@ -96,28 +96,56 @@ internal object CaptureMath {
         viewHeight: Int,
         bufferWidth: Int,
         bufferHeight: Int,
-        relativeDegrees: Int
+        displayRotationDegrees: Int
     ): PreviewTransformResult {
         if (viewWidth <= 0 || viewHeight <= 0 || bufferWidth <= 0 || bufferHeight <= 0) {
             return PreviewTransformResult(1f, 1f, 0f, 0f, 0f, 0f, 0f, 0f, 0f)
         }
-        val normalizedRotation = normalizedDegrees(relativeDegrees)
-        val quarterTurn = normalizedRotation % 180 != 0
-        val displayContentWidth = if (quarterTurn) bufferHeight.toFloat() else bufferWidth.toFloat()
-        val displayContentHeight = if (quarterTurn) bufferWidth.toFloat() else bufferHeight.toFloat()
+        val normalizedDisplay = normalizedDegrees(displayRotationDegrees)
+        val isLandscape = normalizedDisplay == 90 || normalizedDisplay == 270
+
+        val bufLong = max(bufferWidth, bufferHeight).toFloat()
+        val bufShort = min(bufferWidth, bufferHeight).toFloat()
+
+        val contentWidth = if (isLandscape) bufLong else bufShort
+        val contentHeight = if (isLandscape) bufShort else bufLong
 
         val fitScale = min(
-            viewWidth.toFloat() / displayContentWidth,
-            viewHeight.toFloat() / displayContentHeight
+            viewWidth.toFloat() / contentWidth,
+            viewHeight.toFloat() / contentHeight
         )
-        val visibleWidth = displayContentWidth * fitScale
-        val visibleHeight = displayContentHeight * fitScale
+        val visibleWidth = contentWidth * fitScale
+        val visibleHeight = contentHeight * fitScale
 
-        val scaleX = if (quarterTurn) visibleHeight / viewWidth else visibleWidth / viewWidth
-        val scaleY = if (quarterTurn) visibleWidth / viewHeight else visibleHeight / viewHeight
+        val scaleX: Float
+        val scaleY: Float
+        val rotation: Float
+
+        when (normalizedDisplay) {
+            90 -> {
+                rotation = -90f
+                scaleX = visibleHeight / viewWidth
+                scaleY = visibleWidth / viewHeight
+            }
+            270 -> {
+                rotation = 90f
+                scaleX = visibleHeight / viewWidth
+                scaleY = visibleWidth / viewHeight
+            }
+            180 -> {
+                rotation = 180f
+                scaleX = visibleWidth / viewWidth
+                scaleY = visibleHeight / viewHeight
+            }
+            else -> {
+                rotation = 0f
+                scaleX = visibleWidth / viewWidth
+                scaleY = visibleHeight / viewHeight
+            }
+        }
+
         val centerX = viewWidth / 2f
         val centerY = viewHeight / 2f
-
         val left = (viewWidth - visibleWidth) / 2f
         val top = (viewHeight - visibleHeight) / 2f
 
@@ -126,7 +154,7 @@ internal object CaptureMath {
             scaleY = scaleY,
             centerX = centerX,
             centerY = centerY,
-            rotationDegrees = normalizedRotation.toFloat(),
+            rotationDegrees = rotation,
             visibleWidth = visibleWidth,
             visibleHeight = visibleHeight,
             left = left,

@@ -222,13 +222,13 @@ class CaptureMathTest {
             viewHeight = 1080,
             bufferWidth = 1920,
             bufferHeight = 1080,
-            relativeDegrees = 0
+            displayRotationDegrees = 90
         )
-        assertEquals(0.8f, result.scaleX, 0.0001f)
-        assertEquals(1.0f, result.scaleY, 0.0001f)
+        assertEquals(1080f / 2400f, result.scaleX, 0.0001f)
+        assertEquals(1920f / 1080f, result.scaleY, 0.0001f)
         assertEquals(1200f, result.centerX, 0.0001f)
         assertEquals(540f, result.centerY, 0.0001f)
-        assertEquals(0f, result.rotationDegrees, 0.0001f)
+        assertEquals(-90f, result.rotationDegrees, 0.0001f)
         assertEquals(1920f, result.visibleWidth, 0.0001f)
         assertEquals(1080f, result.visibleHeight, 0.0001f)
         assertEquals(240f, result.left, 0.0001f)
@@ -244,13 +244,13 @@ class CaptureMathTest {
             viewHeight = 1080,
             bufferWidth = 1280,
             bufferHeight = 960,
-            relativeDegrees = 0
+            displayRotationDegrees = 90
         )
-        assertEquals(0.6f, result.scaleX, 0.0001f)
-        assertEquals(1.0f, result.scaleY, 0.0001f)
+        assertEquals(1080f / 2400f, result.scaleX, 0.0001f)
+        assertEquals(1440f / 1080f, result.scaleY, 0.0001f)
         assertEquals(1200f, result.centerX, 0.0001f)
         assertEquals(540f, result.centerY, 0.0001f)
-        assertEquals(0f, result.rotationDegrees, 0.0001f)
+        assertEquals(-90f, result.rotationDegrees, 0.0001f)
         assertEquals(1440f, result.visibleWidth, 0.0001f)
         assertEquals(1080f, result.visibleHeight, 0.0001f)
         assertEquals(480f, result.left, 0.0001f)
@@ -260,39 +260,59 @@ class CaptureMathTest {
     }
 
     @Test
-    fun calculatePreviewTransform_portrait_16x9_rotates90AndPreservesExactAspectRatio() {
+    fun calculatePreviewTransform_portrait_16x9_noRotation_preservesExactAspectRatio() {
         val result = CaptureMath.calculatePreviewTransform(
             viewWidth = 1080,
-            viewHeight = 2400,
-            bufferWidth = 1920,
-            bufferHeight = 1080,
-            relativeDegrees = 90
+            viewHeight = 1440,
+            bufferWidth = 1280,
+            bufferHeight = 720,
+            displayRotationDegrees = 0
         )
-        // In portrait with 90° rotation:
-        // quarterTurn = true
-        // scaleX = visibleHeight / viewWidth = 1920 / 1080 = 1.77778
-        // scaleY = visibleWidth / viewHeight = 1080 / 2400 = 0.45
-        assertEquals(1920f / 1080f, result.scaleX, 0.0001f)
-        assertEquals(1080f / 2400f, result.scaleY, 0.0001f)
-        assertEquals(90f, result.rotationDegrees, 0.0001f)
-        assertEquals(1080f, result.visibleWidth, 0.0001f)
-        assertEquals(1920f, result.visibleHeight, 0.0001f)
-        assertEquals(0f, result.left, 0.0001f)
-        assertEquals(240f, result.top, 0.0001f)
+        // In portrait: TextureView is natively portrait, zero rotation.
+        // Content: width 720, height 1280.
+        // fitScale = min(1080/720, 1440/1280) = 1.125
+        // visibleWidth = 810, visibleHeight = 1440.
+        assertEquals(810f / 1080f, result.scaleX, 0.0001f)
+        assertEquals(1.0f, result.scaleY, 0.0001f)
+        assertEquals(0f, result.rotationDegrees, 0.0001f)
+        assertEquals(810f, result.visibleWidth, 0.0001f)
+        assertEquals(1440f, result.visibleHeight, 0.0001f)
+        assertEquals(135f, result.left, 0.0001f)
+        assertEquals(0f, result.top, 0.0001f)
     }
 
     @Test
-    fun calculatePreviewTransform_reverseLandscape_16x9_rotates180() {
+    fun calculatePreviewTransform_portrait_4x3_noRotation_preservesExactAspectRatio() {
+        val result = CaptureMath.calculatePreviewTransform(
+            viewWidth = 1080,
+            viewHeight = 1440,
+            bufferWidth = 1280,
+            bufferHeight = 960,
+            displayRotationDegrees = 0
+        )
+        // Content: width 960, height 1280 (3:4 ratio).
+        // fitScale = 1.125. visibleWidth = 1080, visibleHeight = 1440.
+        assertEquals(1.0f, result.scaleX, 0.0001f)
+        assertEquals(1.0f, result.scaleY, 0.0001f)
+        assertEquals(0f, result.rotationDegrees, 0.0001f)
+        assertEquals(1080f, result.visibleWidth, 0.0001f)
+        assertEquals(1440f, result.visibleHeight, 0.0001f)
+        assertEquals(0f, result.left, 0.0001f)
+        assertEquals(0f, result.top, 0.0001f)
+    }
+
+    @Test
+    fun calculatePreviewTransform_reverseLandscape_16x9_rotates90() {
         val result = CaptureMath.calculatePreviewTransform(
             viewWidth = 2400,
             viewHeight = 1080,
             bufferWidth = 1920,
             bufferHeight = 1080,
-            relativeDegrees = 180
+            displayRotationDegrees = 270
         )
-        assertEquals(0.8f, result.scaleX, 0.0001f)
-        assertEquals(1.0f, result.scaleY, 0.0001f)
-        assertEquals(180f, result.rotationDegrees, 0.0001f)
+        assertEquals(1080f / 2400f, result.scaleX, 0.0001f)
+        assertEquals(1920f / 1080f, result.scaleY, 0.0001f)
+        assertEquals(90f, result.rotationDegrees, 0.0001f)
         assertEquals(1920f, result.visibleWidth, 0.0001f)
         assertEquals(1080f, result.visibleHeight, 0.0001f)
         assertEquals(240f, result.left, 0.0001f)
@@ -300,20 +320,40 @@ class CaptureMathTest {
     }
 
     @Test
+    fun calculatePreviewTransform_reversePortrait_16x9_rotates180() {
+        val result = CaptureMath.calculatePreviewTransform(
+            viewWidth = 1080,
+            viewHeight = 1440,
+            bufferWidth = 1280,
+            bufferHeight = 720,
+            displayRotationDegrees = 180
+        )
+        assertEquals(810f / 1080f, result.scaleX, 0.0001f)
+        assertEquals(1.0f, result.scaleY, 0.0001f)
+        assertEquals(180f, result.rotationDegrees, 0.0001f)
+        assertEquals(810f, result.visibleWidth, 0.0001f)
+        assertEquals(1440f, result.visibleHeight, 0.0001f)
+        assertEquals(135f, result.left, 0.0001f)
+        assertEquals(0f, result.top, 0.0001f)
+    }
+
+    @Test
     fun calculatePreviewTransform_zeroAnamorphicDistortion() {
-        // Test aspect ratios: 16:9, 4:3, across multiple angles: 0, 90, 180, 270
+        // Test aspect ratios: 16:9, 4:3, across all 4 display rotations: 0, 90, 180, 270
         val testConfigs = listOf(
             Triple(2400, 1080, SizePair(1920, 1080)),
             Triple(2400, 1080, SizePair(1280, 960)),
-            Triple(1080, 2400, SizePair(1920, 1080)),
-            Triple(1080, 2400, SizePair(1280, 960))
+            Triple(1080, 1440, SizePair(1280, 720)),
+            Triple(1080, 1440, SizePair(1280, 960))
         )
         val rotations = listOf(0, 90, 180, 270)
         for ((vW, vH, buf) in testConfigs) {
             for (rot in rotations) {
                 val result = CaptureMath.calculatePreviewTransform(vW, vH, buf.w, buf.h, rot)
-                val quarter = rot % 180 != 0
-                val expectedAspect = if (quarter) buf.h.toFloat() / buf.w.toFloat() else buf.w.toFloat() / buf.h.toFloat()
+                val isLandscape = rot == 90 || rot == 270
+                val bLong = maxOf(buf.w, buf.h).toFloat()
+                val bShort = minOf(buf.w, buf.h).toFloat()
+                val expectedAspect = if (isLandscape) bLong / bShort else bShort / bLong
                 val actualAspect = result.visibleWidth / result.visibleHeight
                 assertEquals(
                     "Deformation at v=${vW}x$vH buf=${buf.w}x${buf.h} rot=$rot",
